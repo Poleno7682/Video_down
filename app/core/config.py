@@ -30,6 +30,9 @@ class Settings(BaseSettings):
     download_dir: Path = Field(default=Path("/app/downloads"), alias="DOWNLOAD_DIR")
     cookie_dir: Path = Field(default=Path("/app/cookies"), alias="COOKIE_DIR")
     log_dir: Path = Field(default=Path("/app/logs"), alias="LOG_DIR")
+    # Подпись под каждым отправленным видео. Читается из файла при каждой
+    # отправке, чтобы текст можно было менять без пересборки/перезапуска.
+    caption_file: Path = Field(default=Path("/app/caption.txt"), alias="CAPTION_FILE")
 
     allowed_users: str = Field(default="", alias="ALLOWED_USERS")
     admin_users: str = Field(default="", alias="ADMIN_USERS")
@@ -52,10 +55,15 @@ class Settings(BaseSettings):
     cache_ttl_hours: int = Field(default=168, alias="CACHE_TTL_HOURS")
     delete_local_file_after_telegram_cache: bool = Field(default=True, alias="DELETE_LOCAL_FILE_AFTER_TELEGRAM_CACHE")
 
+    # Admin broadcast mode auto-expires after this many seconds of inactivity.
+    # Each broadcast message resets the timer (implemented via Redis key TTL).
+    broadcast_timeout_seconds: int = Field(default=300, alias="BROADCAST_TIMEOUT_SECONDS")
+
     use_cookies: bool = Field(default=True, alias="USE_COOKIES")
     facebook_cookies_file: Path = Field(default=Path("/app/cookies/facebook.txt"), alias="FACEBOOK_COOKIES_FILE")
     instagram_cookies_file: Path = Field(default=Path("/app/cookies/instagram.txt"), alias="INSTAGRAM_COOKIES_FILE")
     tiktok_cookies_file: Path = Field(default=Path("/app/cookies/tiktok.txt"), alias="TIKTOK_COOKIES_FILE")
+    youtube_cookies_file: Path = Field(default=Path("/app/cookies/youtube.txt"), alias="YOUTUBE_COOKIES_FILE")
 
     app_host: str = Field(default="0.0.0.0", alias="APP_HOST")
     app_port: int = Field(default=8080, alias="APP_PORT")

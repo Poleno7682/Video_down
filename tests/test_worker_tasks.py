@@ -7,35 +7,49 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from app.db.models import DownloadRequest, DownloadStatus, TelegramFileType
-from app.worker.tasks import _build_caption, _handle_task_failure, process_download_request
+from app.utils.caption import DEFAULT_CAPTION, get_caption
+from app.worker.tasks import (
+    _COOKIE_FAILURE,
+    _GENERIC_FAILURE,
+    _is_cookie_error,
+    _materialize_user_cookies,
+    _handle_task_failure,
+    process_download_request,
+)
 
 
 # ---------------------------------------------------------------------------
-# _build_caption
+# get_caption
 # ---------------------------------------------------------------------------
 
-class TestBuildCaption:
-    def test_no_title(self):
-        assert _build_caption(None, "720p") == "Готово ✅ | 720p"
+class TestGetCaption:
+    def _settings(self, path):
+        s = MagicMock()
+        s.caption_file = path
+        return s
 
-    def test_with_title(self):
-        result = _build_caption("My Video", "1080p")
-        assert "My Video" in result
-        assert "Готово ✅ | 1080p" in result
+    def test_reads_text_from_file(self, tmp_path):
+        f = tmp_path / "caption.txt"
+        f.write_text("Спасибо за использование @fbtt_download_bot", encoding="utf-8")
+        assert get_caption(self._settings(f)) == "Спасибо за использование @fbtt_download_bot"
 
-    def test_long_title_truncated(self):
-        # 2000 chars guaranteed to exceed max_title for any quality string
-        result = _build_caption("A" * 2000, "720p")
-        assert len(result) <= 1024
-        assert "…" in result
+    def test_strips_whitespace(self, tmp_path):
+        f = tmp_path / "caption.txt"
+        f.write_text("\n  Привет  \n", encoding="utf-8")
+        assert get_caption(self._settings(f)) == "Привет"
 
-    def test_short_title_not_truncated(self):
-        result = _build_caption("Short", "720p")
-        assert "Short" in result
-        assert "…" not in result
+    def test_missing_file_falls_back_to_default(self, tmp_path):
+        assert get_caption(self._settings(tmp_path / "nope.txt")) == DEFAULT_CAPTION
 
-    def test_empty_string_title(self):
-        assert _build_caption("", "audio") == "Готово ✅ | audio"
+    def test_empty_file_falls_back_to_default(self, tmp_path):
+        f = tmp_path / "caption.txt"
+        f.write_text("   \n", encoding="utf-8")
+        assert get_caption(self._settings(f)) == DEFAULT_CAPTION
+
+    def test_truncated_to_telegram_limit(self, tmp_path):
+        f = tmp_path / "caption.txt"
+        f.write_text("A" * 2000, encoding="utf-8")
+        assert len(get_caption(self._settings(f))) == 1024
 
 
 # ---------------------------------------------------------------------------
@@ -73,6 +87,58 @@ class TestHandleTaskFailure:
         with patch("app.worker.tasks.edit_status"):
             _handle_task_failure(repo, 5, req, RuntimeError("bad network"))
         assert repo.update_request_status.call_args[1]["error"] == "RuntimeError: bad network"
+
+    def test_cookie_error_shows_cookie_message(self):
+        repo = MagicMock()
+        req = MagicMock()
+        req.video_id = None
+        exc = RuntimeError("ERROR: Sign in to confirm you're not a bot. Use --cookies")
+        with patch("app.worker.tasks.edit_status") as mock_edit:
+            _handle_task_failure(repo, 1, req, exc)
+        assert mock_edit.call_args[0][2] == _COOKIE_FAILURE
+
+    def test_generic_error_shows_generic_message(self):
+        repo = MagicMock()
+        req = MagicMock()
+        req.video_id = None
+        with patch("app.worker.tasks.edit_status") as mock_edit:
+            _handle_task_failure(repo, 1, req, RuntimeError("disk full"))
+        assert mock_edit.call_args[0][2] == _GENERIC_FAILURE
+
+
+class TestIsCookieError:
+    def test_sign_in_marker(self):
+        assert _is_cookie_error(RuntimeError("Sign in to confirm you're not a bot")) is True
+
+    def test_cookies_flag_marker(self):
+        assert _is_cookie_error(RuntimeError("Use --cookies for authentication")) is True
+
+    def test_unrelated_error(self):
+        assert _is_cookie_error(RuntimeError("Network unreachable")) is False
+
+
+class TestMaterializeUserCookies:
+    def test_unknown_platform_returns_none(self):
+        repo = MagicMock()
+        assert _materialize_user_cookies(repo, 1, "https://vimeo.com/1") is None
+        repo.get_user_cookies.assert_not_called()
+
+    def test_no_cookies_returns_none(self):
+        repo = MagicMock()
+        repo.get_user_cookies.return_value = None
+        assert _materialize_user_cookies(repo, 1, "https://youtube.com/watch?v=x") is None
+
+    def test_writes_temp_file(self):
+        repo = MagicMock()
+        repo.get_user_cookies.return_value = "# Netscape HTTP Cookie File\n"
+        path = _materialize_user_cookies(repo, 1, "https://youtu.be/x")
+        try:
+            assert path is not None
+            assert path.exists()
+            assert path.read_text(encoding="utf-8") == "# Netscape HTTP Cookie File\n"
+        finally:
+            if path is not None:
+                path.unlink(missing_ok=True)
 
 
 # ---------------------------------------------------------------------------
@@ -124,6 +190,8 @@ def _task_ctx(req=None, settings=None, ready_video=None,
     repo.get_request.return_value = req
     repo.get_ready_video.return_value = ready_video
 
+    repo.get_user_cookies.return_value = None
+
     limiter = MagicMock()
     limiter.acquire_user_download_slot.return_value = slot_acquired
     limiter.acquire_video_lock.return_value = lock_acquired
@@ -138,6 +206,7 @@ def _task_ctx(req=None, settings=None, ready_video=None,
          patch("app.worker.tasks.get_session", return_value=session), \
          patch("app.worker.tasks.Repository", return_value=repo), \
          patch("app.worker.tasks.edit_status"), \
+         patch("app.worker.tasks.delete_status"), \
          patch("app.worker.tasks.send_cached"), \
          patch("app.worker.tasks.send_file", return_value=("fid", "uid", TelegramFileType.video)), \
          patch("app.worker.tasks.download_video", return_value=dl_result):
@@ -218,6 +287,24 @@ class TestProcessDownloadRequest:
         with _task_ctx(download_result=(fake_file, {"title": "Vid"})) as (repo, _):
             process_download_request.apply(args=[1])
         repo.mark_video_ready.assert_called_once()
+
+    def test_user_cookies_passed_to_download(self):
+        fake_file = MagicMock(spec=Path)
+        fake_file.stat.return_value.st_size = 5 * 1024 * 1024
+        captured = {}
+
+        def capture(url, quality, settings, progress_hook=None, cookie_file=None):
+            captured["cookie_file"] = cookie_file
+            return fake_file, {}
+
+        with _task_ctx() as (repo, _):
+            repo.get_user_cookies.return_value = "# Netscape HTTP Cookie File\n"
+            with patch("app.worker.tasks.download_video", side_effect=capture):
+                process_download_request.apply(args=[1])
+
+        assert captured["cookie_file"] is not None
+        # Temp cookie file must be cleaned up afterwards.
+        assert not captured["cookie_file"].exists()
 
     def test_successful_download_marks_done(self):
         fake_file = MagicMock(spec=Path)
@@ -308,7 +395,7 @@ class TestProgressHook:
         """Run the task once with a download_video mock that captures progress_hook."""
         captured = {}
 
-        def capture(url, quality, settings, progress_hook=None):
+        def capture(url, quality, settings, progress_hook=None, cookie_file=None):
             if progress_hook:
                 captured["hook"] = progress_hook
             f = MagicMock(spec=Path)

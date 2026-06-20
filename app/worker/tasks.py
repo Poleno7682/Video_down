@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import logging
+import tempfile
 import time
+from pathlib import Path
 
 from app.core.config import get_settings
 from app.db.models import DownloadStatus
@@ -9,23 +11,65 @@ from app.db.repository import Repository
 from app.db.session import get_session
 from app.services.rate_limiter import RateLimiter
 from app.services.redis_client import get_redis
+from app.utils.caption import get_caption
+from app.utils.platforms import detect_platform
 from app.worker.celery_app import celery_app
 from app.worker.downloader import download_video
-from app.worker.telegram_sender import edit_status, send_cached, send_file
+from app.worker.telegram_sender import delete_status, edit_status, send_cached, send_file
 
 logger = logging.getLogger(__name__)
 
-_MAX_CAPTION = 1024
+# Substrings that indicate yt-dlp needs (fresh) cookies / hit an anti-bot wall.
+_COOKIE_ERROR_MARKERS = (
+    "sign in to confirm",
+    "confirm you're not a bot",
+    "confirm you are not a bot",
+    "--cookies",
+    "cookies-from-browser",
+    "login required",
+    "private video",
+    "this video is private",
+)
+
+_GENERIC_FAILURE = (
+    "❌ Не получилось скачать видео. Возможные причины: приватное видео, "
+    "устаревшие cookies, блокировка VPS или изменение защиты сайта."
+)
+
+_COOKIE_FAILURE = (
+    "❌ YouTube требует ваши cookies (защита от ботов).\n\n"
+    "Экспортируйте cookies в формате Netscape (cookies.txt) из браузера, где вы вошли "
+    "в аккаунт, и пришлите файл боту под именем <code>youtube.txt</code>.\n"
+    "Подробнее: /cookies"
+)
 
 
-def _build_caption(title: str | None, quality: str) -> str:
-    suffix = f"Готово ✅ | {quality}"
-    if not title:
-        return suffix
-    max_title = _MAX_CAPTION - len(suffix) - 2  # 2 for "\n\n"
-    if len(title) > max_title:
-        title = title[: max_title - 1] + "…"
-    return f"{title}\n\n{suffix}"
+def _is_cookie_error(exc: Exception) -> bool:
+    text = str(exc).lower()
+    return any(marker in text for marker in _COOKIE_ERROR_MARKERS)
+
+
+def _materialize_user_cookies(repo: Repository, user_id: int, url: str) -> Path | None:
+    """Write the user's stored cookies for the URL's platform to a temp file.
+
+    Returns the path (caller must delete it) or None if the user has no cookies
+    for this platform — in which case the worker falls back to the global file.
+    """
+    platform = detect_platform(url)
+    if not platform:
+        return None
+    cookies_text = repo.get_user_cookies(user_id, platform)
+    if not cookies_text:
+        return None
+    fd, name = tempfile.mkstemp(prefix=f"cookies_{user_id}_{platform}_", suffix=".txt")
+    path = Path(name)
+    try:
+        with open(fd, "w", encoding="utf-8") as f:
+            f.write(cookies_text)
+    except OSError:
+        path.unlink(missing_ok=True)
+        return None
+    return path
 
 
 def _handle_task_failure(
@@ -39,12 +83,12 @@ def _handle_task_failure(
     repo.update_request_status(request_id, DownloadStatus.failed, error=error_msg, finished=True)
     if req.video_id:
         repo.mark_video_failed(req.video_id, error_msg)
-    edit_status(
-        req.chat_id,
-        req.status_message_id,
-        "❌ Не получилось скачать видео. Возможные причины: приватное видео, "
-        "устаревшие cookies, блокировка VPS или изменение защиты сайта.",
-    )
+
+    if _is_cookie_error(exc):
+        message = _COOKIE_FAILURE
+    else:
+        message = _GENERIC_FAILURE
+    edit_status(req.chat_id, req.status_message_id, message)
 
 
 @celery_app.task(bind=True, autoretry_for=(ConnectionError,), retry_backoff=True, retry_kwargs={"max_retries": 3})
@@ -76,12 +120,13 @@ def process_download_request(self, request_id: int) -> None:
             return
 
         video_lock_acquired = False
+        user_cookie_path: Path | None = None
         try:
             ready_video = repo.get_ready_video(req.url_hash, req.quality)
             if ready_video and ready_video.telegram_file_id and ready_video.telegram_file_type:
                 repo.update_request_status(request_id, DownloadStatus.sending)
                 edit_status(req.chat_id, req.status_message_id, "⚡ Нашёл готовый Telegram file_id. Отправляю...")
-                send_cached(req.chat_id, ready_video.telegram_file_id, ready_video.telegram_file_type, "⚡ Готово из Telegram-кэша")
+                send_cached(req.chat_id, ready_video.telegram_file_id, ready_video.telegram_file_type, get_caption(settings))
                 repo.update_request_status(request_id, DownloadStatus.done, finished=True)
                 edit_status(req.chat_id, req.status_message_id, "✅ Отправлено из кэша.")
                 return
@@ -125,7 +170,14 @@ def process_download_request(self, request_id: int) -> None:
                     percent = min(100, downloaded / total * 100)
                     edit_status(req.chat_id, req.status_message_id, f"⬇️ Скачано {percent:.1f}%")
 
-            file_path, info = download_video(req.normalized_url, req.quality, settings, progress_hook=progress_hook)
+            user_cookie_path = _materialize_user_cookies(repo, req.user_id, req.normalized_url)
+            file_path, info = download_video(
+                req.normalized_url,
+                req.quality,
+                settings,
+                progress_hook=progress_hook,
+                cookie_file=user_cookie_path,
+            )
 
             file_size_bytes = file_path.stat().st_size
             size_mb = file_size_bytes / (1024 * 1024)
@@ -149,7 +201,7 @@ def process_download_request(self, request_id: int) -> None:
             edit_status(req.chat_id, req.status_message_id, f"✅ Скачано {size_mb:.1f} MB. Отправляю...")
 
             title = info.get("title") if isinstance(info, dict) else None
-            caption = _build_caption(title, req.quality)
+            caption = get_caption(settings)
 
             file_id, file_unique_id, file_type = send_file(req.chat_id, file_path, caption)
 
@@ -165,7 +217,7 @@ def process_download_request(self, request_id: int) -> None:
                 )
 
             repo.update_request_status(request_id, DownloadStatus.done, finished=True)
-            edit_status(req.chat_id, req.status_message_id, "✅ Готово. Telegram file_id сохранён в PostgreSQL.")
+            delete_status(req.chat_id, req.status_message_id)
 
             if settings.delete_local_file_after_telegram_cache:
                 file_path.unlink(missing_ok=True)
@@ -176,6 +228,8 @@ def process_download_request(self, request_id: int) -> None:
             raise
 
         finally:
+            if user_cookie_path is not None:
+                user_cookie_path.unlink(missing_ok=True)
             limiter.release_user_download_slot(req.user_id)
             if video_lock_acquired:
                 limiter.release_video_lock(req.url_hash, req.quality)

@@ -101,9 +101,23 @@ def test_cookie_file_tiktok():
     assert result is s.tiktok_cookies_file
 
 
+def test_cookie_file_youtube():
+    s = _make_settings()
+    s.youtube_cookies_file.exists.return_value = True
+    result = cookie_file_for_url("https://youtube.com/watch?v=abc", s)
+    assert result is s.youtube_cookies_file
+
+
+def test_cookie_file_youtu_be():
+    s = _make_settings()
+    s.youtube_cookies_file.exists.return_value = True
+    result = cookie_file_for_url("https://youtu.be/abc", s)
+    assert result is s.youtube_cookies_file
+
+
 def test_cookie_file_unknown_domain():
     s = _make_settings()
-    assert cookie_file_for_url("https://youtube.com/watch?v=abc", s) is None
+    assert cookie_file_for_url("https://vimeo.com/123456", s) is None
 
 
 # ---------------------------------------------------------------------------

@@ -21,10 +21,12 @@ _USER_COMMANDS = [
     BotCommand(command="start",   description="Справка по боту"),
     BotCommand(command="quality", description="Выбрать качество видео"),
     BotCommand(command="status",  description="Статус очереди"),
+    BotCommand(command="cookies", description="Личные cookies для скачивания"),
 ]
 
 _ADMIN_COMMANDS = _USER_COMMANDS + [
     BotCommand(command="admin",      description="⚙️ Панель администратора"),
+    BotCommand(command="broadcast",  description="📢 Рассылка всем пользователям"),
     BotCommand(command="adduser",    description="Добавить доверенного пользователя"),
     BotCommand(command="removeuser", description="Удалить пользователя из доверенных"),
     BotCommand(command="listusers",  description="Список доверенных пользователей"),

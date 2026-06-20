@@ -5,9 +5,10 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from app.db.models import DownloadRequest, DownloadStatus, TelegramFileType, User, Video
+from app.db.models import DownloadRequest, DownloadStatus, TelegramFileType, User, UserCookies, Video
 from app.db.repository import (
     ACTIVE_STATUSES,
+    CookieRepository,
     Repository,
     RequestRepository,
     UserRepository,
@@ -104,6 +105,49 @@ class TestUserRepository:
     def test_unban_if_expired_user_not_found(self):
         self.session.get.return_value = None
         assert self.repo.unban_if_expired(99) is False
+
+    def test_get_all_user_ids(self):
+        self.session.execute.return_value.scalars.return_value.all.return_value = [1, 2, 3]
+        assert self.repo.get_all_user_ids() == [1, 2, 3]
+
+
+# ---------------------------------------------------------------------------
+# CookieRepository
+# ---------------------------------------------------------------------------
+
+class TestCookieRepository:
+    def setup_method(self):
+        self.session = _make_session()
+        self.repo = CookieRepository(self.session)
+
+    def test_set_user_cookies_commits(self):
+        self.repo.set_user_cookies(1, "youtube", "# Netscape HTTP Cookie File\n")
+        self.session.execute.assert_called_once()
+        self.session.commit.assert_called_once()
+
+    def test_get_user_cookies_returns_text(self):
+        self.session.execute.return_value.scalar_one_or_none.return_value = "cookie-text"
+        assert self.repo.get_user_cookies(1, "youtube") == "cookie-text"
+
+    def test_get_user_cookies_none(self):
+        self.session.execute.return_value.scalar_one_or_none.return_value = None
+        assert self.repo.get_user_cookies(1, "youtube") is None
+
+    def test_delete_user_cookies_found(self):
+        cookie = UserCookies(id=1, user_id=1, platform="youtube", cookies_text="x")
+        self.session.execute.return_value.scalar_one_or_none.return_value = cookie
+        assert self.repo.delete_user_cookies(1, "youtube") is True
+        self.session.delete.assert_called_once_with(cookie)
+        self.session.commit.assert_called_once()
+
+    def test_delete_user_cookies_not_found(self):
+        self.session.execute.return_value.scalar_one_or_none.return_value = None
+        assert self.repo.delete_user_cookies(1, "youtube") is False
+        self.session.delete.assert_not_called()
+
+    def test_list_user_platforms(self):
+        self.session.execute.return_value.scalars.return_value.all.return_value = ["youtube", "tiktok"]
+        assert self.repo.list_user_platforms(1) == ["youtube", "tiktok"]
 
 
 # ---------------------------------------------------------------------------

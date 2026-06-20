@@ -134,6 +134,16 @@ async def _edit_status_async(chat_id: int, message_id: int | None, text: str) ->
         logger.debug("Could not edit status message %s in chat %s: %s", message_id, chat_id, exc)
 
 
+async def _delete_status_async(chat_id: int, message_id: int | None) -> None:
+    if not message_id:
+        return
+    bot = _get_bot()
+    try:
+        await bot.delete_message(chat_id=chat_id, message_id=message_id)
+    except Exception as exc:
+        logger.debug("Could not delete status message %s in chat %s: %s", message_id, chat_id, exc)
+
+
 def send_file(chat_id: int, file_path: Path, caption: str) -> tuple[str, str | None, TelegramFileType]:
     return _run(_send_file_async(chat_id, file_path, caption))
 
@@ -144,3 +154,7 @@ def send_cached(chat_id: int, file_id: str, file_type: TelegramFileType, caption
 
 def edit_status(chat_id: int, message_id: int | None, text: str) -> None:
     _run(_edit_status_async(chat_id, message_id, text), timeout=15)
+
+
+def delete_status(chat_id: int, message_id: int | None) -> None:
+    _run(_delete_status_async(chat_id, message_id), timeout=15)

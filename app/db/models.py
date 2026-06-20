@@ -52,6 +52,29 @@ class User(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow, nullable=False)
 
 
+class UserCookies(Base):
+    """Per-user yt-dlp cookies (Netscape format) for a given platform.
+
+    Stored in the DB so that the bot (writer) and the worker (reader) — which run
+    in separate containers — share the same source of truth without file mounts.
+    The worker materializes a temporary cookiefile at download time.
+    """
+
+    __tablename__ = "user_cookies"
+    __table_args__ = (
+        UniqueConstraint("user_id", "platform", name="uq_user_cookies_user_platform"),
+        Index("idx_user_cookies_user", "user_id"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    platform: Mapped[str] = mapped_column(String(32), nullable=False)
+    cookies_text: Mapped[str] = mapped_column(Text, nullable=False)
+
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow, nullable=False)
+
+
 class Video(Base):
     __tablename__ = "videos"
     __table_args__ = (

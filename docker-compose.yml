@@ -67,6 +67,9 @@ services:
       - ./downloads:/app/downloads
       - ./cookies:/app/cookies:ro
       - ./logs:/app/logs
+      # Подпись под видео: правьте ./caption.txt и перезапуск не нужен —
+      # текст перечитывается при каждой отправке.
+      - ./caption.txt:/app/caption.txt:ro
     networks:
       - internal
 

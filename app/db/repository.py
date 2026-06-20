@@ -6,7 +6,7 @@ from sqlalchemy import func, select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.orm import Session
 
-from app.db.models import DownloadRequest, DownloadStatus, TelegramFileType, User, Video
+from app.db.models import DownloadRequest, DownloadStatus, TelegramFileType, User, UserCookies, Video
 from app.db.utils import utcnow
 
 # Single source of truth for "request is still in flight" states.
@@ -57,6 +57,59 @@ class UserRepository:
             self.session.commit()
             return True
         return False
+
+    def get_all_user_ids(self) -> list[int]:
+        """Every user that ever interacted with the bot — used for broadcasts."""
+        return list(self.session.execute(select(User.id)).scalars().all())
+
+
+class CookieRepository:
+    """Manages per-user yt-dlp cookies persistence."""
+
+    def __init__(self, session: Session) -> None:
+        self.session = session
+
+    def set_user_cookies(self, user_id: int, platform: str, cookies_text: str) -> None:
+        stmt = (
+            insert(UserCookies)
+            .values(
+                user_id=user_id,
+                platform=platform,
+                cookies_text=cookies_text,
+                created_at=utcnow(),
+                updated_at=utcnow(),
+            )
+            .on_conflict_do_update(
+                constraint="uq_user_cookies_user_platform",
+                set_={"cookies_text": cookies_text, "updated_at": utcnow()},
+            )
+        )
+        self.session.execute(stmt)
+        self.session.commit()
+
+    def get_user_cookies(self, user_id: int, platform: str) -> str | None:
+        stmt = select(UserCookies.cookies_text).where(
+            UserCookies.user_id == user_id,
+            UserCookies.platform == platform,
+        )
+        return self.session.execute(stmt).scalar_one_or_none()
+
+    def delete_user_cookies(self, user_id: int, platform: str) -> bool:
+        cookie = self.session.execute(
+            select(UserCookies).where(
+                UserCookies.user_id == user_id,
+                UserCookies.platform == platform,
+            )
+        ).scalar_one_or_none()
+        if not cookie:
+            return False
+        self.session.delete(cookie)
+        self.session.commit()
+        return True
+
+    def list_user_platforms(self, user_id: int) -> list[str]:
+        stmt = select(UserCookies.platform).where(UserCookies.user_id == user_id)
+        return list(self.session.execute(stmt).scalars().all())
 
 
 class VideoRepository:
@@ -240,7 +293,7 @@ class RequestRepository:
         return int(self.session.execute(stmt).scalar_one()) > 0
 
 
-class Repository(UserRepository, VideoRepository, RequestRepository):
+class Repository(UserRepository, CookieRepository, VideoRepository, RequestRepository):
     """Unified facade over all domain repositories — preserves existing call sites."""
 
     def __init__(self, session: Session) -> None:

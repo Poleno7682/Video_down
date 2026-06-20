@@ -110,24 +110,27 @@ def test_check_access_public_bot():
 async def test_send_cached_file_video():
     message = MagicMock()
     message.answer_video = AsyncMock()
-    await send_cached_file(message, "fid", "video")
-    message.answer_video.assert_awaited_once_with("fid", caption="⚡ Готово из Telegram-кэша")
+    with patch("app.bot.router.get_caption", return_value="CAP"):
+        await send_cached_file(message, "fid", "video")
+    message.answer_video.assert_awaited_once_with("fid", caption="CAP")
 
 
 @pytest.mark.asyncio
 async def test_send_cached_file_audio():
     message = MagicMock()
     message.answer_audio = AsyncMock()
-    await send_cached_file(message, "fid", "audio")
-    message.answer_audio.assert_awaited_once_with("fid", caption="⚡ Готово из Telegram-кэша")
+    with patch("app.bot.router.get_caption", return_value="CAP"):
+        await send_cached_file(message, "fid", "audio")
+    message.answer_audio.assert_awaited_once_with("fid", caption="CAP")
 
 
 @pytest.mark.asyncio
 async def test_send_cached_file_document():
     message = MagicMock()
     message.answer_document = AsyncMock()
-    await send_cached_file(message, "fid", "document")
-    message.answer_document.assert_awaited_once_with("fid", caption="⚡ Готово из Telegram-кэша")
+    with patch("app.bot.router.get_caption", return_value="CAP"):
+        await send_cached_file(message, "fid", "document")
+    message.answer_document.assert_awaited_once_with("fid", caption="CAP")
 
 
 # ---------------------------------------------------------------------------
@@ -200,8 +203,13 @@ def _make_session(repo):
 async def test_start_handler():
     from app.bot.router import start
     message = _make_message()
-    await start(message)
+    repo = MagicMock()
+    session = _make_session(repo)
+    with patch("app.bot.router.get_session", return_value=session), \
+         patch("app.bot.router.Repository", return_value=repo):
+        await start(message)
     message.answer.assert_awaited_once_with(HELP_TEXT)
+    repo.upsert_user.assert_called_once()
 
 
 # ---------------------------------------------------------------------------
@@ -978,3 +986,211 @@ async def test_list_trusted_users_non_admin_ignored():
     with patch("app.bot.router.get_settings", return_value=settings):
         await list_trusted_users(message)
     message.answer.assert_not_awaited()
+
+
+# ---------------------------------------------------------------------------
+# Cookies upload
+# ---------------------------------------------------------------------------
+
+def _make_doc_message(file_name, file_size=100, user_id=1):
+    msg = _make_message(user_id=user_id, text=None)
+    msg.document = MagicMock()
+    msg.document.file_name = file_name
+    msg.document.file_size = file_size
+    return msg
+
+
+@pytest.mark.asyncio
+async def test_upload_cookies_valid_youtube():
+    import io
+    from app.bot.router import upload_cookies
+
+    message = _make_doc_message("youtube.txt")
+    bot = MagicMock()
+    bot.download = AsyncMock(return_value=io.BytesIO(b"# Netscape HTTP Cookie File\n.youtube.com\tTRUE\t/\tTRUE\t0\tx\ty\n"))
+    repo = MagicMock()
+    session = _make_session(repo)
+    settings = _make_settings()
+    redis = _make_redis_mock()
+
+    with patch("app.bot.router.get_settings", return_value=settings), \
+         patch("app.bot.router.get_redis", return_value=redis), \
+         patch("app.bot.router.get_session", return_value=session), \
+         patch("app.bot.router.Repository", return_value=repo):
+        await upload_cookies(message, bot)
+
+    repo.set_user_cookies.assert_called_once()
+    assert repo.set_user_cookies.call_args[0][1] == "youtube"
+    assert "✅" in message.answer.call_args[0][0]
+
+
+@pytest.mark.asyncio
+async def test_upload_cookies_unknown_filename():
+    from app.bot.router import upload_cookies
+
+    message = _make_doc_message("random.txt")
+    bot = MagicMock()
+    bot.download = AsyncMock()
+    repo = MagicMock()
+    session = _make_session(repo)
+    settings = _make_settings()
+    redis = _make_redis_mock()
+
+    with patch("app.bot.router.get_settings", return_value=settings), \
+         patch("app.bot.router.get_redis", return_value=redis), \
+         patch("app.bot.router.get_session", return_value=session), \
+         patch("app.bot.router.Repository", return_value=repo):
+        await upload_cookies(message, bot)
+
+    repo.set_user_cookies.assert_not_called()
+    bot.download.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_upload_cookies_invalid_format_rejected():
+    import io
+    from app.bot.router import upload_cookies
+
+    message = _make_doc_message("youtube.txt")
+    bot = MagicMock()
+    bot.download = AsyncMock(return_value=io.BytesIO(b"this is not cookies"))
+    repo = MagicMock()
+    session = _make_session(repo)
+    settings = _make_settings()
+    redis = _make_redis_mock()
+
+    with patch("app.bot.router.get_settings", return_value=settings), \
+         patch("app.bot.router.get_redis", return_value=redis), \
+         patch("app.bot.router.get_session", return_value=session), \
+         patch("app.bot.router.Repository", return_value=repo):
+        await upload_cookies(message, bot)
+
+    repo.set_user_cookies.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Broadcast
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_broadcast_filter_requires_admin_and_mode():
+    from app.bot.router import BroadcastModeFilter
+
+    message = _make_message(user_id=1)
+    settings = _make_settings(admin_user_ids={1})
+    redis = _make_redis_mock()
+    redis.exists.return_value = 1
+    with patch("app.bot.router.get_settings", return_value=settings), \
+         patch("app.bot.router.get_redis", return_value=redis):
+        assert await BroadcastModeFilter()(message) is True
+
+    settings2 = _make_settings(admin_user_ids=set())
+    with patch("app.bot.router.get_settings", return_value=settings2), \
+         patch("app.bot.router.get_redis", return_value=redis):
+        assert await BroadcastModeFilter()(message) is False
+
+
+@pytest.mark.asyncio
+async def test_broadcast_to_all_text_uses_copy_message():
+    from app.bot.router import _broadcast_to_all
+
+    source = _make_message(user_id=1, text="Привет")
+    source.html_text = "Привет"
+    bot = MagicMock()
+    bot.copy_message = AsyncMock()
+    bot.send_message = AsyncMock()
+    repo = MagicMock()
+    repo.get_all_user_ids.return_value = [10, 20]
+    session = _make_session(repo)
+
+    with patch("app.bot.router.get_session", return_value=session), \
+         patch("app.bot.router.Repository", return_value=repo), \
+         patch("app.bot.router.asyncio.sleep", new=AsyncMock()):
+        ok, failed, total = await _broadcast_to_all(bot, source)
+
+    assert (ok, failed, total) == (2, 0, 2)
+    assert bot.copy_message.await_count == 2
+    bot.send_message.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_broadcast_to_all_text_with_buttons_uses_send_message():
+    from app.bot.router import _broadcast_to_all
+
+    source = _make_message(user_id=1, text="Hi")
+    source.html_text = "Hi\n---\nOpen | https://example.com"
+    bot = MagicMock()
+    bot.copy_message = AsyncMock()
+    bot.send_message = AsyncMock()
+    repo = MagicMock()
+    repo.get_all_user_ids.return_value = [10]
+    session = _make_session(repo)
+
+    with patch("app.bot.router.get_session", return_value=session), \
+         patch("app.bot.router.Repository", return_value=repo), \
+         patch("app.bot.router.asyncio.sleep", new=AsyncMock()):
+        ok, failed, total = await _broadcast_to_all(bot, source)
+
+    assert (ok, failed, total) == (1, 0, 1)
+    bot.send_message.assert_awaited_once()
+    bot.copy_message.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_broadcast_to_all_counts_failures():
+    from app.bot.router import _broadcast_to_all
+
+    source = _make_message(user_id=1, text="Hi")
+    source.html_text = "Hi"
+    bot = MagicMock()
+    bot.copy_message = AsyncMock(side_effect=Exception("blocked"))
+    repo = MagicMock()
+    repo.get_all_user_ids.return_value = [10, 20, 30]
+    session = _make_session(repo)
+
+    with patch("app.bot.router.get_session", return_value=session), \
+         patch("app.bot.router.Repository", return_value=repo), \
+         patch("app.bot.router.asyncio.sleep", new=AsyncMock()):
+        ok, failed, total = await _broadcast_to_all(bot, source)
+
+    assert (ok, failed, total) == (0, 3, 3)
+
+
+@pytest.mark.asyncio
+async def test_broadcast_message_resets_timer():
+    from app.bot.router import broadcast_message
+
+    message = _make_message(user_id=1, text="Hi")
+    message.html_text = "Hi"
+    bot = MagicMock()
+    settings = _make_settings(admin_user_ids={1}, broadcast_timeout_seconds=300)
+    redis = _make_redis_mock()
+
+    with patch("app.bot.router.get_settings", return_value=settings), \
+         patch("app.bot.router.get_redis", return_value=redis), \
+         patch("app.bot.router._broadcast_to_all", new=AsyncMock(return_value=(2, 0, 2))):
+        await broadcast_message(message, bot)
+
+    redis.setex.assert_called_once()
+    assert redis.setex.call_args[0][0] == "broadcast_mode:1"
+    assert redis.setex.call_args[0][1] == 300
+    message.answer.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_broadcast_cancel_clears_key():
+    from app.bot.router import broadcast_cancel_callback
+
+    cb = MagicMock()
+    cb.from_user.id = 1
+    cb.answer = AsyncMock()
+    cb.message = MagicMock()
+    cb.message.edit_text = AsyncMock()
+    settings = _make_settings(admin_user_ids={1})
+    redis = _make_redis_mock()
+
+    with patch("app.bot.router.get_settings", return_value=settings), \
+         patch("app.bot.router.get_redis", return_value=redis):
+        await broadcast_cancel_callback(cb)
+
+    redis.delete.assert_called_once_with("broadcast_mode:1")

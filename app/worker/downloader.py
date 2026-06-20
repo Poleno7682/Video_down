@@ -7,19 +7,10 @@ from typing import Callable
 from yt_dlp import YoutubeDL
 
 from app.core.config import Settings
+from app.utils.platforms import PLATFORM_COOKIE_SETTING, detect_platform
 from app.utils.quality import format_selector, normalize_quality
-from app.utils.url_tools import domain_name
 
 logger = logging.getLogger(__name__)
-
-# OCP: add new platform support by extending this list — no need to touch
-# cookie_file_for_url itself.
-_DOMAIN_COOKIE_FIELDS: list[tuple[str, str]] = [
-    ("facebook.", "facebook_cookies_file"),
-    ("fb.watch", "facebook_cookies_file"),
-    ("instagram.", "instagram_cookies_file"),
-    ("tiktok.", "tiktok_cookies_file"),
-]
 
 
 class _YtdlpLogger:
@@ -41,12 +32,14 @@ class _YtdlpLogger:
 def cookie_file_for_url(url: str, settings: Settings) -> Path | None:
     if not settings.use_cookies:
         return None
-    domain = domain_name(url)
-    for pattern, attr in _DOMAIN_COOKIE_FIELDS:
-        if pattern in domain:
-            path: Path = getattr(settings, attr)
-            return path if path.exists() else None
-    return None
+    platform = detect_platform(url)
+    if not platform:
+        return None
+    attr = PLATFORM_COOKIE_SETTING.get(platform)
+    if not attr:
+        return None
+    path: Path = getattr(settings, attr)
+    return path if path.exists() else None
 
 
 def _build_ydl_opts(
@@ -95,13 +88,16 @@ def download_video(
     quality: str,
     settings: Settings,
     progress_hook: Callable[[dict], None] | None = None,
+    cookie_file: Path | None = None,
 ) -> tuple[Path, dict]:
     quality = normalize_quality(quality, settings.default_quality)
     work_dir = settings.download_dir / "active"
     work_dir.mkdir(parents=True, exist_ok=True)
 
     before = set(work_dir.iterdir())
-    cookie_file = cookie_file_for_url(url, settings)
+    # Per-user cookies (cookie_file) take priority over the global shared file.
+    if cookie_file is None:
+        cookie_file = cookie_file_for_url(url, settings)
     opts = _build_ydl_opts(quality, work_dir, progress_hook, cookie_file)
 
     with YoutubeDL(opts) as ydl:

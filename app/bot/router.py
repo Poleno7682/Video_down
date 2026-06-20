@@ -1,10 +1,11 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 
-from aiogram import F, Router
+from aiogram import Bot, F, Router
 from aiogram.exceptions import TelegramBadRequest
-from aiogram.filters import Command
+from aiogram.filters import BaseFilter, Command
 from aiogram.types import CallbackQuery, Message
 from redis import Redis
 
@@ -12,10 +13,13 @@ from app.core.config import Settings, get_settings
 from app.db.models import DownloadStatus
 from app.db.repository import Repository
 from app.db.session import get_session
-from app.keyboards.admin import admin_keyboard
+from app.keyboards.admin import admin_keyboard, broadcast_cancel_keyboard
 from app.keyboards.quality import quality_keyboard
 from app.services.rate_limiter import RateLimiter
 from app.services.redis_client import get_redis
+from app.utils.broadcast import parse_buttons
+from app.utils.caption import get_caption
+from app.utils.platforms import PLATFORMS, platform_from_filename
 from app.utils.quality import normalize_quality
 from app.utils.url_tools import extract_url, is_valid_url, normalize_url, url_hash
 from app.worker.tasks import process_download_request
@@ -28,12 +32,19 @@ logger = logging.getLogger(__name__)
 _KEY_BOT_DISABLED = "bot:disabled"
 _KEY_TRUSTED_USERS = "trusted_users"
 
+
+def _broadcast_key(admin_id: int) -> str:
+    return f"broadcast_mode:{admin_id}"
+
+
+# Max size for an uploaded cookies .txt file (Netscape cookie files are tiny).
+_MAX_COOKIE_FILE_BYTES = 2 * 1024 * 1024
+
 HELP_TEXT = (
     "Пришли ссылку на видео, и я скачаю его через очередь.\n\n"
     "Команды:\n"
     "/quality — выбрать качество\n"
-    "/status — краткая информация\n\n"
-    "Если ролик уже был скачан, я сразу отправлю сохранённый Telegram file_id без повторного скачивания."
+    "/status — краткая информация"
 )
 
 
@@ -104,7 +115,8 @@ def _admin_panel_text(settings: Settings, redis: Redis) -> str:
         "  /adduser <code>&lt;id&gt;</code> — добавить доверенного\n"
         "  /removeuser <code>&lt;id&gt;</code> — удалить из доверенных\n"
         "  /listusers — список доверенных пользователей\n\n"
-        "<i>Кнопка ниже включает/выключает бот для всех пользователей.</i>"
+        "<b>Рассылка:</b> /broadcast или кнопка ниже.\n\n"
+        "<i>Кнопки ниже: вкл/выкл бот для всех и запуск рассылки.</i>"
     )
 
 
@@ -114,6 +126,13 @@ def _admin_panel_text(settings: Settings, redis: Redis) -> str:
 
 @router.message(Command("start", "help"))
 async def start(message: Message) -> None:
+    # Persist every user that ever launched the bot (used for admin broadcasts).
+    with get_session() as session:
+        Repository(session).upsert_user(
+            user_id=message.from_user.id,
+            username=message.from_user.username,
+            first_name=message.from_user.first_name,
+        )
     await message.answer(HELP_TEXT)
 
 
@@ -278,6 +297,243 @@ async def list_trusted_users(message: Message) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Per-user cookies
+# ---------------------------------------------------------------------------
+
+_COOKIES_HELP = (
+    "🍪 <b>Личные cookies</b>\n\n"
+    "Некоторые сайты (особенно YouTube) требуют cookies авторизованного аккаунта.\n\n"
+    "Экспортируйте cookies в формате <b>Netscape</b> (cookies.txt) и пришлите файл "
+    "боту. <b>Имя файла задаёт платформу:</b>\n"
+    "• <code>youtube.txt</code>\n"
+    "• <code>instagram.txt</code>\n"
+    "• <code>tiktok.txt</code>\n"
+    "• <code>facebook.txt</code>\n\n"
+    "Удалить: <code>/delcookies youtube</code>"
+)
+
+
+def _looks_like_netscape(text: str) -> bool:
+    head = text.lstrip()
+    if head.startswith("# Netscape HTTP Cookie File") or head.startswith("# HTTP Cookie File"):
+        return True
+    for line in text.splitlines():
+        if line and not line.startswith("#") and line.count("\t") >= 5:
+            return True
+    return False
+
+
+@router.message(Command("cookies"))
+async def cookies_info(message: Message) -> None:
+    settings = get_settings()
+    redis = get_redis()
+    allowed, denial_msg = _check_access(message.from_user.id, settings, redis)
+    if not allowed:
+        await message.answer(denial_msg)
+        return
+
+    with get_session() as session:
+        platforms = Repository(session).list_user_platforms(message.from_user.id)
+
+    if platforms:
+        status = "Загружены: " + ", ".join(sorted(platforms))
+    else:
+        status = "Пока не загружены."
+    await message.answer(f"{_COOKIES_HELP}\n\n<b>Статус:</b> {status}")
+
+
+@router.message(Command("delcookies"))
+async def delete_cookies(message: Message) -> None:
+    settings = get_settings()
+    redis = get_redis()
+    allowed, denial_msg = _check_access(message.from_user.id, settings, redis)
+    if not allowed:
+        await message.answer(denial_msg)
+        return
+
+    parts = (message.text or "").split(maxsplit=1)
+    platform = parts[1].strip().lower() if len(parts) > 1 else ""
+    if platform not in PLATFORMS:
+        await message.answer(
+            "Использование: <code>/delcookies &lt;platform&gt;</code>\n"
+            f"Платформы: {', '.join(PLATFORMS)}"
+        )
+        return
+
+    with get_session() as session:
+        removed = Repository(session).delete_user_cookies(message.from_user.id, platform)
+    if removed:
+        await message.answer(f"✅ Cookies для <b>{platform}</b> удалены.")
+    else:
+        await message.answer(f"⚠️ Cookies для <b>{platform}</b> не найдены.")
+
+
+# ---------------------------------------------------------------------------
+# Admin broadcast
+# ---------------------------------------------------------------------------
+
+class BroadcastModeFilter(BaseFilter):
+    """Matches only when an admin currently has an active broadcast session."""
+
+    async def __call__(self, message: Message) -> bool:
+        settings = get_settings()
+        if not _is_admin(message.from_user.id, settings):
+            return False
+        return bool(get_redis().exists(_broadcast_key(message.from_user.id)))
+
+
+async def _enter_broadcast_mode(target: Message, admin_id: int) -> None:
+    settings = get_settings()
+    get_redis().setex(_broadcast_key(admin_id), settings.broadcast_timeout_seconds, "1")
+    minutes = settings.broadcast_timeout_seconds // 60
+    await target.answer(
+        "📢 <b>Режим рассылки включён.</b>\n\n"
+        "Отправьте сообщение (текст, фото, GIF, видео, музыку) — оно будет разослано "
+        "всем пользователям бота.\n\n"
+        "<b>Inline-кнопки:</b> добавьте в конце сообщения строку <code>---</code>, "
+        "а далее по одной кнопке в строке в формате <code>Текст | https://ссылка</code>.\n\n"
+        f"⏱ Режим автоматически выключится через {minutes} мин без активности "
+        "(таймер сбрасывается после каждой рассылки).",
+        reply_markup=broadcast_cancel_keyboard(),
+    )
+
+
+@router.message(Command("broadcast"))
+async def broadcast_command(message: Message) -> None:
+    if not _is_admin(message.from_user.id, get_settings()):
+        return
+    await _enter_broadcast_mode(message, message.from_user.id)
+
+
+@router.callback_query(F.data == "admin:broadcast")
+async def broadcast_start_callback(callback: CallbackQuery) -> None:
+    if not _is_admin(callback.from_user.id, get_settings()):
+        await callback.answer("⛔ Нет доступа", show_alert=True)
+        return
+    await callback.answer()
+    await _enter_broadcast_mode(callback.message, callback.from_user.id)
+
+
+@router.callback_query(F.data == "broadcast:cancel")
+async def broadcast_cancel_callback(callback: CallbackQuery) -> None:
+    if not _is_admin(callback.from_user.id, get_settings()):
+        await callback.answer("⛔ Нет доступа", show_alert=True)
+        return
+    get_redis().delete(_broadcast_key(callback.from_user.id))
+    await callback.answer("Рассылка отменена")
+    try:
+        await callback.message.edit_text("❌ Режим рассылки выключен.")
+    except TelegramBadRequest:
+        pass
+
+
+async def _broadcast_to_all(bot: Bot, source: Message) -> tuple[int, int, int]:
+    """Send a copy of `source` to every user. Returns (ok, failed, total)."""
+    with get_session() as session:
+        user_ids = Repository(session).get_all_user_ids()
+
+    from_chat_id = source.chat.id
+    message_id = source.message_id
+
+    if source.text is not None:
+        clean_text, markup = parse_buttons(source.html_text)
+        is_text = True
+    else:
+        clean_text, markup = parse_buttons(source.caption)
+        is_text = False
+
+    ok = 0
+    failed = 0
+    for uid in user_ids:
+        try:
+            if markup is None:
+                await bot.copy_message(chat_id=uid, from_chat_id=from_chat_id, message_id=message_id)
+            elif is_text:
+                await bot.send_message(uid, clean_text, reply_markup=markup)
+            else:
+                await bot.copy_message(
+                    chat_id=uid,
+                    from_chat_id=from_chat_id,
+                    message_id=message_id,
+                    caption=clean_text or None,
+                    reply_markup=markup,
+                )
+            ok += 1
+        except Exception:
+            failed += 1
+        # Stay well under Telegram's ~30 msg/sec broadcast limit.
+        await asyncio.sleep(0.05)
+
+    return ok, failed, len(user_ids)
+
+
+@router.message(BroadcastModeFilter())
+async def broadcast_message(message: Message, bot: Bot) -> None:
+    settings = get_settings()
+    # Reset the 5-minute protection timer on every broadcast.
+    get_redis().setex(_broadcast_key(message.from_user.id), settings.broadcast_timeout_seconds, "1")
+
+    ok, failed, total = await _broadcast_to_all(bot, message)
+    await message.answer(
+        f"📢 Рассылка завершена.\n"
+        f"✅ Доставлено: {ok}\n"
+        f"⚠️ Не доставлено: {failed}\n"
+        f"👥 Всего пользователей: {total}",
+        reply_markup=broadcast_cancel_keyboard(),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Cookies upload (document) — must be registered AFTER the broadcast handler so
+# an admin in broadcast mode can broadcast documents too.
+# ---------------------------------------------------------------------------
+
+@router.message(F.document)
+async def upload_cookies(message: Message, bot: Bot) -> None:
+    settings = get_settings()
+    redis = get_redis()
+    allowed, denial_msg = _check_access(message.from_user.id, settings, redis)
+    if not allowed:
+        await message.answer(denial_msg)
+        return
+
+    document = message.document
+    platform = platform_from_filename(document.file_name)
+    if not platform:
+        await message.answer(
+            "Чтобы загрузить cookies, пришлите <b>.txt</b> файл с именем платформы: "
+            "<code>youtube.txt</code>, <code>instagram.txt</code>, "
+            "<code>tiktok.txt</code> или <code>facebook.txt</code>.\n\n"
+            "Подробнее: /cookies"
+        )
+        return
+
+    if document.file_size and document.file_size > _MAX_COOKIE_FILE_BYTES:
+        await message.answer("⚠️ Файл слишком большой для cookies.")
+        return
+
+    try:
+        buffer = await bot.download(document)
+        content = buffer.read().decode("utf-8", errors="replace")
+    except Exception:
+        logger.exception("Failed to download cookies file from user %s", message.from_user.id)
+        await message.answer("❌ Не удалось прочитать файл. Попробуйте ещё раз.")
+        return
+
+    if not _looks_like_netscape(content):
+        await message.answer(
+            "❌ Это не похоже на cookies в формате Netscape.\n"
+            "Экспортируйте файл расширением «Get cookies.txt LOCALLY» или "
+            "<code>yt-dlp --cookies-from-browser ... --cookies file.txt</code>."
+        )
+        return
+
+    with get_session() as session:
+        Repository(session).set_user_cookies(message.from_user.id, platform, content)
+    await message.answer(f"✅ Cookies для <b>{platform}</b> сохранены.")
+
+
+# ---------------------------------------------------------------------------
 # URL message handlers
 # ---------------------------------------------------------------------------
 
@@ -394,9 +650,10 @@ async def _process_url_message(message: Message, text: str, reply_on_no_url: boo
 
 
 async def send_cached_file(message: Message, file_id: str, file_type: str) -> None:
+    caption = get_caption(get_settings())
     if file_type == "video":
-        await message.answer_video(file_id, caption="⚡ Готово из Telegram-кэша")
+        await message.answer_video(file_id, caption=caption)
     elif file_type == "audio":
-        await message.answer_audio(file_id, caption="⚡ Готово из Telegram-кэша")
+        await message.answer_audio(file_id, caption=caption)
     else:
-        await message.answer_document(file_id, caption="⚡ Готово из Telegram-кэша")
+        await message.answer_document(file_id, caption=caption)
