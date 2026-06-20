@@ -19,74 +19,24 @@ warn()  { echo -e "   ${YELLOW}⚠  $*${NC}"; }
 die()   { _show_fatal_error "$*"; exit 1; }
 info()  { echo -e "   ${BOLD}$*${NC}"; }
 
-# ─── Динамический прогресс-бар (закреплён внизу терминала) ──────────────────
-_PB_READY=0
-_PB_CLEANED=0
-_PB_ROWS=0
-_PB_COLS=0
+# ─── Прогресс и обработка ошибок ─────────────────────────────────────────────
+# Построчный вывод без tput/scroll region — стабилен в SSH и при выводе apt/systemctl.
 
-# Инициализация: резервирует 2 нижние строки вне зоны прокрутки.
-_pb_init() {
-    if [[ -t 1 ]] && command -v tput &>/dev/null; then
-        _PB_ROWS=$(tput lines)
-        _PB_COLS=$(tput cols)
-        tput csr 0 $(( _PB_ROWS - 3 )) 2>/dev/null || true   # зона прокрутки = всё кроме 2 нижних строк
-        _PB_READY=1
-        _PB_CLEANED=0
-    fi
-}
-
-# Рисует разделитель и бар в нижних двух строках.
-_pb_draw() {
+progress() {
     local pct="$1" msg="${2:-}" w=38 filled=0 bar=""
-    local rows cols
-    rows=$(tput lines 2>/dev/null || echo "${_PB_ROWS:-24}")
-    cols=$(tput cols  2>/dev/null || echo "${_PB_COLS:-80}")
     filled=$(( pct * w / 100 ))
     for ((i=0; i<filled; i++)); do bar+="█"; done
     for ((i=filled; i<w;      i++)); do bar+="░"; done
-
-    tput sc                                     # сохранить позицию курсора
-    tput cup $(( rows - 2 )) 0                  # перейти на строку разделителя
-    printf "\033[2K${BLUE}"
-    printf '─%.0s' $(seq 1 "$cols")             # горизонтальная линия
-    printf "${NC}"
-    tput cup $(( rows - 1 )) 0                  # строка прогресс-бара
-    printf "\033[2K"
-    printf "   ${BLUE}▐${GREEN}%s${BLUE}▌${NC} ${BOLD}${GREEN}%d%%${NC}  %s" \
-           "$bar" "$pct" "$msg"
-    tput rc                                     # вернуть курсор
+    echo -e "   ${BLUE}▐${GREEN}${bar}${BLUE}▌${NC} ${BOLD}${GREEN}${pct}%${NC}  ${msg}"
 }
 
-# Восстанавливает терминал.
-# soft  — только сброс scroll region (сохраняет лог на экране)
-# full  — дополнительно очищает строки прогресс-бара (перед итоговым выводом)
-_pb_cleanup() {
-    local mode="${1:-soft}"
-    [[ $_PB_READY -eq 0 ]] && return
-    local rows
-    rows=$(tput lines 2>/dev/null || echo 24)
-    tput csr 0 $(( rows - 1 )) 2>/dev/null || true
-    if [[ "$mode" == "full" ]]; then
-        tput cup $(( rows - 2 )) 0 2>/dev/null; printf "\033[2K"
-        tput cup $(( rows - 1 )) 0 2>/dev/null; printf "\033[2K"
-        tput cup $(( rows - 3 )) 0 2>/dev/null
-        printf "\n"
-    fi
-    _PB_READY=0
-    _PB_CLEANED=1
-}
-
-# Печатает фатальную ошибку после восстановления терминала (иначе текст теряется в scroll region).
 _show_fatal_error() {
-    _pb_cleanup soft 2>/dev/null || true
     echo ""
     echo -e "${RED}${BOLD}╔════════════════════════════════════════════════════════════╗${NC}"
     echo -e "${RED}${BOLD}║                  ✗  ОШИБКА УСТАНОВКИ                       ║${NC}"
     echo -e "${RED}${BOLD}╚════════════════════════════════════════════════════════════╝${NC}"
     echo -e "\n${RED}${BOLD}✗  $*${NC}\n"
 }
-
 
 _on_err() {
     local line="$1" code=$?
@@ -102,25 +52,7 @@ _on_interrupt() {
     exit 130
 }
 
-_on_exit() {
-    [[ ${_PB_CLEANED:-0} -eq 1 ]] && return
-    _pb_cleanup soft 2>/dev/null || true
-}
-
-# Публичный вызов: progress <процент> <сообщение>
-# Всегда печатает этап в основную зону; при интерактивном TTY — дублирует в бар внизу.
-progress() {
-    local pct="$1" msg="${2:-}" w=38 filled=0 bar=""
-    filled=$(( pct * w / 100 ))
-    for ((i=0; i<filled; i++)); do bar+="█"; done
-    for ((i=filled; i<w;      i++)); do bar+="░"; done
-    echo -e "   ${BLUE}▐${GREEN}${bar}${BLUE}▌${NC} ${BOLD}${GREEN}${pct}%${NC}  ${msg}"
-    if [[ $_PB_READY -eq 1 ]]; then
-        _pb_draw "$pct" "$msg" 2>/dev/null || true
-    fi
-}
-
-# Объявляет этап и выполняет команду с полным выводом (без подавления в /dev/null).
+# Объявляет этап и выполняет команду с полным выводом.
 run_step() {
     local msg="$1"; shift
     info "$msg"
@@ -128,6 +60,18 @@ run_step() {
         die "Ошибка на этапе: $msg"
     fi
     ok "Готово: $msg"
+}
+
+# Как run_step, но при ошибке возвращает 1 без завершения скрипта.
+try_step() {
+    local msg="$1"; shift
+    info "$msg"
+    if "$@"; then
+        ok "Готово: $msg"
+        return 0
+    fi
+    warn "Не удалось: $msg"
+    return 1
 }
 
 # Читает непустую строку. Необязательное значение по умолчанию — третий аргумент.
@@ -260,43 +204,61 @@ install_deps() {
     fi
     progress 35 "Docker Compose v2 готов"
 
-    # ── certbot через snap (изолированные зависимости, без конфликтов urllib3) ──
-    _ensure_snapd() {
+    # ── certbot: snap (предпочтительно) или apt (fallback) ─────────────────────
+    _snapd_available() {
         if ! have snap; then
-            run_step "Установка snapd" apt-get install -y --no-install-recommends snapd
+            info "Пробую установить snapd…"
+            if ! apt-get install -y --no-install-recommends snapd; then
+                warn "Не удалось установить пакет snapd"
+                return 1
+            fi
         fi
-        if ! systemctl is-active --quiet snapd.socket 2>/dev/null; then
-            info "Запуск службы snapd (snapd.socket)…"
-            systemctl enable --now snapd.socket snapd
-            sleep 3
-            systemctl is-active --quiet snapd.socket \
-                || die "snapd не запустился. Проверьте: systemctl status snapd.socket"
+        if systemctl is-active --quiet snapd.socket 2>/dev/null; then
+            ok "snapd уже работает"
+            return 0
+        fi
+        info "Запуск службы snapd (snapd.socket)…"
+        if ! systemctl enable --now snapd.socket snapd; then
+            warn "snapd.service не запустился (часто на VPS/LXC без поддержки snap)"
+            warn "Диагностика: systemctl status snapd.service && journalctl -xeu snapd.service"
+            return 1
+        fi
+        sleep 3
+        if systemctl is-active --quiet snapd.socket 2>/dev/null; then
             ok "Служба snapd запущена"
-        else
-            ok "Служба snapd уже работает"
+            return 0
         fi
+        warn "snapd.socket не активен после запуска"
+        return 1
     }
 
-    _install_certbot_snap() {
-        info "Устанавливаю certbot через snap…"
-        _ensure_snapd
-        run_step "Установка certbot (snap install --classic certbot)" snap install --classic certbot
-        ln -sf /snap/bin/certbot /usr/bin/certbot
-        ok "certbot установлен через snap: $(certbot --version 2>&1)"
+    _install_certbot_apt() {
+        warn "Устанавливаю certbot через apt (резервный способ)…"
+        run_step "Установка certbot через apt" \
+            apt-get install -y --no-install-recommends certbot
+        certbot --version &>/dev/null 2>&1 \
+            || die "certbot не работает ни через snap, ни через apt"
+        ok "certbot через apt: $(certbot --version 2>&1)"
     }
 
-    if have certbot; then
-        # Проверяем, что он реально работает (apt-версия может давать ImportError)
-        if certbot --version &>/dev/null 2>&1; then
+    _install_certbot() {
+        if have certbot && certbot --version &>/dev/null 2>&1; then
             ok "certbot — уже установлен и работает: $(certbot --version 2>&1)"
-        else
-            warn "certbot найден, но даёт ошибку (конфликт urllib3) — переустанавливаю через snap"
-            apt-get remove -y certbot python3-certbot 2>/dev/null || true
-            _install_certbot_snap
+            return
         fi
-    else
-        _install_certbot_snap
-    fi
+        if have certbot; then
+            warn "certbot найден, но даёт ошибку (конфликт urllib3) — переустанавливаю"
+            apt-get remove -y certbot python3-certbot 2>/dev/null || true
+        fi
+        if _snapd_available && try_step "Установка certbot через snap" snap install --classic certbot; then
+            ln -sf /snap/bin/certbot /usr/bin/certbot
+            ok "certbot через snap: $(certbot --version 2>&1)"
+            return
+        fi
+        _install_certbot_apt
+    }
+
+    _install_certbot
 
     # ── Остальные системные пакеты ─────────────────────────────────────────────
     declare -A PKG_MAP=(
@@ -346,7 +308,6 @@ install_deps() {
 # ─── Шаг 2: Сбор конфигурации ────────────────────────────────────────────────
 collect_config() {
     progress 44 "Сбор конфигурации…"
-    _pb_cleanup full
     echo ""
     echo -e "${BOLD}${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
     echo -e "${BOLD}${BLUE}   Настройка Video Bot — ответьте на несколько вопросов${NC}"
@@ -374,7 +335,6 @@ collect_config() {
     WEBHOOK_SECRET="$(gen_secret)"
     ok "Webhook secret сгенерирован"
     progress 50 "Конфигурация получена"
-    _pb_init
 }
 
 # ─── Шаг 3: SSL-сертификат ───────────────────────────────────────────────────
@@ -671,12 +631,10 @@ main() {
     set -E
     trap '_on_err $LINENO' ERR
     trap '_on_interrupt' INT TERM
-    trap '_on_exit' EXIT
 
     echo -e "\n${BOLD}${BLUE}╔════════════════════════════════════════════════════════════╗${NC}"
     echo -e "${BOLD}${BLUE}║        Video Bot — Мастер первоначальной настройки         ║${NC}"
     echo -e "${BOLD}${BLUE}╚════════════════════════════════════════════════════════════╝${NC}\n"
-    _pb_init
     progress 0 "Запуск установки…"
 
     preflight
@@ -688,7 +646,6 @@ main() {
     write_env
     setup_systemd
     start_services
-    _pb_cleanup full
     print_summary
 }
 
