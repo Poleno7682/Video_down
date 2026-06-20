@@ -154,9 +154,34 @@ install_deps() {
     fi
     progress 35 "Docker Compose v2 готов"
 
+    # ── certbot через snap (изолированные зависимости, без конфликтов urllib3) ──
+    _install_certbot_snap() {
+        info "Устанавливаю certbot через snap…"
+        if ! have snap; then
+            apt-get install -y --no-install-recommends snapd >/dev/null
+            systemctl enable --now snapd.socket snapd 2>/dev/null || true
+            sleep 2
+        fi
+        snap install --classic certbot
+        ln -sf /snap/bin/certbot /usr/bin/certbot
+        ok "certbot установлен через snap: $(certbot --version 2>&1)"
+    }
+
+    if have certbot; then
+        # Проверяем, что он реально работает (apt-версия может давать ImportError)
+        if certbot --version &>/dev/null 2>&1; then
+            ok "certbot — уже установлен и работает: $(certbot --version 2>&1)"
+        else
+            warn "certbot найден, но даёт ошибку (конфликт urllib3) — переустанавливаю через snap"
+            apt-get remove -y certbot python3-certbot 2>/dev/null || true
+            _install_certbot_snap
+        fi
+    else
+        _install_certbot_snap
+    fi
+
     # ── Остальные системные пакеты ─────────────────────────────────────────────
     declare -A PKG_MAP=(
-        [certbot]="certbot"
         [openssl]="openssl"
         [curl]="curl"
         [lsof]="lsof"
@@ -164,7 +189,7 @@ install_deps() {
     )
 
     local missing_pkgs=()
-    for bin in certbot openssl curl lsof python3; do
+    for bin in openssl curl lsof python3; do
         if have "$bin"; then
             ok "${bin} — уже установлен ($(command -v "$bin"))"
         else
