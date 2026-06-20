@@ -19,6 +19,15 @@ warn()  { echo -e "   ${YELLOW}⚠  $*${NC}"; }
 die()   { echo -e "\n${RED}${BOLD}✗  $*${NC}" >&2; exit 1; }
 info()  { echo -e "   ${BOLD}$*${NC}"; }
 
+# Прогресс-бар: progress <процент 0-100> <сообщение>
+progress() {
+    local pct="$1" msg="${2:-}" w=40 filled=0 bar=""
+    filled=$(( pct * w / 100 ))
+    for ((i=0; i<filled; i++)); do bar+="█"; done
+    for ((i=filled; i<w; i++)); do bar+="░"; done
+    echo -e "\n   ${BLUE}▐${GREEN}${bar}${BLUE}▌${NC} ${BOLD}${GREEN}${pct}%${NC}  ${msg}"
+}
+
 # Читает непустую строку. Необязательное значение по умолчанию — третий аргумент.
 ask() {
     local prompt="$1" var_name="$2" default="${3:-}"
@@ -74,34 +83,35 @@ preflight() {
 
     # apt-get должен быть доступен (Ubuntu / Debian)
     have apt-get || die "apt-get не найден. Скрипт рассчитан на Ubuntu/Debian."
+
+    progress 3 "Предварительные проверки пройдены"
 }
 
 # ─── Установка Docker Engine через официальный репозиторий ───────────────────
-# Вызывается только если `docker` отсутствует на хосте.
-# Устанавливает docker-ce, docker-ce-cli, containerd.io,
-# docker-buildx-plugin и docker-compose-plugin одним пакетным блоком.
 _install_docker_official() {
     info "Docker не найден — устанавливаю Docker Engine (официальный репозиторий)…"
+    warn "Это займёт 2–4 минуты…"
 
-    # Зависимости для добавления apt-репозитория
+    progress 8 "Подготовка репозитория Docker…"
     apt-get update -qq
     apt-get install -y --no-install-recommends ca-certificates curl gnupg >/dev/null
 
-    # GPG-ключ Docker Inc.
+    progress 13 "Добавление GPG-ключа Docker Inc…"
     install -m 0755 -d /etc/apt/keyrings
     curl -fsSL https://download.docker.com/linux/ubuntu/gpg \
         | gpg --dearmor -o /etc/apt/keyrings/docker.gpg
     chmod a+r /etc/apt/keyrings/docker.gpg
 
-    # Официальный репозиторий (stable)
+    progress 17 "Подключение официального репозитория…"
     local arch codename
     arch="$(dpkg --print-architecture)"
     codename="$(. /etc/os-release && echo "${VERSION_CODENAME}")"
     echo "deb [arch=${arch} signed-by=/etc/apt/keyrings/docker.gpg] \
 https://download.docker.com/linux/ubuntu ${codename} stable" \
         > /etc/apt/sources.list.d/docker.list
-
     apt-get update -qq
+
+    progress 22 "Загрузка и установка пакетов Docker (может занять 2–3 мин.)…"
     apt-get install -y --no-install-recommends \
         docker-ce \
         docker-ce-cli \
@@ -110,7 +120,8 @@ https://download.docker.com/linux/ubuntu ${codename} stable" \
         docker-compose-plugin \
         >/dev/null
 
-    ok "Docker Engine установлен: $(docker --version)"
+    progress 32 "Docker Engine установлен"
+    ok "$(docker --version)"
 }
 
 # ─── Шаг 1: Проверка и установка зависимостей ────────────────────────────────
@@ -118,23 +129,22 @@ install_deps() {
     step "Проверка и установка зависимостей"
 
     # ── Python-пакеты (requirements.txt) ──────────────────────────────────────
-    # Все пакеты устанавливаются ВНУТРИ Docker-образа командой
-    # `pip install -r requirements.txt` (см. Dockerfile).
-    # На хосте они не нужны — проверяем только что файл существует.
     [[ -f "$PROJECT_DIR/requirements.txt" ]] \
         || die "requirements.txt не найден в $PROJECT_DIR — установка невозможна."
     local req_count
     req_count=$(grep -vc '^\s*$' "$PROJECT_DIR/requirements.txt")
     ok "requirements.txt найден (${req_count} пакетов — устанавливаются в Docker-образ при сборке)"
+    progress 5 "requirements.txt проверен"
 
     # ── Docker Engine ──────────────────────────────────────────────────────────
     if have docker; then
         ok "docker — уже установлен: $(docker --version)"
+        progress 32 "Docker уже установлен"
     else
         _install_docker_official
     fi
 
-    # docker compose v2 — плагин, отдельного бинарника нет
+    # docker compose v2
     if docker compose version &>/dev/null; then
         ok "docker compose v2 — уже установлен"
     else
@@ -142,6 +152,7 @@ install_deps() {
         apt-get install -y --no-install-recommends docker-compose-plugin >/dev/null
         ok "docker-compose-plugin установлен"
     fi
+    progress 35 "Docker Compose v2 готов"
 
     # ── Остальные системные пакеты ─────────────────────────────────────────────
     declare -A PKG_MAP=(
@@ -170,6 +181,7 @@ install_deps() {
     else
         ok "Все остальные зависимости уже установлены — apt-get пропущен"
     fi
+    progress 39 "Системные зависимости установлены"
 
     # ── Docker daemon ──────────────────────────────────────────────────────────
     if systemctl is-active --quiet docker; then
@@ -184,10 +196,13 @@ install_deps() {
         || die "docker compose (v2) не работает. Проверьте: apt-get install docker-compose-plugin"
     docker info &>/dev/null \
         || die "Docker daemon недоступен. Проверьте: systemctl status docker"
+
+    progress 42 "Все зависимости готовы"
 }
 
 # ─── Шаг 2: Сбор конфигурации ────────────────────────────────────────────────
 collect_config() {
+    progress 44 "Сбор конфигурации…"
     echo ""
     echo -e "${BOLD}${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
     echo -e "${BOLD}${BLUE}   Настройка Video Bot — ответьте на несколько вопросов${NC}"
@@ -214,20 +229,21 @@ collect_config() {
 
     WEBHOOK_SECRET="$(gen_secret)"
     ok "Webhook secret сгенерирован"
+    progress 50 "Конфигурация получена"
 }
 
 # ─── Шаг 3: SSL-сертификат ───────────────────────────────────────────────────
 issue_ssl() {
     step "Выпуск SSL-сертификата Let's Encrypt"
+    progress 52 "Запрос SSL-сертификата для ${DOMAIN}…"
 
-    # Если порт 80 занят чем-то кроме нашего докера — попробуем освободить
     if lsof -iTCP:80 -sTCP:LISTEN -n -P &>/dev/null 2>&1; then
         warn "Порт 80 занят, пробую освободить…"
         systemctl stop nginx apache2 2>/dev/null || true
         sleep 1
     fi
 
-    info "Запрашиваю сертификат для ${DOMAIN}…"
+    info "Запрашиваю сертификат (certbot --standalone)…"
     certbot certonly \
         --standalone \
         --non-interactive \
@@ -242,16 +258,15 @@ issue_ssl() {
     cp "/etc/letsencrypt/live/${DOMAIN}/privkey.pem"   nginx/certs/privkey.pem
     chmod 644 nginx/certs/*.pem
 
-    # Сохраняем домен для скрипта перевыпуска
     echo "$DOMAIN" > .domain
     ok "Сертификат выпущен → nginx/certs/"
+    progress 62 "SSL-сертификат получен и скопирован"
 }
 
 # ─── Шаг 4: Авторевыпуск сертификата ────────────────────────────────────────
 setup_renewal() {
     step "Настройка автоматического перевыпуска сертификата"
 
-    # Скрипт перевыпуска
     local renew_script="${PROJECT_DIR}/scripts/renew_cert.sh"
     cat > "$renew_script" <<RENEW
 #!/usr/bin/env bash
@@ -274,12 +289,12 @@ echo "\$(date): сертификат для \$DOMAIN проверен/обнов
 RENEW
     chmod +x "$renew_script"
 
-    # Cron: каждый день в 03:15 (certbot сам пропустит, если cert ещё свежий)
     local cron_line="15 3 * * * root ${renew_script} >> /var/log/certbot-video-bot.log 2>&1"
     echo "$cron_line" > /etc/cron.d/video-bot-certbot
     chmod 644 /etc/cron.d/video-bot-certbot
 
     ok "Cron-задание создано: /etc/cron.d/video-bot-certbot (ежедневно в 03:15)"
+    progress 65 "Автоперевыпуск сертификата настроен"
 }
 
 # ─── Шаг 5: Nginx конфиг ─────────────────────────────────────────────────────
@@ -341,6 +356,7 @@ server {
 }
 NGINX
     ok "nginx/video-bot.conf записан для ${DOMAIN}"
+    progress 68 "Конфигурация Nginx записана"
 }
 
 # ─── Шаг 6: Файл .env ────────────────────────────────────────────────────────
@@ -375,8 +391,6 @@ COOKIE_DIR=/app/cookies
 LOG_DIR=/app/logs
 
 # ── Доступ ────────────────────────────────────────────────────────────────────
-# ALLOWED_USERS пустой = бот управляет доступом через /adduser (или публичный,
-# если доверенных пользователей нет).
 ALLOWED_USERS=
 ADMIN_USERS=${ADMIN_ID}
 
@@ -411,6 +425,7 @@ APP_PORT=8080
 ENV
     chmod 600 .env
     ok ".env записан (права 600)"
+    progress 72 "Файл .env создан"
 }
 
 # ─── Шаг 7: systemd-служба ───────────────────────────────────────────────────
@@ -442,18 +457,24 @@ SERVICE
     systemctl enable video-bot
     ok "Создана служба: ${service_file}"
     ok "Автозапуск при перезагрузке включён (systemctl enable video-bot)"
+    progress 76 "systemd-служба video-bot создана и включена"
 }
 
 # ─── Шаг 8: Запуск сервисов ──────────────────────────────────────────────────
 start_services() {
     step "Сборка Docker-образов"
+    progress 78 "Сборка Docker-образов (может занять 3–5 мин.)…"
+    warn "Идёт загрузка базовых образов и установка пакетов внутри контейнера…"
     docker compose build
     ok "Образы собраны"
+    progress 90 "Docker-образы собраны"
 
     step "Запуск через systemd (video-bot.service)"
+    progress 92 "Запуск всех сервисов…"
     systemctl start video-bot
     ok "Служба video-bot запущена"
 
+    progress 95 "Ожидание готовности бота…"
     info "Ожидаю готовности бота (30 сек.)…"
     sleep 30
 
@@ -461,8 +482,10 @@ start_services() {
     health="$(curl -sf "http://localhost:8080/health" 2>/dev/null || echo 'недоступен')"
     if echo "$health" | grep -q '"ok"' 2>/dev/null; then
         ok "Health check пройден"
+        progress 100 "Установка успешно завершена ✅"
     else
         warn "Health check: ${health} — возможно бот ещё стартует, проверьте логи"
+        progress 98 "Сервисы запущены (health check не прошёл — проверьте логи)"
     fi
 }
 
@@ -502,6 +525,7 @@ main() {
     echo -e "\n${BOLD}${BLUE}╔════════════════════════════════════════════════════════════╗${NC}"
     echo -e "${BOLD}${BLUE}║        Video Bot — Мастер первоначальной настройки         ║${NC}"
     echo -e "${BOLD}${BLUE}╚════════════════════════════════════════════════════════════╝${NC}\n"
+    progress 0 "Запуск установки…"
 
     preflight
     install_deps
