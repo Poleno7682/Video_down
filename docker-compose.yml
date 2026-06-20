@@ -74,6 +74,10 @@ services:
     image: nginx:1.27-alpine
     container_name: video_bot_nginx
     restart: unless-stopped
+    # Only needed for webhook mode. Polling mode runs without it:
+    #   docker compose up -d            (polling, no nginx)
+    #   docker compose --profile webhook up -d   (webhook + nginx)
+    profiles: ["webhook"]
     depends_on:
       - bot
     ports:

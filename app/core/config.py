@@ -15,9 +15,12 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
     bot_token: str = Field(alias="BOT_TOKEN")
-    webhook_base_url: str = Field(alias="WEBHOOK_BASE_URL")
+    # "webhook" — Telegram шлёт апдейты на наш HTTPS-эндпоинт (нужен белый IP/домен/SSL).
+    # "polling" — бот сам опрашивает Telegram исходящими запросами (работает за NAT).
+    bot_mode: str = Field(default="webhook", alias="BOT_MODE")
+    webhook_base_url: str = Field(default="", alias="WEBHOOK_BASE_URL")
     webhook_path: str = Field(default="/telegram/webhook", alias="WEBHOOK_PATH")
-    webhook_secret: str = Field(alias="WEBHOOK_SECRET")
+    webhook_secret: str = Field(default="", alias="WEBHOOK_SECRET")
 
     database_url: str = Field(alias="DATABASE_URL")
     redis_url: str = Field(alias="REDIS_URL")

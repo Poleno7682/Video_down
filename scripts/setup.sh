@@ -384,19 +384,34 @@ collect_config() {
     ask "Пользователь БД" PG_USER "video_bot"
     ask_secret "Пароль БД" PG_PASSWORD
 
-    step "Домен и SSL"
-    ask "Домен (например: bot.example.com)" DOMAIN
-    ask "Email для Let's Encrypt (уведомления об истечении сертификата)" LE_EMAIL
+    step "Способ получения обновлений Telegram"
+    info "1) polling  — бот сам опрашивает Telegram (работает за NAT, без домена и SSL)"
+    info "2) webhook  — Telegram шлёт обновления на ваш HTTPS-домен (нужен белый IP/домен)"
+    info "Если сервер за NAT (Mikrus, домашний, бесплатный VPS) — выбирайте polling."
 
+    BOT_MODE="polling"
     MIKRUS_MODE=0
     NGINX_HTTP_PORT=80
-    if _is_mikrus_domain "$DOMAIN"; then
-        MIKRUS_MODE=1
-        echo ""
-        warn "Домен Mikrus: SSL выдаёт и обновляет прокси Mikrus автоматически."
-        warn "certbot на VPS не сработает — HTTP-запросы ACME не доходят до сервера (404)."
-        info "В панели Mikrus для subdomeny укажите тот же порт и режим бэкенда HTTP."
-        ask "Порт HTTP на VPS (из панели Mikrus для ${DOMAIN})" NGINX_HTTP_PORT "80"
+    DOMAIN=""
+    LE_EMAIL=""
+
+    if ask_yn "Использовать polling (рекомендуется для NAT)?" "y"; then
+        BOT_MODE="polling"
+        ok "Выбран режим polling — домен и SSL не требуются"
+    else
+        BOT_MODE="webhook"
+        step "Домен и SSL"
+        ask "Домен (например: bot.example.com)" DOMAIN
+        ask "Email для Let's Encrypt (уведомления об истечении сертификата)" LE_EMAIL
+
+        if _is_mikrus_domain "$DOMAIN"; then
+            MIKRUS_MODE=1
+            echo ""
+            warn "Домен Mikrus: SSL выдаёт и обновляет прокси Mikrus автоматически."
+            warn "certbot на VPS не сработает — HTTP-запросы ACME не доходят до сервера (404)."
+            info "В панели Mikrus для subdomeny укажите тот же порт и режим бэкенда HTTP."
+            ask "Порт HTTP на VPS (из панели Mikrus для ${DOMAIN})" NGINX_HTTP_PORT "80"
+        fi
     fi
 
     step "Администратор"
@@ -410,6 +425,13 @@ collect_config() {
 
 # ─── Шаг 3: SSL-сертификат ───────────────────────────────────────────────────
 issue_ssl() {
+    if [[ "${BOT_MODE:-polling}" == "polling" ]]; then
+        step "SSL"
+        ok "Режим polling — сертификат не нужен (бот опрашивает Telegram сам)"
+        progress 62 "SSL пропущен (polling)"
+        return
+    fi
+
     step "Выпуск SSL-сертификата"
     progress 52 "Настройка SSL для ${DOMAIN}…"
 
@@ -453,6 +475,12 @@ issue_ssl() {
 setup_renewal() {
     step "Настройка автоматического перевыпуска сертификата"
 
+    if [[ "${BOT_MODE:-polling}" == "polling" ]]; then
+        ok "Режим polling — перевыпуск сертификата не требуется"
+        progress 65 "Автоперевыпуск SSL пропущен (polling)"
+        return
+    fi
+
     if [[ "${MIKRUS_MODE:-0}" -eq 1 ]]; then
         ok "На Mikrus SSL обновляет прокси — cron certbot не требуется"
         progress 65 "Автоперевыпуск SSL (Mikrus)"
@@ -491,6 +519,13 @@ RENEW
 
 # ─── Шаг 5: Nginx конфиг ─────────────────────────────────────────────────────
 write_nginx_conf() {
+    if [[ "${BOT_MODE:-polling}" == "polling" ]]; then
+        step "Конфигурация Nginx"
+        ok "Режим polling — Nginx не используется"
+        progress 68 "Nginx пропущен (polling)"
+        return
+    fi
+
     step "Запись конфигурации Nginx"
     mkdir -p nginx/www nginx/certs
 
@@ -598,10 +633,14 @@ write_env() {
         cp .env .env.bak
     fi
 
+    local webhook_base="https://${DOMAIN}"
+    [[ "${BOT_MODE:-polling}" == "polling" ]] && webhook_base=""
+
     cat > .env <<ENV
 # ── Telegram ──────────────────────────────────────────────────────────────────
 BOT_TOKEN=${BOT_TOKEN}
-WEBHOOK_BASE_URL=https://${DOMAIN}
+BOT_MODE=${BOT_MODE:-polling}
+WEBHOOK_BASE_URL=${webhook_base}
 WEBHOOK_PATH=/telegram/webhook
 WEBHOOK_SECRET=${WEBHOOK_SECRET}
 
@@ -659,9 +698,23 @@ ENV
     progress 72 "Файл .env создан"
 }
 
+# Команда docker compose с нужными профилями (webhook поднимает nginx).
+compose() {
+    if [[ "${BOT_MODE:-polling}" == "webhook" ]]; then
+        docker compose --profile webhook "$@"
+    else
+        docker compose "$@"
+    fi
+}
+
 # ─── Порты Docker (Mikrus: один HTTP-порт из панели) ─────────────────────────
 write_docker_ports() {
     step "Настройка портов Docker"
+    if [[ "${BOT_MODE:-polling}" == "polling" ]]; then
+        rm -f docker-compose.override.yml 2>/dev/null || true
+        ok "Режим polling — порты наружу не публикуются (nginx не запускается)"
+        return
+    fi
     if [[ "${MIKRUS_MODE:-0}" -eq 1 ]]; then
         cat > docker-compose.override.yml <<OVR
 # Сгенерировано setup.sh — режим Mikrus (SSL на прокси)
@@ -682,6 +735,9 @@ OVR
 setup_systemd() {
     step "Создание systemd-службы video-bot"
 
+    local COMPOSE_PROFILE_ARGS=""
+    [[ "${BOT_MODE:-polling}" == "webhook" ]] && COMPOSE_PROFILE_ARGS="--profile webhook"
+
     local service_file="/etc/systemd/system/video-bot.service"
 
     cat > "$service_file" <<SERVICE
@@ -694,8 +750,8 @@ Requires=docker.service
 Type=oneshot
 RemainAfterExit=yes
 WorkingDirectory=${PROJECT_DIR}
-ExecStart=/usr/bin/docker compose up -d
-ExecStop=/usr/bin/docker compose down
+ExecStart=/usr/bin/docker compose ${COMPOSE_PROFILE_ARGS} up -d
+ExecStop=/usr/bin/docker compose ${COMPOSE_PROFILE_ARGS} down
 TimeoutStartSec=300
 TimeoutStopSec=120
 
@@ -716,7 +772,7 @@ start_services() {
     step "Сборка Docker-образов"
     progress 78 "Сборка Docker-образов (может занять 3–5 мин.)…"
     warn "Идёт загрузка базовых образов и установка пакетов внутри контейнера…"
-    docker compose build
+    compose build
     ok "Образы собраны"
     progress 90 "Docker-образы собраны"
 
@@ -731,12 +787,13 @@ start_services() {
     sleep 30
 
     local health
-    health="$(curl -sf "http://localhost:8080/health" 2>/dev/null || echo 'недоступен')"
+    health="$(compose exec -T bot curl -sf "http://localhost:8080/health" 2>/dev/null || echo 'недоступен')"
     if echo "$health" | grep -q '"ok"' 2>/dev/null; then
         ok "Health check пройден"
         progress 100 "Установка успешно завершена ✅"
     else
-        warn "Health check: ${health} — возможно бот ещё стартует, проверьте логи"
+        warn "Health check: ${health} — возможно бот ещё стартует"
+        info "Проверьте логи: docker compose logs -f bot"
         progress 98 "Сервисы запущены (health check не прошёл — проверьте логи)"
     fi
 }
@@ -748,13 +805,20 @@ print_summary() {
     echo -e "${GREEN}${BOLD}║                    ✅  НАСТРОЙКА ЗАВЕРШЕНА               ║${NC}"
     echo -e "${GREEN}${BOLD}╚══════════════════════════════════════════════════════════╝${NC}"
     echo ""
-    echo -e "  ${BOLD}Бот:${NC}           https://${DOMAIN}"
-    echo -e "  ${BOLD}Webhook:${NC}       https://${DOMAIN}/telegram/webhook"
-    echo -e "  ${BOLD}Администратор:${NC} ${ADMIN_ID}"
-    if [[ "${MIKRUS_MODE:-0}" -eq 1 ]]; then
-        echo -e "  ${BOLD}SSL:${NC}           автоматически (прокси Mikrus, порт VPS ${NGINX_HTTP_PORT})"
+    if [[ "${BOT_MODE:-polling}" == "polling" ]]; then
+        echo -e "  ${BOLD}Режим:${NC}         polling (бот сам опрашивает Telegram, без домена/SSL)"
+        echo -e "  ${BOLD}Администратор:${NC} ${ADMIN_ID}"
+        echo -e "  ${BOLD}Проверка:${NC}      напишите боту в Telegram /start"
     else
-        echo -e "  ${BOLD}Сертификат:${NC}    /etc/letsencrypt/live/${DOMAIN}/ (авторевыпуск ежедневно 03:15)"
+        echo -e "  ${BOLD}Режим:${NC}         webhook"
+        echo -e "  ${BOLD}Бот:${NC}           https://${DOMAIN}"
+        echo -e "  ${BOLD}Webhook:${NC}       https://${DOMAIN}/telegram/webhook"
+        echo -e "  ${BOLD}Администратор:${NC} ${ADMIN_ID}"
+        if [[ "${MIKRUS_MODE:-0}" -eq 1 ]]; then
+            echo -e "  ${BOLD}SSL:${NC}           автоматически (прокси Mikrus, порт VPS ${NGINX_HTTP_PORT})"
+        else
+            echo -e "  ${BOLD}Сертификат:${NC}    /etc/letsencrypt/live/${DOMAIN}/ (авторевыпуск ежедневно 03:15)"
+        fi
     fi
     echo ""
     echo -e "  ${BOLD}Управление службой:${NC}"
