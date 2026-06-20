@@ -1,309 +1,652 @@
+<div align="center">
+
 # 🎬 Video Downloader Bot
 
-Telegram-бот для скачивания публичных видео по ссылке и отправки файла прямо в чат.  
-Построен на **aiogram 3**, работает через **webhook**, задачи обрабатывает **Celery**-воркер.
+**Telegram-бот для скачивания публичных видео по ссылке**
+
+[![Python](https://img.shields.io/badge/Python-3.12-blue?logo=python)](https://python.org)
+[![aiogram](https://img.shields.io/badge/aiogram-3.x-blue?logo=telegram)](https://docs.aiogram.dev)
+[![Docker](https://img.shields.io/badge/Docker-Compose-2496ED?logo=docker)](https://docs.docker.com/compose/)
+[![Tests](https://img.shields.io/badge/Tests-289%20passed-brightgreen?logo=pytest)](tests/)
+[![Coverage](https://img.shields.io/badge/Coverage-100%25-brightgreen)](tests/)
+[![License](https://img.shields.io/badge/License-MIT-green)](LICENSE)
+
+Отправь боту ссылку — получи видео прямо в чат.  
+Поддерживает YouTube, VK, TikTok, Instagram, Facebook и [1000+ других сайтов](https://github.com/yt-dlp/yt-dlp/blob/master/supportedsites.md).
+
+</div>
 
 ---
 
-## Стек технологий
+## 📋 Содержание
 
-| Компонент | Технология |
+- [Ключевые возможности](#-ключевые-возможности)
+- [Стек технологий](#-стек-технологий)
+- [Быстрый старт (автоустановка)](#-быстрый-старт-автоустановка)
+- [Ручная установка](#-ручная-установка)
+- [SSL-сертификат и автоперевыпуск](#-ssl-сертификат-и-автоперевыпуск)
+- [Управление службой](#-управление-службой)
+- [Команды бота](#-команды-бота)
+- [Управление доступом](#-управление-доступом)
+- [Cookie-файлы](#-cookie-файлы)
+- [Переменные окружения](#-переменные-окружения)
+- [Тесты](#-тесты)
+- [Структура проекта](#-структура-проекта)
+- [Рекомендации для продакшена](#-рекомендации-для-продакшена)
+
+---
+
+## ✨ Ключевые возможности
+
+### 📥 Загрузка видео
+- **1000+ сайтов** — YouTube, VK, TikTok, Instagram, Facebook, Twitter/X, Twitch, Dailymotion и другие через yt-dlp
+- **Выбор качества** — 360p / 480p / 720p / 1080p / наилучшее / только аудио
+- **Кэш `file_id`** — если видео уже скачивалось, бот мгновенно отправляет его повторно из кэша Telegram без повторной загрузки
+- **Автоматические повторные попытки** — yt-dlp: 3 попытки на запрос, 5 на фрагмент
+- **Cookie-файлы** — для авторизованного доступа к Facebook, Instagram, TikTok
+
+### 🔐 Управление доступом
+- **Три режима**: публичный бот / статичный список в `.env` / динамический список доверенных через `/adduser`
+- **Панель администратора** — инлайн-меню с кнопкой мгновенного включения/выключения бота для всех
+- **Администратор всегда имеет доступ** — глобальное отключение бота на него не распространяется
+
+### 🛡️ Антиспам и защита
+- **Rate limiter** — скользящее временное окно с автоматическим баном нарушителей
+- **Атомарные Lua-скрипты** в Redis — счётчики без race condition при параллельных запросах
+- **Дневной лимит** запросов на пользователя
+- **Лимит активных задач** на пользователя и глобально
+- **Дедупликация** — одно и то же видео с одним качеством не скачивается дважды параллельно (блокировка по `url_hash + quality`)
+- **Nginx rate limit** на webhook-эндпоинт (30 req/s, burst 60)
+
+### 🔒 Безопасность
+- Нет сырого SQL — весь доступ к БД через SQLAlchemy ORM и параметризованные запросы
+- Webhook защищён заголовком `X-Telegram-Bot-Api-Secret-Token`
+- HTTPS через Let's Encrypt с автоматическим перевыпуском сертификата
+- Файл `.env` создаётся с правами `600` (только владелец)
+- `WEBHOOK_SECRET` генерируется автоматически (`openssl rand -hex 32`)
+
+### 🏗️ Архитектура и надёжность
+- **Webhook**, а не polling — минимальная задержка, нет лишних запросов к Telegram
+- **Celery-воркер** — задачи выполняются асинхронно, бот не блокируется во время скачивания
+- **Прогресс-хук** — пользователь видит обновления статуса в реальном времени во время загрузки
+- **Alembic-миграции** применяются автоматически при каждом запуске бота
+- **Repository паттерн** — единая точка доступа к данным, изолированная от бизнес-логики
+- **Healthcheck** — Docker Compose проверяет готовность PostgreSQL и Redis перед стартом бота
+- **systemd-служба** — автозапуск всего стека при перезагрузке сервера
+
+### ⚙️ Автоустановка
+- Один скрипт настраивает всё с нуля: зависимости, Docker, SSL, nginx, `.env`, systemd
+- Умная проверка зависимостей — устанавливает только то, чего нет
+- Docker Engine устанавливается через **официальный репозиторий** Docker Inc., а не устаревший пакет Ubuntu
+
+---
+
+## 🛠 Стек технологий
+
+| Слой | Технология |
 |---|---|
-| Telegram Bot | aiogram 3.x + aiohttp webhook |
-| Очередь задач | Celery 5 + Redis |
-| База данных | PostgreSQL 16 + SQLAlchemy 2.0 ORM |
-| Миграции | Alembic |
-| Скачивание | yt-dlp |
-| Кэш / блокировки | Redis |
-| Обратный прокси | Nginx (HTTPS, rate-limit) |
-| Контейнеры | Docker Compose |
-| Системная служба | systemd (`video-bot.service`) |
+| Telegram Bot Framework | [aiogram 3.x](https://docs.aiogram.dev) — webhook, inline-клавиатуры, scope команд |
+| HTTP-сервер | [aiohttp](https://docs.aiohttp.org) — обработка webhook-запросов |
+| Очередь задач | [Celery 5](https://docs.celeryq.dev) + Redis — асинхронное скачивание |
+| База данных | PostgreSQL 16 + [SQLAlchemy 2.0](https://docs.sqlalchemy.org) ORM |
+| Миграции БД | [Alembic](https://alembic.sqlalchemy.org) — автоприменение при старте |
+| Скачивание видео | [yt-dlp](https://github.com/yt-dlp/yt-dlp) + ffmpeg — 1000+ сайтов |
+| Кэш / блокировки | [Redis](https://redis.io) — rate limiting, file_id кэш, дедупликация |
+| Конфигурация | [Pydantic Settings](https://docs.pydantic.dev/latest/concepts/pydantic_settings/) — типизированный `.env` |
+| Обратный прокси | Nginx 1.27 — HTTPS терминация, rate limit |
+| SSL | [Let's Encrypt](https://letsencrypt.org) + certbot — выпуск и автоперевыпуск |
+| Контейнеры | Docker Compose — 4 сервиса с healthcheck |
+| Системная служба | systemd — `video-bot.service`, автостарт при перезагрузке |
+| Тестирование | pytest + pytest-asyncio + pytest-cov + pytest-mock |
 
 ---
 
-## Возможности
+## 🚀 Быстрый старт (автоустановка)
 
-### Загрузка видео
-- Скачивает видео по ссылке (YouTube, VK, TikTok, Instagram, Facebook и любые другие сайты, поддерживаемые yt-dlp)
-- Выбор качества: 360p / 480p / 720p / 1080p / лучшее
-- Кэш `file_id` — если видео уже скачивалось, бот мгновенно отправляет его из Telegram без повторной загрузки
-- Поддержка cookie-файлов для авторизованного доступа к Facebook, Instagram, TikTok
+> **Требования:** чистый Ubuntu 22.04 / 24.04, домен с A-записью на IP сервера, доступ по SSH от root.
 
-### Управление доступом (три режима)
-| Режим | Условие | Поведение |
-|---|---|---|
-| **Публичный** | `ALLOWED_USERS` пуст и нет доверенных | Доступен всем |
-| **Статичный список** | `ALLOWED_USERS` заполнен в `.env` | Только перечисленные ID |
-| **Доверенные пользователи** | Добавлены через `/adduser` | Только добавленные администратором |
+Скрипт `setup.sh` настраивает всё с нуля за один запуск. Он проведёт вас через все шаги интерактивно.
 
-Администратор всегда имеет доступ вне зависимости от режима.  
-Команда `/admin` позволяет включить/выключить бот для всех одной кнопкой.
-
-### Антиспам и лимиты
-- Rate limiter: скользящее окно + временный бан
-- Дневной лимит запросов на пользователя
-- Лимит активных задач на пользователя
-- Глобальный лимит очереди
-- Атомарные Lua-скрипты в Redis для счётчиков без race condition
-- Nginx rate limit на webhook-эндпоинт
-
-### Безопасность
-- Нет сырого SQL — весь доступ через SQLAlchemy ORM
-- Webhook защищён `X-Telegram-Bot-Api-Secret-Token`
-- Duplicate lock по `url_hash + quality` — одно и то же видео не скачивается параллельно дважды
-- SSL/TLS через Let's Encrypt с автоперевыпуском
-
----
-
-## Быстрый старт (автоустановка)
-
-Самый простой способ — запустить интерактивный скрипт настройки на чистом Ubuntu-сервере:
+### Шаг 1 — Подключитесь к серверу и клонируйте репозиторий
 
 ```bash
+ssh root@ваш-сервер
+
 git clone https://github.com/Poleno7682/Video_down.git
 cd Video_down
+```
+
+### Шаг 2 — Запустите скрипт установки
+
+```bash
 sudo bash scripts/setup.sh
 ```
 
-Скрипт пошагово:
-1. Проверяет и устанавливает Docker Engine (официальный репозиторий), certbot, curl и остальные зависимости
-2. Спрашивает токен бота, данные PostgreSQL, домен, email и Telegram ID администратора
-3. Выпускает SSL-сертификат Let's Encrypt (`--standalone`)
-4. Настраивает автоперевыпуск сертификата через cron (ежедневно в 03:15)
-5. Генерирует `nginx/video-bot.conf` и `.env`
-6. Создаёт и включает системную службу `video-bot.service` (systemd)
-7. Собирает Docker-образы и запускает весь стек
-8. Проверяет доступность через health-check
+Скрипт задаст вам несколько вопросов:
 
-После завершения бот доступен по адресу `https://ваш-домен/telegram/webhook`.
+| Вопрос | Пример |
+|---|---|
+| Токен бота (от @BotFather) | `123456789:AABBccDDeeff...` |
+| Хост PostgreSQL | `postgres` (внутри Docker — оставьте по умолчанию) |
+| Название базы данных | `video_bot` |
+| Пользователь БД | `video_bot` |
+| Пароль БД | `MySuperPassword123` |
+| Домен сервера | `bot.example.com` |
+| Email для Let's Encrypt | `admin@example.com` |
+| Telegram ID администратора | `123456789` (узнать через @userinfobot) |
+
+### Что делает скрипт автоматически
+
+```
+1. Проверяет наличие Docker, certbot, curl, openssl, python3
+   └── Устанавливает отсутствующее (Docker — через официальный репозиторий)
+
+2. Запрашивает SSL-сертификат Let's Encrypt (certbot --standalone)
+   └── Копирует .pem файлы в nginx/certs/
+
+3. Создаёт скрипт автоперевыпуска scripts/renew_cert.sh
+   └── Регистрирует cron-задание на ежедневный запуск в 03:15
+
+4. Генерирует nginx/video-bot.conf с вашим доменом
+
+5. Генерирует .env с токеном, паролями и случайным WEBHOOK_SECRET
+
+6. Создаёт и включает systemd-службу /etc/systemd/system/video-bot.service
+
+7. Собирает Docker-образы (pip install requirements.txt внутри контейнера)
+
+8. Запускает стек через systemctl start video-bot
+
+9. Проверяет доступность бота через GET /health
+```
+
+### Шаг 3 — Убедитесь что всё работает
+
+```bash
+systemctl status video-bot
+docker compose ps
+curl https://bot.example.com/health
+```
+
+Ожидаемый ответ health-check:
+```json
+{"status": "ok"}
+```
 
 ---
 
-## Ручная установка
+## 🔧 Ручная установка
 
-### 1. Требования
+Если хотите настроить всё вручную или разобраться в деталях.
 
-- Ubuntu 22.04+ (или Debian 12+)
-- Docker Engine с docker-compose-plugin
-- Домен с A-записью, указывающей на сервер (для SSL)
+### Шаг 1 — Установите Docker Engine
 
-### 2. Клонировать и настроить окружение
+```bash
+# Добавьте официальный репозиторий Docker
+apt-get update
+apt-get install -y ca-certificates curl gnupg
+
+install -m 0755 -d /etc/apt/keyrings
+curl -fsSL https://download.docker.com/linux/ubuntu/gpg \
+    | gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+chmod a+r /etc/apt/keyrings/docker.gpg
+
+echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] \
+https://download.docker.com/linux/ubuntu $(. /etc/os-release && echo $VERSION_CODENAME) stable" \
+    > /etc/apt/sources.list.d/docker.list
+
+# Установите Docker CE и плагин Compose
+apt-get update
+apt-get install -y docker-ce docker-ce-cli containerd.io \
+    docker-buildx-plugin docker-compose-plugin
+
+systemctl enable --now docker
+```
+
+### Шаг 2 — Клонируйте репозиторий
 
 ```bash
 git clone https://github.com/Poleno7682/Video_down.git
 cd Video_down
+```
+
+### Шаг 3 — Настройте переменные окружения
+
+```bash
 cp .env.example .env
 nano .env
 ```
 
-Обязательные параметры:
+Обязательно заполните:
 
 ```env
 BOT_TOKEN=123456789:ваш_токен_от_BotFather
-WEBHOOK_BASE_URL=https://ваш-домен.com
-WEBHOOK_SECRET=длинный_случайный_секрет
+WEBHOOK_BASE_URL=https://bot.example.com
+WEBHOOK_SECRET=сгенерируйте_через_openssl_rand_hex_32
 POSTGRES_PASSWORD=надёжный_пароль
 DATABASE_URL=postgresql+psycopg2://video_bot:надёжный_пароль@postgres:5432/video_bot
 ADMIN_USERS=ваш_telegram_id
 ```
 
-### 3. SSL-сертификат
+### Шаг 4 — Получите SSL-сертификат
 
 ```bash
-# Остановите nginx если запущен
-sudo certbot certonly --standalone -d ваш-домен.com --email ваш@email.com --agree-tos
+apt-get install -y certbot
 
-# Скопируйте сертификаты
+# certbot использует порт 80 — убедитесь что он свободен
+certbot certonly \
+    --standalone \
+    --non-interactive \
+    --agree-tos \
+    --email ваш@email.com \
+    -d bot.example.com
+
+# Скопируйте сертификаты в папку проекта
 mkdir -p nginx/certs
-sudo cp /etc/letsencrypt/live/ваш-домен.com/fullchain.pem nginx/certs/
-sudo cp /etc/letsencrypt/live/ваш-домен.com/privkey.pem   nginx/certs/
+cp /etc/letsencrypt/live/bot.example.com/fullchain.pem nginx/certs/
+cp /etc/letsencrypt/live/bot.example.com/privkey.pem   nginx/certs/
 chmod 644 nginx/certs/*.pem
 ```
 
-### 4. Nginx-конфиг
+### Шаг 5 — Укажите домен в конфиге Nginx
 
-Замените `your-domain.com` в `nginx/video-bot.conf` на ваш реальный домен:
+Отредактируйте `nginx/video-bot.conf` — замените `your-domain.com` на ваш домен:
 
 ```bash
-sed -i 's/your-domain.com/ваш-домен.com/g' nginx/video-bot.conf
+sed -i 's/your-domain.com/bot.example.com/g' nginx/video-bot.conf
 ```
 
-### 5. Запуск
+### Шаг 6 — Создайте системную службу (опционально, но рекомендуется)
 
 ```bash
-docker compose up -d --build
+cat > /etc/systemd/system/video-bot.service <<EOF
+[Unit]
+Description=Video Bot (Docker Compose)
+After=docker.service network-online.target
+Requires=docker.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+WorkingDirectory=$(pwd)
+ExecStart=/usr/bin/docker compose up -d
+ExecStop=/usr/bin/docker compose down
+TimeoutStartSec=300
+TimeoutStopSec=120
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+systemctl daemon-reload
+systemctl enable video-bot
 ```
 
-### 6. Проверка
+### Шаг 7 — Соберите образы и запустите
 
 ```bash
-docker compose ps
+docker compose build
+systemctl start video-bot
+
+# Или без systemd:
+docker compose up -d
+```
+
+### Шаг 8 — Проверьте логи
+
+```bash
 docker compose logs -f bot
-curl https://ваш-домен.com/health
+docker compose logs -f worker
 ```
 
 ---
 
-## Управление службой
+## 🔐 SSL-сертификат и автоперевыпуск
 
-После автоустановки проект зарегистрирован как systemd-служба `video-bot`:
+### Первичный выпуск сертификата
+
+При автоустановке скрипт запрашивает сертификат командой:
 
 ```bash
-systemctl status video-bot      # статус
-systemctl restart video-bot     # перезапуск всего стека
-systemctl stop video-bot        # остановка
+certbot certonly --standalone --non-interactive --agree-tos \
+    --email ваш@email.com -d бот.example.com
+```
+
+Режим `--standalone` — certbot временно поднимает HTTP-сервер на порту 80 для верификации домена через ACME-challenge. Nginx в это время ещё не запущен, поэтому порт свободен.
+
+После выпуска сертификаты копируются в папку проекта и монтируются в контейнер Nginx:
+
+```
+/etc/letsencrypt/live/example.com/
+    fullchain.pem  →  nginx/certs/fullchain.pem
+    privkey.pem    →  nginx/certs/privkey.pem
+```
+
+### Автоматический перевыпуск
+
+Скрипт создаёт два объекта для автоперевыпуска:
+
+**1. `scripts/renew_cert.sh`** — скрипт обновления:
+
+```bash
+certbot renew --standalone \
+    --pre-hook  "docker compose stop nginx"   # освобождает порт 80
+    --post-hook "cp новые_сертификаты nginx/certs/ && docker compose start nginx"
+```
+
+Алгоритм работы:
+- `--pre-hook` останавливает контейнер Nginx → порт 80 свободен
+- certbot проверяет срок действия (обновляет только если до истечения < 30 дней)
+- `--post-hook` копирует новые `.pem` в папку проекта и запускает Nginx обратно
+
+**2. `/etc/cron.d/video-bot-certbot`** — cron-задание:
+
+```
+15 3 * * * root /path/to/scripts/renew_cert.sh
+```
+
+Запускается ежедневно в **03:15**. Реальное обновление происходит раз в ~60 дней (Let's Encrypt выдаёт сертификаты на 90 дней, certbot обновляет за 30 дней до истечения).
+
+Лог перевыпуска пишется в `logs/certbot.log`.
+
+---
+
+## ⚙️ Управление службой
+
+### Через systemd (рекомендуется)
+
+```bash
+systemctl status video-bot      # статус всего стека
 systemctl start video-bot       # запуск
-journalctl -u video-bot -f      # логи запуска/остановки
+systemctl stop video-bot        # остановка (docker compose down)
+systemctl restart video-bot     # перезапуск
+systemctl enable video-bot      # включить автостарт при перезагрузке
+systemctl disable video-bot     # выключить автостарт
+
+journalctl -u video-bot -f      # логи запуска и остановки службы
+journalctl -u video-bot --since "1 hour ago"
 ```
 
-Управление отдельными контейнерами:
+### Через Docker Compose (для работы с отдельными контейнерами)
 
 ```bash
-docker compose logs -f bot      # логи бота
-docker compose logs -f worker   # логи воркера
-docker compose ps               # статус контейнеров
+docker compose ps                       # статус всех контейнеров
+docker compose logs -f bot              # логи бота в реальном времени
+docker compose logs -f worker           # логи Celery-воркера
+docker compose logs -f nginx            # логи Nginx
+docker compose logs -f postgres         # логи PostgreSQL
+
+docker compose restart bot              # перезапуск только бота
+docker compose exec bot python -c "..."  # выполнить команду в контейнере
+
+docker compose up -d --scale worker=3  # запустить 3 воркера
 ```
 
 ---
 
-## Команды бота
+## 🤖 Команды бота
 
 ### Пользовательские команды
 
 | Команда | Описание |
 |---|---|
-| `/start`, `/help` | Справка по боту |
-| `/quality` | Выбрать качество видео (360p–1080p / best) |
-| `/status` | Статус очереди: активные задачи, дневные запросы |
-| *(любая ссылка)* | Скачать видео по URL |
+| `/start`, `/help` | Справка: как пользоваться ботом |
+| `/quality` | Выбрать качество видео через инлайн-меню |
+| `/status` | Статус очереди: активные задачи и дневной счётчик |
+| *(любая ссылка)* | Скачать видео. Ссылку можно прислать отдельным сообщением или вставить в подпись к медиа |
 
 ### Команды администратора
 
 | Команда | Описание |
 |---|---|
-| `/admin` | Панель администратора — статус бота, режим доступа, кнопка вкл/выкл |
-| `/adduser <id>` | Добавить пользователя в доверенные (по Telegram ID) |
+| `/admin` | Панель администратора: статус бота, режим доступа, кнопка вкл/выкл |
+| `/adduser <id>` | Добавить пользователя в доверенные по Telegram ID |
 | `/removeuser <id>` | Убрать пользователя из доверенных |
 | `/listusers` | Список всех доверенных пользователей |
 
-Кнопка в `/admin` позволяет мгновенно отключить бот для всех пользователей (кроме администраторов) — полезно при обслуживании сервера.
+> Узнать свой Telegram ID можно через бота [@userinfobot](https://t.me/userinfobot).
+
+Меню команд в Telegram настраивается автоматически: обычные пользователи видят только пользовательские команды, администратор — расширенный список.
 
 ---
 
-## Cookie-файлы
+## 🔑 Управление доступом
 
-Для скачивания видео с Facebook, Instagram, TikTok (приватный или возрастной контент) положите cookie-файлы в формате Netscape в папку `cookies/`:
+Бот поддерживает три режима — переключение происходит автоматически по приоритету:
 
 ```
-cookies/facebook.txt
-cookies/instagram.txt
-cookies/tiktok.txt
+Администратор (ADMIN_USERS)  →  всегда разрешён
+       ↓
+Bot disabled (Redis key)     →  блокирует всех не-администраторов
+       ↓
+ALLOWED_USERS в .env         →  статичный список разрешённых ID
+       ↓
+Доверенные (/adduser)        →  динамический список через Redis
+       ↓
+Публичный бот                →  доступен всем (если ни одного из вышеперечисленного)
 ```
 
-Экспортировать cookies можно браузерным расширением [Get cookies.txt LOCALLY](https://chrome.google.com/webstore/detail/get-cookiestxt-locally/).
+| Режим | Как включить | Кто имеет доступ |
+|---|---|---|
+| **Публичный** | `ALLOWED_USERS` пуст, список `/adduser` пуст | Все пользователи |
+| **Статичный список** | Заполнить `ALLOWED_USERS=111,222,333` в `.env` | Только перечисленные ID |
+| **Доверенные пользователи** | Добавить через `/adduser <id>` | Только добавленные администратором |
+| **Бот выключен** | Нажать кнопку в `/admin` | Только администраторы |
 
-При `USE_COOKIES=false` в `.env` cookies не используются.
+Переключить кнопкой "🔴 Выключить бот для всех" / "🟢 Включить бот для всех" в панели `/admin`.
 
 ---
 
-## Переменные окружения
+## 🍪 Cookie-файлы
+
+Для скачивания видео с платформ, требующих авторизации (приватные аккаунты, возрастные ограничения), положите cookie-файлы в формате Netscape в папку `cookies/`:
+
+```
+cookies/
+├── facebook.txt
+├── instagram.txt
+└── tiktok.txt
+```
+
+**Как получить cookie-файл:**
+1. Установите расширение [Get cookies.txt LOCALLY](https://chrome.google.com/webstore/detail/get-cookiestxt-locally/) в Chrome/Edge
+2. Войдите в аккаунт на нужном сайте
+3. Нажмите расширение → Export → сохраните файл
+
+**Отключить cookies:**
+```env
+USE_COOKIES=false
+```
+
+При отсутствии файла для конкретной платформы cookies для неё не используются (остальные работают).
+
+---
+
+## ⚙️ Переменные окружения
+
+### Telegram
+
+| Переменная | Обязательна | Описание |
+|---|---|---|
+| `BOT_TOKEN` | ✅ | Токен от @BotFather |
+| `WEBHOOK_BASE_URL` | ✅ | Публичный URL (`https://bot.example.com`) |
+| `WEBHOOK_PATH` | | Путь вебхука (по умолчанию `/telegram/webhook`) |
+| `WEBHOOK_SECRET` | ✅ | Случайная строка для защиты вебхука |
+
+### База данных и очередь
+
+| Переменная | Значение по умолчанию | Описание |
+|---|---|---|
+| `DATABASE_URL` | ✅ | Строка подключения к PostgreSQL |
+| `POSTGRES_PASSWORD` | ✅ | Пароль PostgreSQL |
+| `REDIS_URL` | `redis://redis:6379/0` | URL Redis |
+| `CELERY_BROKER_URL` | `redis://redis:6379/1` | Брокер Celery |
+| `CELERY_RESULT_BACKEND` | `redis://redis:6379/2` | Бэкенд результатов |
+
+### Доступ
+
+| Переменная | Значение по умолчанию | Описание |
+|---|---|---|
+| `ADMIN_USERS` | — | Telegram ID администраторов через запятую |
+| `ALLOWED_USERS` | — | Статичный белый список ID (пусто = публичный/доверенные) |
+
+### Антиспам
 
 | Переменная | По умолчанию | Описание |
 |---|---|---|
-| `BOT_TOKEN` | — | Токен бота от @BotFather |
-| `WEBHOOK_BASE_URL` | — | Публичный URL сервера (`https://example.com`) |
-| `WEBHOOK_PATH` | `/telegram/webhook` | Путь вебхука |
-| `WEBHOOK_SECRET` | — | Секрет для проверки запросов от Telegram |
-| `POSTGRES_PASSWORD` | — | Пароль PostgreSQL |
-| `DATABASE_URL` | — | Полная строка подключения к БД |
-| `REDIS_URL` | `redis://redis:6379/0` | URL Redis |
-| `ADMIN_USERS` | — | Telegram ID администраторов через запятую |
-| `ALLOWED_USERS` | — | Статичный белый список ID (пусто = публичный бот) |
-| `DEFAULT_QUALITY` | `720p` | Качество по умолчанию |
-| `MAX_FILE_MB` | `50` | Максимальный размер файла для отправки |
-| `RATE_LIMIT_WINDOW_SECONDS` | `60` | Окно антиспама (сек) |
+| `RATE_LIMIT_WINDOW_SECONDS` | `60` | Окно rate limiter (секунды) |
 | `RATE_LIMIT_MAX_MESSAGES` | `8` | Макс. запросов в окне |
-| `BAN_SECONDS` | `600` | Длительность бана за спам |
-| `USER_DAILY_LIMIT` | `50` | Дневной лимит запросов на пользователя |
-| `USER_QUEUE_LIMIT` | `3` | Макс. активных задач на пользователя |
+| `BAN_SECONDS` | `600` | Длительность бана (10 минут) |
+| `USER_DAILY_LIMIT` | `50` | Макс. запросов в день на пользователя |
+| `USER_QUEUE_LIMIT` | `3` | Макс. одновременных задач на пользователя |
 | `GLOBAL_QUEUE_LIMIT` | `50` | Глобальный лимит очереди |
-| `CACHE_TTL_HOURS` | `168` | Срок хранения кэша `file_id` (7 дней) |
-| `USE_COOKIES` | `true` | Использовать cookie-файлы |
-| `DOWNLOAD_TIMEOUT_SECONDS` | `900` | Таймаут скачивания |
+
+### Загрузка
+
+| Переменная | По умолчанию | Описание |
+|---|---|---|
+| `DEFAULT_QUALITY` | `720p` | Качество по умолчанию |
+| `MAX_FILE_MB` | `50` | Макс. размер файла (лимит Telegram Bot API — 50 МБ) |
+| `DOWNLOAD_TIMEOUT_SECONDS` | `900` | Таймаут скачивания (15 минут) |
+| `MAX_ACTIVE_DOWNLOADS_PER_USER` | `1` | Макс. параллельных загрузок на пользователя |
+| `MAX_DOWNLOAD_DURATION_SECONDS` | `1800` | Макс. длительность видео (30 минут) |
+
+### Кэш
+
+| Переменная | По умолчанию | Описание |
+|---|---|---|
+| `CACHE_TTL_HOURS` | `168` | Срок хранения `file_id` в кэше (7 дней) |
+| `DELETE_LOCAL_FILE_AFTER_TELEGRAM_CACHE` | `true` | Удалять локальный файл после кэширования |
 
 ---
 
-## Тесты
+## 🧪 Тесты
 
 ```bash
+# Установить зависимости для разработки
 pip install -r requirements-dev.txt
-pytest tests/ --cov=app --cov-report=term-missing
+
+# Запустить все тесты с отчётом покрытия
+pytest tests/ --cov=app --cov-report=term-missing -v
+
+# Только быстрая проверка
+pytest tests/ -q
 ```
 
-Покрытие: **100%** (893 инструкции, 289 тестов).
+**Результат:**
+
+```
+289 passed in ~4s
+Coverage: 100% (893 statements)
+```
+
+Тесты покрывают все модули изолированно через моки — без реального Docker, Redis или PostgreSQL. Включают:
+- Unit-тесты для всех утилит, сервисов, моделей
+- Тесты всех веток обработчиков роутера (включая граничные случаи)
+- Тесты Celery-задачи, включая прогресс-хук (тестируется через захват closure)
+- Тесты системы логирования с исправлением Windows file-lock
 
 ---
 
-## Рекомендации для продакшена
+## 📁 Структура проекта
 
-**Небольшой VPS (1–2 CPU, 2 GB RAM):**
+```
+Video_down/
+│
+├── app/
+│   ├── bot/
+│   │   ├── main.py              # Запуск aiohttp webhook-сервера, on_startup/on_shutdown
+│   │   └── router.py            # Все обработчики: доступ, антиспам, скачивание, /admin
+│   ├── core/
+│   │   ├── config.py            # Pydantic Settings — типизированный .env с кэшем
+│   │   └── logging.py           # Ротирующие файловые логи + вывод в stdout
+│   ├── db/
+│   │   ├── models.py            # SQLAlchemy модели: User, Video, DownloadRequest
+│   │   ├── repository.py        # Repository паттерн — фасад над тремя репозиториями
+│   │   ├── session.py           # Фабрика сессий БД
+│   │   └── utils.py             # Вспомогательные функции БД
+│   ├── keyboards/
+│   │   ├── admin.py             # Инлайн-клавиатура панели администратора
+│   │   └── quality.py           # Инлайн-клавиатура выбора качества
+│   ├── services/
+│   │   ├── rate_limiter.py      # Redis rate limiter с атомарными Lua-скриптами
+│   │   └── redis_client.py      # Синглтон-клиент Redis
+│   ├── utils/
+│   │   ├── quality.py           # Нормализация и форматирование качества для yt-dlp
+│   │   └── url_tools.py         # Извлечение URL, валидация, нормализация, SHA256-хэш
+│   └── worker/
+│       ├── celery_app.py        # Конфигурация Celery
+│       ├── downloader.py        # Обёртка над yt-dlp (SRP: опции, выбор файла, cookies)
+│       ├── tasks.py             # Celery-задача: скачать → отправить → закэшировать
+│       └── telegram_sender.py   # Синхронный мост для вызова asyncio из Celery-воркера
+│
+├── alembic/
+│   └── versions/
+│       └── 0001_initial.py      # Начальная миграция (users, videos, download_requests)
+│
+├── nginx/
+│   └── video-bot.conf           # HTTPS, rate limit, проксирование на бот:8080
+│
+├── scripts/
+│   ├── setup.sh                 # Скрипт автоустановки (Docker, SSL, systemd, .env)
+│   ├── renew_cert.sh            # Автоперевыпуск Let's Encrypt (генерируется setup.sh)
+│   └── update_ytdlp.sh          # Обновление yt-dlp без пересборки образа
+│
+├── tests/                       # 289 тестов, покрытие 100%
+│   ├── test_bot_router.py       # Тесты всех обработчиков и логики доступа
+│   ├── test_worker_tasks.py     # Тесты Celery-задачи
+│   └── ...                      # Тесты каждого модуля
+│
+├── downloads/                   # Временные файлы (монтируется в контейнер)
+├── logs/                        # Логи приложения и certbot
+├── cookies/                     # Cookie-файлы для yt-dlp (не в git)
+├── Dockerfile
+├── docker-compose.yml
+├── .env.example                 # Шаблон переменных окружения
+└── requirements.txt             # aiogram, Celery, SQLAlchemy, yt-dlp, ...
+```
+
+---
+
+## 🏭 Рекомендации для продакшена
+
+### Небольшой VPS (1–2 CPU, 2 GB RAM)
+
 ```env
 USER_QUEUE_LIMIT=2
 GLOBAL_QUEUE_LIMIT=10
 MAX_ACTIVE_DOWNLOADS_PER_USER=1
+RATE_LIMIT_MAX_MESSAGES=5
 ```
 
-**Крупный сервер — несколько воркеров:**
+### Крупный сервер — масштабирование воркеров
+
 ```bash
+# Запустить 3 параллельных воркера
 docker compose up -d --scale worker=3
 ```
 
-При масштабировании воркеров увеличьте `GLOBAL_QUEUE_LIMIT` и выделите больше ресурсов PostgreSQL/Redis.
-
----
-
-## Структура проекта
-
+При масштабировании увеличьте:
+```env
+GLOBAL_QUEUE_LIMIT=100
+USER_QUEUE_LIMIT=5
 ```
-.
-├── app/
-│   ├── bot/
-│   │   ├── main.py          # Запуск webhook-сервера, systemd-команды
-│   │   └── router.py        # Все обработчики, доступ, антиспам
-│   ├── core/
-│   │   ├── config.py        # Pydantic Settings
-│   │   └── logging.py       # Ротирующие логи
-│   ├── db/
-│   │   ├── models.py        # SQLAlchemy модели
-│   │   ├── repository.py    # Repository паттерн
-│   │   └── session.py       # Сессии БД
-│   ├── keyboards/
-│   │   ├── admin.py         # Инлайн-клавиатура администратора
-│   │   └── quality.py       # Инлайн-клавиатура качества
-│   ├── services/
-│   │   ├── rate_limiter.py  # Антиспам через Redis Lua
-│   │   └── redis_client.py  # Клиент Redis
-│   ├── utils/
-│   │   ├── quality.py       # Нормализация качества
-│   │   └── url_tools.py     # Извлечение и хэширование URL
-│   └── worker/
-│       ├── celery_app.py    # Конфигурация Celery
-│       ├── downloader.py    # Скачивание через yt-dlp
-│       ├── tasks.py         # Celery-задача
-│       └── telegram_sender.py # Отправка файлов в Telegram
-├── alembic/                 # Миграции БД
-├── nginx/
-│   └── video-bot.conf       # Конфиг Nginx (HTTPS + rate limit)
-├── scripts/
-│   └── setup.sh             # Скрипт автоустановки
-├── tests/                   # 289 тестов, покрытие 100%
-├── docker-compose.yml
-├── Dockerfile
-└── .env.example
+
+### Обновление yt-dlp без пересборки образа
+
+```bash
+bash scripts/update_ytdlp.sh
+```
+
+### Мониторинг очереди Celery
+
+```bash
+docker compose exec worker celery -A app.worker.celery_app:celery_app inspect active
+docker compose exec worker celery -A app.worker.celery_app:celery_app inspect stats
 ```
 
 ---
 
-## Лицензия
+## 📄 Лицензия
 
-MIT
+MIT — используйте свободно.
