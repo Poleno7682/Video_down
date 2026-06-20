@@ -57,7 +57,7 @@ services:
     container_name: video_bot_worker
     restart: unless-stopped
     env_file: .env
-    command: celery -A app.worker.celery_app:celery_app worker --loglevel=INFO --concurrency=1 --prefetch-multiplier=1 --max-tasks-per-child=20
+    command: celery -A app.worker.celery_app:celery_app worker --loglevel=INFO --concurrency=1 --prefetch-multiplier=1 --max-tasks-per-child=20 -Q downloads,celery
     depends_on:
       postgres:
         condition: service_healthy
