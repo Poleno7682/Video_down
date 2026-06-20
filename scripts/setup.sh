@@ -16,11 +16,12 @@ BLUE='\033[0;34m'; BOLD='\033[1m'; NC='\033[0m'
 step()  { echo -e "\n${BLUE}${BOLD}▶  $*${NC}"; }
 ok()    { echo -e "   ${GREEN}✓  $*${NC}"; }
 warn()  { echo -e "   ${YELLOW}⚠  $*${NC}"; }
-die()   { echo -e "\n${RED}${BOLD}✗  $*${NC}" >&2; exit 1; }
+die()   { _show_fatal_error "$*"; exit 1; }
 info()  { echo -e "   ${BOLD}$*${NC}"; }
 
 # ─── Динамический прогресс-бар (закреплён внизу терминала) ──────────────────
 _PB_READY=0
+_PB_CLEANED=0
 _PB_ROWS=0
 _PB_COLS=0
 
@@ -29,12 +30,10 @@ _pb_init() {
     if [[ -t 1 ]] && command -v tput &>/dev/null; then
         _PB_ROWS=$(tput lines)
         _PB_COLS=$(tput cols)
-        tput csr 0 $(( _PB_ROWS - 3 ))   # зона прокрутки = всё кроме 2 нижних строк
+        tput csr 0 $(( _PB_ROWS - 3 )) 2>/dev/null || true   # зона прокрутки = всё кроме 2 нижних строк
         _PB_READY=1
+        _PB_CLEANED=0
     fi
-    # Восстановить терминал при любом выходе (ошибка, Ctrl+C, нормальный)
-    trap '_pb_cleanup 2>/dev/null; exit' INT TERM
-    trap '_pb_cleanup 2>/dev/null'       EXIT
 }
 
 # Рисует разделитель и бар в нижних двух строках.
@@ -59,17 +58,53 @@ _pb_draw() {
     tput rc                                     # вернуть курсор
 }
 
-# Восстанавливает нормальный терминал (вызывается по trap и перед итоговым выводом).
+# Восстанавливает терминал.
+# soft  — только сброс scroll region (сохраняет лог на экране)
+# full  — дополнительно очищает строки прогресс-бара (перед итоговым выводом)
 _pb_cleanup() {
+    local mode="${1:-soft}"
     [[ $_PB_READY -eq 0 ]] && return
     local rows
     rows=$(tput lines 2>/dev/null || echo 24)
-    tput csr 0 $(( rows - 1 )) 2>/dev/null     # сброс зоны прокрутки
-    tput cup $(( rows - 2 )) 0 2>/dev/null; printf "\033[2K"
-    tput cup $(( rows - 1 )) 0 2>/dev/null; printf "\033[2K"
-    tput cup $(( rows - 3 )) 0 2>/dev/null
-    printf "\n"
+    tput csr 0 $(( rows - 1 )) 2>/dev/null || true
+    if [[ "$mode" == "full" ]]; then
+        tput cup $(( rows - 2 )) 0 2>/dev/null; printf "\033[2K"
+        tput cup $(( rows - 1 )) 0 2>/dev/null; printf "\033[2K"
+        tput cup $(( rows - 3 )) 0 2>/dev/null
+        printf "\n"
+    fi
     _PB_READY=0
+    _PB_CLEANED=1
+}
+
+# Печатает фатальную ошибку после восстановления терминала (иначе текст теряется в scroll region).
+_show_fatal_error() {
+    _pb_cleanup soft 2>/dev/null || true
+    echo ""
+    echo -e "${RED}${BOLD}╔════════════════════════════════════════════════════════════╗${NC}"
+    echo -e "${RED}${BOLD}║                  ✗  ОШИБКА УСТАНОВКИ                       ║${NC}"
+    echo -e "${RED}${BOLD}╚════════════════════════════════════════════════════════════╝${NC}"
+    echo -e "\n${RED}${BOLD}✗  $*${NC}\n"
+}
+
+
+_on_err() {
+    local line="$1" code=$?
+    [[ $code -eq 0 ]] && return
+    trap '' ERR
+    _show_fatal_error "Ошибка в строке ${line}: ${BASH_COMMAND} (код ${code})"
+    exit "$code"
+}
+
+_on_interrupt() {
+    trap '' INT TERM
+    _show_fatal_error "Установка прервана (Ctrl+C)."
+    exit 130
+}
+
+_on_exit() {
+    [[ ${_PB_CLEANED:-0} -eq 1 ]] && return
+    _pb_cleanup soft 2>/dev/null || true
 }
 
 # Публичный вызов: progress <процент> <сообщение>
@@ -311,7 +346,7 @@ install_deps() {
 # ─── Шаг 2: Сбор конфигурации ────────────────────────────────────────────────
 collect_config() {
     progress 44 "Сбор конфигурации…"
-    _pb_cleanup
+    _pb_cleanup full
     echo ""
     echo -e "${BOLD}${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
     echo -e "${BOLD}${BLUE}   Настройка Video Bot — ответьте на несколько вопросов${NC}"
@@ -633,6 +668,11 @@ print_summary() {
 
 # ─── Main ─────────────────────────────────────────────────────────────────────
 main() {
+    set -E
+    trap '_on_err $LINENO' ERR
+    trap '_on_interrupt' INT TERM
+    trap '_on_exit' EXIT
+
     echo -e "\n${BOLD}${BLUE}╔════════════════════════════════════════════════════════════╗${NC}"
     echo -e "${BOLD}${BLUE}║        Video Bot — Мастер первоначальной настройки         ║${NC}"
     echo -e "${BOLD}${BLUE}╚════════════════════════════════════════════════════════════╝${NC}\n"
@@ -648,7 +688,7 @@ main() {
     write_env
     setup_systemd
     start_services
-    _pb_cleanup
+    _pb_cleanup full
     print_summary
 }
 
