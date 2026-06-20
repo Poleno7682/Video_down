@@ -1,0 +1,99 @@
+from __future__ import annotations
+
+import logging
+from functools import lru_cache
+from pathlib import Path
+from typing import Any
+
+from pydantic import Field, PrivateAttr
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+logger = logging.getLogger(__name__)
+
+
+class Settings(BaseSettings):
+    model_config = SettingsConfigDict(env_file=".env", extra="ignore")
+
+    bot_token: str = Field(alias="BOT_TOKEN")
+    webhook_base_url: str = Field(alias="WEBHOOK_BASE_URL")
+    webhook_path: str = Field(default="/telegram/webhook", alias="WEBHOOK_PATH")
+    webhook_secret: str = Field(alias="WEBHOOK_SECRET")
+
+    database_url: str = Field(alias="DATABASE_URL")
+    redis_url: str = Field(alias="REDIS_URL")
+    celery_broker_url: str = Field(alias="CELERY_BROKER_URL")
+    celery_result_backend: str = Field(alias="CELERY_RESULT_BACKEND")
+
+    download_dir: Path = Field(default=Path("/app/downloads"), alias="DOWNLOAD_DIR")
+    cookie_dir: Path = Field(default=Path("/app/cookies"), alias="COOKIE_DIR")
+    log_dir: Path = Field(default=Path("/app/logs"), alias="LOG_DIR")
+
+    allowed_users: str = Field(default="", alias="ALLOWED_USERS")
+    admin_users: str = Field(default="", alias="ADMIN_USERS")
+
+    rate_limit_window_seconds: int = Field(default=60, alias="RATE_LIMIT_WINDOW_SECONDS")
+    rate_limit_max_messages: int = Field(default=8, alias="RATE_LIMIT_MAX_MESSAGES")
+    ban_seconds: int = Field(default=600, alias="BAN_SECONDS")
+    user_daily_limit: int = Field(default=50, alias="USER_DAILY_LIMIT")
+    user_queue_limit: int = Field(default=3, alias="USER_QUEUE_LIMIT")
+    global_queue_limit: int = Field(default=50, alias="GLOBAL_QUEUE_LIMIT")
+
+    default_quality: str = Field(default="720p", alias="DEFAULT_QUALITY")
+    # Standard Telegram Bot API limit is 50 MB. Set MAX_FILE_MB=2000 only when
+    # using a self-hosted Local Bot API server.
+    max_file_mb: int = Field(default=50, alias="MAX_FILE_MB")
+    download_timeout_seconds: int = Field(default=900, alias="DOWNLOAD_TIMEOUT_SECONDS")
+    max_active_downloads_per_user: int = Field(default=1, alias="MAX_ACTIVE_DOWNLOADS_PER_USER")
+    max_download_duration_seconds: int = Field(default=1800, alias="MAX_DOWNLOAD_DURATION_SECONDS")
+
+    cache_ttl_hours: int = Field(default=168, alias="CACHE_TTL_HOURS")
+    delete_local_file_after_telegram_cache: bool = Field(default=True, alias="DELETE_LOCAL_FILE_AFTER_TELEGRAM_CACHE")
+
+    use_cookies: bool = Field(default=True, alias="USE_COOKIES")
+    facebook_cookies_file: Path = Field(default=Path("/app/cookies/facebook.txt"), alias="FACEBOOK_COOKIES_FILE")
+    instagram_cookies_file: Path = Field(default=Path("/app/cookies/instagram.txt"), alias="INSTAGRAM_COOKIES_FILE")
+    tiktok_cookies_file: Path = Field(default=Path("/app/cookies/tiktok.txt"), alias="TIKTOK_COOKIES_FILE")
+
+    app_host: str = Field(default="0.0.0.0", alias="APP_HOST")
+    app_port: int = Field(default=8080, alias="APP_PORT")
+
+    _allowed_user_ids: set[int] = PrivateAttr()
+    _admin_user_ids: set[int] = PrivateAttr()
+
+    def model_post_init(self, __context: Any) -> None:
+        self._allowed_user_ids = _parse_ids(self.allowed_users)
+        self._admin_user_ids = _parse_ids(self.admin_users)
+
+    @property
+    def webhook_url(self) -> str:
+        return self.webhook_base_url.rstrip("/") + self.webhook_path
+
+    @property
+    def allowed_user_ids(self) -> set[int]:
+        return self._allowed_user_ids
+
+    @property
+    def admin_user_ids(self) -> set[int]:
+        return self._admin_user_ids
+
+
+def _parse_ids(raw: str) -> set[int]:
+    result = set()
+    for x in raw.split(","):
+        x = x.strip()
+        if not x:
+            continue
+        if x.isdigit():
+            result.add(int(x))
+        else:
+            logger.warning("Invalid user ID in config, skipping: %r", x)
+    return result
+
+
+@lru_cache
+def get_settings() -> Settings:
+    settings = Settings()
+    settings.download_dir.mkdir(parents=True, exist_ok=True)
+    settings.cookie_dir.mkdir(parents=True, exist_ok=True)
+    settings.log_dir.mkdir(parents=True, exist_ok=True)
+    return settings

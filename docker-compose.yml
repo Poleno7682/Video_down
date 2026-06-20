@@ -1,0 +1,95 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: video_bot_postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-video_bot}
+      POSTGRES_USER: ${POSTGRES_USER:-video_bot}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - internal
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-video_bot} -d ${POSTGRES_DB:-video_bot}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    container_name: video_bot_redis
+    restart: unless-stopped
+    # volatile-lru evicts only keys that have a TTL set, protecting permanent data.
+    # allkeys-lru (previous) could evict active video locks and download slot counters.
+    command: redis-server --appendonly yes --maxmemory 512mb --maxmemory-policy volatile-lru
+    volumes:
+      - redis_data:/data
+    networks:
+      - internal
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+  bot:
+    build: .
+    container_name: video_bot_webhook
+    restart: unless-stopped
+    env_file: .env
+    command: python -m app.bot.main
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - ./downloads:/app/downloads
+      - ./cookies:/app/cookies:ro
+      - ./logs:/app/logs
+    networks:
+      - internal
+
+  worker:
+    build: .
+    container_name: video_bot_worker
+    restart: unless-stopped
+    env_file: .env
+    command: celery -A app.worker.celery_app:celery_app worker --loglevel=INFO --concurrency=1 --prefetch-multiplier=1 --max-tasks-per-child=20
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - ./downloads:/app/downloads
+      - ./cookies:/app/cookies:ro
+      - ./logs:/app/logs
+    networks:
+      - internal
+
+  nginx:
+    image: nginx:1.27-alpine
+    container_name: video_bot_nginx
+    restart: unless-stopped
+    depends_on:
+      - bot
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx/video-bot.conf:/etc/nginx/conf.d/default.conf:ro
+      - ./nginx/certs:/etc/nginx/certs:ro
+      - ./nginx/www:/var/www/certbot
+    networks:
+      - internal
+
+volumes:
+  postgres_data:
+  redis_data:
+
+networks:
+  internal:
+    driver: bridge

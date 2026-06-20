@@ -1,0 +1,10 @@
+.env
+__pycache__/
+*.pyc
+downloads/*
+!downloads/.gitkeep
+logs/*
+!logs/.gitkeep
+cookies/*.txt
+nginx/certs/*
+nginx/www/*
