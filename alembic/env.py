@@ -11,7 +11,9 @@ from app.db.models import Base
 config = context.config
 
 if config.config_file_name is not None:
-    fileConfig(config.config_file_name)
+    # disable_existing_loggers=False — иначе alembic глушит логгеры aiogram/app,
+    # и ошибки обработчиков бота перестают попадать в логи.
+    fileConfig(config.config_file_name, disable_existing_loggers=False)
 
 target_metadata = Base.metadata
 

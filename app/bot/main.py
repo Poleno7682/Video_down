@@ -103,6 +103,8 @@ def _run_webhook(bot: Bot, dp: Dispatcher, settings) -> None:
 def _run_polling(bot: Bot, dp: Dispatcher, settings) -> None:
     async def _runner() -> None:
         _apply_migrations()
+        # Alembic reconfigures logging during migrations — restore ours.
+        setup_logging(settings.log_dir)
 
         # Remove any existing webhook so getUpdates (polling) is allowed.
         await bot.delete_webhook(drop_pending_updates=True)
