@@ -204,7 +204,7 @@ install_deps() {
     fi
     progress 35 "Docker Compose v2 готов"
 
-    # ── certbot: snap (предпочтительно) или apt (fallback) ─────────────────────
+    # ── certbot: snap → apt → urllib3 fix → pip ────────────────────────────────
     _snapd_available() {
         if ! have snap; then
             info "Пробую установить snapd…"
@@ -232,27 +232,82 @@ install_deps() {
         return 1
     }
 
+    _certbot_works() {
+        certbot --version &>/dev/null 2>&1
+    }
+
+    _certbot_version_line() {
+        certbot --version 2>&1 || true
+    }
+
+    _ensure_pip() {
+        python3 -m pip --version &>/dev/null 2>&1 && return 0
+        info "Установка python3-pip…"
+        apt-get install -y --no-install-recommends python3-pip
+    }
+
+    _pip_install() {
+        local msg="$1"; shift
+        _ensure_pip
+        local flags=()
+        if python3 -m pip install --help 2>&1 | grep -q 'break-system-packages'; then
+            flags=(--break-system-packages)
+        fi
+        try_step "$msg" python3 -m pip install "${flags[@]}" "$@"
+    }
+
+    _fix_certbot_urllib3() {
+        warn "Пробую исправить конфликт urllib3 для apt-certbot…"
+        _pip_install "Понижение urllib3<2" 'urllib3<2' && _certbot_works
+    }
+
+    _install_certbot_pip() {
+        warn "Устанавливаю certbot через pip (последний резервный способ)…"
+        apt-get remove -y certbot python3-certbot 2>/dev/null || true
+        _pip_install "Установка certbot через pip" certbot || return 1
+        hash -r 2>/dev/null || true
+        _certbot_works
+    }
+
+    _certbot_fail_die() {
+        die "certbot не работает. Ошибка: $(_certbot_version_line). Попробуйте: python3 -m pip install --break-system-packages certbot"
+    }
+
     _install_certbot_apt() {
         warn "Устанавливаю certbot через apt (резервный способ)…"
         run_step "Установка certbot через apt" \
             apt-get install -y --no-install-recommends certbot
-        certbot --version &>/dev/null 2>&1 \
-            || die "certbot не работает ни через snap, ни через apt"
-        ok "certbot через apt: $(certbot --version 2>&1)"
+        if _certbot_works; then
+            ok "certbot через apt: $(_certbot_version_line)"
+            return 0
+        fi
+        if _fix_certbot_urllib3; then
+            ok "certbot через apt (urllib3 исправлен): $(_certbot_version_line)"
+            return 0
+        fi
+        if _install_certbot_pip; then
+            ok "certbot через pip: $(_certbot_version_line)"
+            return 0
+        fi
+        _certbot_fail_die
     }
 
     _install_certbot() {
-        if have certbot && certbot --version &>/dev/null 2>&1; then
-            ok "certbot — уже установлен и работает: $(certbot --version 2>&1)"
+        if _certbot_works; then
+            ok "certbot — уже установлен и работает: $(_certbot_version_line)"
             return
         fi
         if have certbot; then
-            warn "certbot найден, но даёт ошибку (конфликт urllib3) — переустанавливаю"
+            warn "certbot найден, но не запускается — исправляю (часто конфликт urllib3)"
+            if _fix_certbot_urllib3; then
+                ok "certbot исправлен: $(_certbot_version_line)"
+                return
+            fi
             apt-get remove -y certbot python3-certbot 2>/dev/null || true
         fi
         if _snapd_available && try_step "Установка certbot через snap" snap install --classic certbot; then
             ln -sf /snap/bin/certbot /usr/bin/certbot
-            ok "certbot через snap: $(certbot --version 2>&1)"
+            ok "certbot через snap: $(_certbot_version_line)"
             return
         fi
         _install_certbot_apt
