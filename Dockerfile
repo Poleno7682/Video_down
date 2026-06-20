@@ -15,6 +15,8 @@ RUN pip install --no-cache-dir -U pip \
 
 COPY app ./app
 COPY scripts ./scripts
+COPY alembic ./alembic
+COPY alembic.ini ./alembic.ini
 
 RUN mkdir -p /app/downloads /app/cookies /app/logs
 
