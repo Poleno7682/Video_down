@@ -64,6 +64,9 @@ def _build_ydl_opts(
         "postprocessors": [],
         "windowsfilenames": True,
         "restrictfilenames": True,
+        # YouTube EJS: Deno alone is not enough — yt-dlp must fetch challenge solver scripts.
+        # See https://github.com/yt-dlp/yt-dlp/wiki/EJS
+        "remote_components": ["ejs:github"],
     }
     if quality == "audio":
         opts["postprocessors"] = [{"key": "FFmpegExtractAudio", "preferredcodec": "m4a"}]

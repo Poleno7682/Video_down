@@ -12,6 +12,7 @@ from app.worker.tasks import (
     _COOKIE_FAILURE,
     _GENERIC_FAILURE,
     _is_cookie_error,
+    _is_youtube_challenge_error,
     _materialize_user_cookies,
     _handle_task_failure,
     process_download_request,
@@ -115,6 +116,18 @@ class TestIsCookieError:
 
     def test_unrelated_error(self):
         assert _is_cookie_error(RuntimeError("Network unreachable")) is False
+
+
+class TestIsYoutubeChallengeError:
+    def test_format_not_available(self):
+        exc = RuntimeError("[youtube] abc: Requested format is not available.")
+        assert _is_youtube_challenge_error(exc) is True
+
+    def test_challenge_marker(self):
+        assert _is_youtube_challenge_error(RuntimeError("n challenge solving failed")) is True
+
+    def test_unrelated_error(self):
+        assert _is_youtube_challenge_error(RuntimeError("Network unreachable")) is False
 
 
 class TestMaterializeUserCookies:

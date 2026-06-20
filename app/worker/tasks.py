@@ -24,11 +24,20 @@ _COOKIE_ERROR_MARKERS = (
     "sign in to confirm",
     "confirm you're not a bot",
     "confirm you are not a bot",
+    "confirm you’re not a bot",  # typographic apostrophe from yt-dlp
     "--cookies",
     "cookies-from-browser",
     "login required",
     "private video",
     "this video is private",
+)
+
+# YouTube JS-challenge failures often surface as "only images" / missing formats.
+_CHALLENGE_ERROR_MARKERS = (
+    "challenge solving failed",
+    "only images are available",
+    "remote components",
+    "ejs:",
 )
 
 _GENERIC_FAILURE = (
@@ -47,6 +56,13 @@ _COOKIE_FAILURE = (
 def _is_cookie_error(exc: Exception) -> bool:
     text = str(exc).lower()
     return any(marker in text for marker in _COOKIE_ERROR_MARKERS)
+
+
+def _is_youtube_challenge_error(exc: Exception) -> bool:
+    text = str(exc).lower()
+    if "requested format is not available" in text and "youtube" in text:
+        return True
+    return any(marker in text for marker in _CHALLENGE_ERROR_MARKERS)
 
 
 def _materialize_user_cookies(repo: Repository, user_id: int, url: str) -> Path | None:
@@ -85,6 +101,8 @@ def _handle_task_failure(
         repo.mark_video_failed(req.video_id, error_msg)
 
     if _is_cookie_error(exc):
+        message = _COOKIE_FAILURE
+    elif _is_youtube_challenge_error(exc):
         message = _COOKIE_FAILURE
     else:
         message = _GENERIC_FAILURE
