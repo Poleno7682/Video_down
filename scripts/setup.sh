@@ -19,13 +19,72 @@ warn()  { echo -e "   ${YELLOW}⚠  $*${NC}"; }
 die()   { echo -e "\n${RED}${BOLD}✗  $*${NC}" >&2; exit 1; }
 info()  { echo -e "   ${BOLD}$*${NC}"; }
 
-# Прогресс-бар: progress <процент 0-100> <сообщение>
-progress() {
-    local pct="$1" msg="${2:-}" w=40 filled=0 bar=""
+# ─── Динамический прогресс-бар (закреплён внизу терминала) ──────────────────
+_PB_READY=0
+_PB_ROWS=0
+_PB_COLS=0
+
+# Инициализация: резервирует 2 нижние строки вне зоны прокрутки.
+_pb_init() {
+    if [[ -t 1 ]] && command -v tput &>/dev/null; then
+        _PB_ROWS=$(tput lines)
+        _PB_COLS=$(tput cols)
+        tput csr 0 $(( _PB_ROWS - 3 ))   # зона прокрутки = всё кроме 2 нижних строк
+        _PB_READY=1
+    fi
+    # Восстановить терминал при любом выходе (ошибка, Ctrl+C, нормальный)
+    trap '_pb_cleanup 2>/dev/null; exit' INT TERM
+    trap '_pb_cleanup 2>/dev/null'       EXIT
+}
+
+# Рисует разделитель и бар в нижних двух строках.
+_pb_draw() {
+    local pct="$1" msg="${2:-}" w=38 filled=0 bar=""
+    local rows cols
+    rows=$(tput lines 2>/dev/null || echo "${_PB_ROWS:-24}")
+    cols=$(tput cols  2>/dev/null || echo "${_PB_COLS:-80}")
     filled=$(( pct * w / 100 ))
     for ((i=0; i<filled; i++)); do bar+="█"; done
-    for ((i=filled; i<w; i++)); do bar+="░"; done
-    echo -e "\n   ${BLUE}▐${GREEN}${bar}${BLUE}▌${NC} ${BOLD}${GREEN}${pct}%${NC}  ${msg}"
+    for ((i=filled; i<w;      i++)); do bar+="░"; done
+
+    tput sc                                     # сохранить позицию курсора
+    tput cup $(( rows - 2 )) 0                  # перейти на строку разделителя
+    printf "\033[2K${BLUE}"
+    printf '─%.0s' $(seq 1 "$cols")             # горизонтальная линия
+    printf "${NC}"
+    tput cup $(( rows - 1 )) 0                  # строка прогресс-бара
+    printf "\033[2K"
+    printf "   ${BLUE}▐${GREEN}%s${BLUE}▌${NC} ${BOLD}${GREEN}%d%%${NC}  %s" \
+           "$bar" "$pct" "$msg"
+    tput rc                                     # вернуть курсор
+}
+
+# Восстанавливает нормальный терминал (вызывается по trap и перед итоговым выводом).
+_pb_cleanup() {
+    [[ $_PB_READY -eq 0 ]] && return
+    local rows
+    rows=$(tput lines 2>/dev/null || echo 24)
+    tput csr 0 $(( rows - 1 )) 2>/dev/null     # сброс зоны прокрутки
+    tput cup $(( rows - 2 )) 0 2>/dev/null; printf "\033[2K"
+    tput cup $(( rows - 1 )) 0 2>/dev/null; printf "\033[2K"
+    tput cup $(( rows - 3 )) 0 2>/dev/null
+    printf "\n"
+    _PB_READY=0
+}
+
+# Публичный вызов: progress <процент> <сообщение>
+# Если терминал интерактивный — обновляет закреплённый бар внизу.
+# Если нет (ssh без tty, перенаправление) — печатает обычную строку.
+progress() {
+    local pct="$1" msg="${2:-}" w=38 filled=0 bar=""
+    if [[ $_PB_READY -eq 1 ]]; then
+        _pb_draw "$pct" "$msg"
+    else
+        filled=$(( pct * w / 100 ))
+        for ((i=0; i<filled; i++)); do bar+="█"; done
+        for ((i=filled; i<w;      i++)); do bar+="░"; done
+        echo -e "\n   ${BLUE}▐${GREEN}${bar}${BLUE}▌${NC} ${BOLD}${GREEN}${pct}%${NC}  ${msg}"
+    fi
 }
 
 # Читает непустую строку. Необязательное значение по умолчанию — третий аргумент.
@@ -550,6 +609,7 @@ main() {
     echo -e "\n${BOLD}${BLUE}╔════════════════════════════════════════════════════════════╗${NC}"
     echo -e "${BOLD}${BLUE}║        Video Bot — Мастер первоначальной настройки         ║${NC}"
     echo -e "${BOLD}${BLUE}╚════════════════════════════════════════════════════════════╝${NC}\n"
+    _pb_init
     progress 0 "Запуск установки…"
 
     preflight
@@ -561,6 +621,7 @@ main() {
     write_env
     setup_systemd
     start_services
+    _pb_cleanup
     print_summary
 }
 
