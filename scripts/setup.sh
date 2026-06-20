@@ -73,18 +73,26 @@ _pb_cleanup() {
 }
 
 # Публичный вызов: progress <процент> <сообщение>
-# Если терминал интерактивный — обновляет закреплённый бар внизу.
-# Если нет (ssh без tty, перенаправление) — печатает обычную строку.
+# Всегда печатает этап в основную зону; при интерактивном TTY — дублирует в бар внизу.
 progress() {
     local pct="$1" msg="${2:-}" w=38 filled=0 bar=""
+    filled=$(( pct * w / 100 ))
+    for ((i=0; i<filled; i++)); do bar+="█"; done
+    for ((i=filled; i<w;      i++)); do bar+="░"; done
+    echo -e "   ${BLUE}▐${GREEN}${bar}${BLUE}▌${NC} ${BOLD}${GREEN}${pct}%${NC}  ${msg}"
     if [[ $_PB_READY -eq 1 ]]; then
-        _pb_draw "$pct" "$msg"
-    else
-        filled=$(( pct * w / 100 ))
-        for ((i=0; i<filled; i++)); do bar+="█"; done
-        for ((i=filled; i<w;      i++)); do bar+="░"; done
-        echo -e "\n   ${BLUE}▐${GREEN}${bar}${BLUE}▌${NC} ${BOLD}${GREEN}${pct}%${NC}  ${msg}"
+        _pb_draw "$pct" "$msg" 2>/dev/null || true
     fi
+}
+
+# Объявляет этап и выполняет команду с полным выводом (без подавления в /dev/null).
+run_step() {
+    local msg="$1"; shift
+    info "$msg"
+    if ! "$@"; then
+        die "Ошибка на этапе: $msg"
+    fi
+    ok "Готово: $msg"
 }
 
 # Читает непустую строку. Необязательное значение по умолчанию — третий аргумент.
@@ -152,32 +160,36 @@ _install_docker_official() {
     warn "Это займёт 2–4 минуты…"
 
     progress 8 "Подготовка репозитория Docker…"
-    apt-get update -qq
-    apt-get install -y --no-install-recommends ca-certificates curl gnupg >/dev/null
+    run_step "Обновление списка пакетов (apt-get update)" apt-get update
+    run_step "Установка ca-certificates, curl, gnupg" \
+        apt-get install -y --no-install-recommends ca-certificates curl gnupg
 
     progress 13 "Добавление GPG-ключа Docker Inc…"
+    info "Загрузка и импорт GPG-ключа Docker Inc…"
     install -m 0755 -d /etc/apt/keyrings
     curl -fsSL https://download.docker.com/linux/ubuntu/gpg \
         | gpg --dearmor -o /etc/apt/keyrings/docker.gpg
     chmod a+r /etc/apt/keyrings/docker.gpg
+    ok "GPG-ключ Docker добавлен"
 
     progress 17 "Подключение официального репозитория…"
     local arch codename
     arch="$(dpkg --print-architecture)"
     codename="$(. /etc/os-release && echo "${VERSION_CODENAME}")"
+    info "Добавление репозитория Docker для ${codename} (${arch})…"
     echo "deb [arch=${arch} signed-by=/etc/apt/keyrings/docker.gpg] \
 https://download.docker.com/linux/ubuntu ${codename} stable" \
         > /etc/apt/sources.list.d/docker.list
-    apt-get update -qq
+    run_step "Обновление списка пакетов после добавления репозитория Docker" apt-get update
 
     progress 22 "Загрузка и установка пакетов Docker (может занять 2–3 мин.)…"
-    apt-get install -y --no-install-recommends \
-        docker-ce \
-        docker-ce-cli \
-        containerd.io \
-        docker-buildx-plugin \
-        docker-compose-plugin \
-        >/dev/null
+    run_step "Установка Docker Engine и compose-plugin" \
+        apt-get install -y --no-install-recommends \
+            docker-ce \
+            docker-ce-cli \
+            containerd.io \
+            docker-buildx-plugin \
+            docker-compose-plugin
 
     progress 32 "Docker Engine установлен"
     ok "$(docker --version)"
@@ -208,20 +220,32 @@ install_deps() {
         ok "docker compose v2 — уже установлен"
     else
         warn "docker-compose-plugin — не найден, устанавливаю…"
-        apt-get install -y --no-install-recommends docker-compose-plugin >/dev/null
-        ok "docker-compose-plugin установлен"
+        run_step "Установка docker-compose-plugin" \
+            apt-get install -y --no-install-recommends docker-compose-plugin
     fi
     progress 35 "Docker Compose v2 готов"
 
     # ── certbot через snap (изолированные зависимости, без конфликтов urllib3) ──
+    _ensure_snapd() {
+        if ! have snap; then
+            run_step "Установка snapd" apt-get install -y --no-install-recommends snapd
+        fi
+        if ! systemctl is-active --quiet snapd.socket 2>/dev/null; then
+            info "Запуск службы snapd (snapd.socket)…"
+            systemctl enable --now snapd.socket snapd
+            sleep 3
+            systemctl is-active --quiet snapd.socket \
+                || die "snapd не запустился. Проверьте: systemctl status snapd.socket"
+            ok "Служба snapd запущена"
+        else
+            ok "Служба snapd уже работает"
+        fi
+    }
+
     _install_certbot_snap() {
         info "Устанавливаю certbot через snap…"
-        if ! have snap; then
-            apt-get install -y --no-install-recommends snapd >/dev/null
-            systemctl enable --now snapd.socket snapd 2>/dev/null || true
-            sleep 2
-        fi
-        snap install --classic certbot
+        _ensure_snapd
+        run_step "Установка certbot (snap install --classic certbot)" snap install --classic certbot
         ln -sf /snap/bin/certbot /usr/bin/certbot
         ok "certbot установлен через snap: $(certbot --version 2>&1)"
     }
@@ -258,10 +282,9 @@ install_deps() {
     done
 
     if [[ ${#missing_pkgs[@]} -gt 0 ]]; then
-        info "Устанавливаю недостающие пакеты: ${missing_pkgs[*]}"
-        apt-get update -qq
-        apt-get install -y --no-install-recommends "${missing_pkgs[@]}" >/dev/null
-        ok "Установлено: ${missing_pkgs[*]}"
+        run_step "Обновление списка пакетов" apt-get update
+        run_step "Установка пакетов: ${missing_pkgs[*]}" \
+            apt-get install -y --no-install-recommends "${missing_pkgs[@]}"
     else
         ok "Все остальные зависимости уже установлены — apt-get пропущен"
     fi
@@ -271,6 +294,7 @@ install_deps() {
     if systemctl is-active --quiet docker; then
         ok "Docker daemon уже запущен"
     else
+        info "Запуск Docker daemon (systemctl enable --now docker)…"
         systemctl enable --now docker
         ok "Docker daemon запущен и добавлен в автозапуск"
     fi
@@ -287,6 +311,7 @@ install_deps() {
 # ─── Шаг 2: Сбор конфигурации ────────────────────────────────────────────────
 collect_config() {
     progress 44 "Сбор конфигурации…"
+    _pb_cleanup
     echo ""
     echo -e "${BOLD}${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
     echo -e "${BOLD}${BLUE}   Настройка Video Bot — ответьте на несколько вопросов${NC}"
@@ -314,6 +339,7 @@ collect_config() {
     WEBHOOK_SECRET="$(gen_secret)"
     ok "Webhook secret сгенерирован"
     progress 50 "Конфигурация получена"
+    _pb_init
 }
 
 # ─── Шаг 3: SSL-сертификат ───────────────────────────────────────────────────
@@ -327,16 +353,15 @@ issue_ssl() {
         sleep 1
     fi
 
-    info "Запрашиваю сертификат (certbot --standalone)…"
-    certbot certonly \
-        --standalone \
-        --non-interactive \
-        --agree-tos \
-        --email "$LE_EMAIL" \
-        -d "$DOMAIN" \
-        --quiet \
-        || die "certbot завершился с ошибкой. Проверьте, что домен указывает на этот сервер."
+    run_step "Запрос сертификата Let's Encrypt (certbot --standalone)" \
+        certbot certonly \
+            --standalone \
+            --non-interactive \
+            --agree-tos \
+            --email "$LE_EMAIL" \
+            -d "$DOMAIN"
 
+    info "Копирование сертификата в nginx/certs/…"
     mkdir -p nginx/certs
     cp "/etc/letsencrypt/live/${DOMAIN}/fullchain.pem" nginx/certs/fullchain.pem
     cp "/etc/letsencrypt/live/${DOMAIN}/privkey.pem"   nginx/certs/privkey.pem
@@ -537,6 +562,7 @@ TimeoutStopSec=120
 WantedBy=multi-user.target
 SERVICE
 
+    info "Перезагрузка systemd и включение автозапуска…"
     systemctl daemon-reload
     systemctl enable video-bot
     ok "Создана служба: ${service_file}"
@@ -555,6 +581,7 @@ start_services() {
 
     step "Запуск через systemd (video-bot.service)"
     progress 92 "Запуск всех сервисов…"
+    info "Запуск video-bot.service (docker compose up -d)…"
     systemctl start video-bot
     ok "Служба video-bot запущена"
 
