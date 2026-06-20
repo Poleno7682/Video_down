@@ -10,6 +10,7 @@ from app.db.models import DownloadRequest, DownloadStatus, TelegramFileType
 from app.utils.caption import DEFAULT_CAPTION, get_caption
 from app.worker.tasks import (
     _COOKIE_FAILURE,
+    _STALE_COOKIE_FAILURE,
     _GENERIC_FAILURE,
     _is_cookie_error,
     _is_youtube_challenge_error,
@@ -97,6 +98,15 @@ class TestHandleTaskFailure:
         with patch("app.worker.tasks.edit_status") as mock_edit:
             _handle_task_failure(repo, 1, req, exc)
         assert mock_edit.call_args[0][2] == _COOKIE_FAILURE
+
+    def test_stale_cookie_error_when_cookies_were_used(self):
+        repo = MagicMock()
+        req = MagicMock()
+        req.video_id = None
+        exc = RuntimeError("ERROR: Sign in to confirm you're not a bot. Use --cookies")
+        with patch("app.worker.tasks.edit_status") as mock_edit:
+            _handle_task_failure(repo, 1, req, exc, cookies_were_used=True)
+        assert mock_edit.call_args[0][2] == _STALE_COOKIE_FAILURE
 
     def test_generic_error_shows_generic_message(self):
         repo = MagicMock()

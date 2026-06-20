@@ -132,6 +132,7 @@ def test_build_ydl_opts_basic():
     assert opts["progress_hooks"] == []
     assert opts["postprocessors"] == []
     assert opts["remote_components"] == ["ejs:github"]
+    assert opts["postprocessor_args"] == {"Merger+ffmpeg": ["-c", "copy"]}
     assert "cookiefile" not in opts
 
 

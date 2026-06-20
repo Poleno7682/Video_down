@@ -14,7 +14,7 @@ from app.services.redis_client import get_redis
 from app.utils.caption import get_caption
 from app.utils.platforms import detect_platform
 from app.worker.celery_app import celery_app
-from app.worker.downloader import download_video
+from app.worker.downloader import cookie_file_for_url, download_video
 from app.worker.telegram_sender import delete_status, edit_status, send_cached, send_file
 
 logger = logging.getLogger(__name__)
@@ -30,6 +30,8 @@ _COOKIE_ERROR_MARKERS = (
     "login required",
     "private video",
     "this video is private",
+    "no longer valid",
+    "have likely been rotated",
 )
 
 # YouTube JS-challenge failures often surface as "only images" / missing formats.
@@ -49,6 +51,13 @@ _COOKIE_FAILURE = (
     "❌ YouTube требует ваши cookies (защита от ботов).\n\n"
     "Экспортируйте cookies в формате Netscape (cookies.txt) из браузера, где вы вошли "
     "в аккаунт, и пришлите файл боту под именем <code>youtube.txt</code>.\n"
+    "Подробнее: /cookies"
+)
+
+_STALE_COOKIE_FAILURE = (
+    "❌ Ваши YouTube cookies устарели — YouTube их сбросил.\n\n"
+    "Экспортируйте <b>свежий</b> cookies.txt из браузера, где вы залогинены, "
+    "и пришлите файл <code>youtube.txt</code> заново.\n"
     "Подробнее: /cookies"
 )
 
@@ -93,6 +102,8 @@ def _handle_task_failure(
     request_id: int,
     req,
     exc: Exception,
+    *,
+    cookies_were_used: bool = False,
 ) -> None:
     """DRY: consolidates the status update + Telegram notification on failure."""
     error_msg = f"{type(exc).__name__}: {exc}"
@@ -101,9 +112,9 @@ def _handle_task_failure(
         repo.mark_video_failed(req.video_id, error_msg)
 
     if _is_cookie_error(exc):
-        message = _COOKIE_FAILURE
+        message = _STALE_COOKIE_FAILURE if cookies_were_used else _COOKIE_FAILURE
     elif _is_youtube_challenge_error(exc):
-        message = _COOKIE_FAILURE
+        message = _STALE_COOKIE_FAILURE if cookies_were_used else _COOKIE_FAILURE
     else:
         message = _GENERIC_FAILURE
     edit_status(req.chat_id, req.status_message_id, message)
@@ -139,6 +150,7 @@ def process_download_request(self, request_id: int) -> None:
 
         video_lock_acquired = False
         user_cookie_path: Path | None = None
+        cookies_were_used = False
         try:
             ready_video = repo.get_ready_video(req.url_hash, req.quality)
             if ready_video and ready_video.telegram_file_id and ready_video.telegram_file_type:
@@ -189,6 +201,9 @@ def process_download_request(self, request_id: int) -> None:
                     edit_status(req.chat_id, req.status_message_id, f"⬇️ Скачано {percent:.1f}%")
 
             user_cookie_path = _materialize_user_cookies(repo, req.user_id, req.normalized_url)
+            cookies_were_used = user_cookie_path is not None or cookie_file_for_url(
+                req.normalized_url, settings
+            ) is not None
             file_path, info = download_video(
                 req.normalized_url,
                 req.quality,
@@ -242,7 +257,7 @@ def process_download_request(self, request_id: int) -> None:
 
         except Exception as exc:
             logger.exception("Failed request %s", request_id)
-            _handle_task_failure(repo, request_id, req, exc)
+            _handle_task_failure(repo, request_id, req, exc, cookies_were_used=cookies_were_used)
             raise
 
         finally:

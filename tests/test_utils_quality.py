@@ -43,6 +43,15 @@ class TestFormatSelector:
         assert isinstance(result, str)
         assert len(result) > 0
 
+    def test_portrait_streams_preferred_for_shorts(self):
+        fmt = format_selector("720p")
+        assert "aspect_ratio<1" in fmt
+        assert fmt.index("aspect_ratio<1") < fmt.index("bestvideo[height<=720]")
+
+    def test_no_forced_mp4_video_stream(self):
+        fmt = format_selector("720p")
+        assert "[ext=mp4]" not in fmt
+
     @pytest.mark.parametrize("q", list(QUALITY_FORMATS.keys()))
     def test_all_qualities_return_format(self, q):
         result = format_selector(q)

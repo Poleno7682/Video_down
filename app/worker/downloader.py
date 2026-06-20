@@ -64,6 +64,8 @@ def _build_ydl_opts(
         "postprocessors": [],
         "windowsfilenames": True,
         "restrictfilenames": True,
+        # Avoid ffmpeg re-encoding on merge — keeps native aspect ratio intact.
+        "postprocessor_args": {"Merger+ffmpeg": ["-c", "copy"]},
         # YouTube EJS: Deno alone is not enough — yt-dlp must fetch challenge solver scripts.
         # See https://github.com/yt-dlp/yt-dlp/wiki/EJS
         "remote_components": ["ejs:github"],

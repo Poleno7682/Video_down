@@ -1,9 +1,33 @@
+def _video_format(max_height: int | None) -> str:
+    """Build a yt-dlp format string with portrait (Shorts) streams preferred.
+
+    YouTube often serves Shorts as a 16:9 container with letterboxing. Native
+    vertical streams have aspect_ratio < 1 (width/height). We try those first,
+    then fall back to the usual landscape selectors.
+    """
+    if max_height is None:
+        portrait = "bestvideo[aspect_ratio<1]+bestaudio/best[aspect_ratio<1]"
+        landscape = "bestvideo+bestaudio/best"
+        return f"{portrait}/{landscape}/best"
+
+    h = max_height
+    portrait = (
+        f"bestvideo[aspect_ratio<1][height<={h}]+bestaudio/"
+        f"best[aspect_ratio<1][height<={h}]"
+    )
+    landscape = (
+        f"bestvideo[height<={h}]+bestaudio/"
+        f"best[height<={h}]"
+    )
+    return f"{portrait}/{landscape}/best"
+
+
 QUALITY_FORMATS: dict[str, str] = {
-    "360p": "bestvideo[height<=360][ext=mp4]+bestaudio[ext=m4a]/best[height<=360][ext=mp4]/best[height<=360]/best",
-    "480p": "bestvideo[height<=480][ext=mp4]+bestaudio[ext=m4a]/best[height<=480][ext=mp4]/best[height<=480]/best",
-    "720p": "bestvideo[height<=720][ext=mp4]+bestaudio[ext=m4a]/best[height<=720][ext=mp4]/best[height<=720]/best",
-    "1080p": "bestvideo[height<=1080][ext=mp4]+bestaudio[ext=m4a]/best[height<=1080][ext=mp4]/best[height<=1080]/best",
-    "best": "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best",
+    "360p": _video_format(360),
+    "480p": _video_format(480),
+    "720p": _video_format(720),
+    "1080p": _video_format(1080),
+    "best": _video_format(None),
     "audio": "bestaudio[ext=m4a]/bestaudio/best",
 }
 
