@@ -121,6 +121,12 @@ gen_secret() { openssl rand -hex 32; }
 # Возвращает 0, если бинарник доступен в PATH.
 have() { command -v "$1" &>/dev/null; }
 
+# Домены Mikrus: SSL на прокси, certbot на VPS не работает.
+_is_mikrus_domain() {
+    local d="${1,,}"
+    [[ "$d" == *.mikrus.xyz || "$d" == *.wykr.es || "$d" == *.mikrus.cloud || "$d" == *.bieda.it ]]
+}
+
 # ─── Проверки ─────────────────────────────────────────────────────────────────
 preflight() {
     [[ $EUID -eq 0 ]] || die "Запустите от root: sudo bash scripts/setup.sh"
@@ -379,9 +385,19 @@ collect_config() {
     ask_secret "Пароль БД" PG_PASSWORD
 
     step "Домен и SSL"
-    info "Домен должен уже указывать A-записью на IP этого сервера."
     ask "Домен (например: bot.example.com)" DOMAIN
     ask "Email для Let's Encrypt (уведомления об истечении сертификата)" LE_EMAIL
+
+    MIKRUS_MODE=0
+    NGINX_HTTP_PORT=80
+    if _is_mikrus_domain "$DOMAIN"; then
+        MIKRUS_MODE=1
+        echo ""
+        warn "Домен Mikrus: SSL выдаёт и обновляет прокси Mikrus автоматически."
+        warn "certbot на VPS не сработает — HTTP-запросы ACME не доходят до сервера (404)."
+        info "В панели Mikrus для subdomeny укажите тот же порт и режим бэкенда HTTP."
+        ask "Порт HTTP на VPS (из панели Mikrus для ${DOMAIN})" NGINX_HTTP_PORT "80"
+    fi
 
     step "Администратор"
     info "Откройте @userinfobot в Telegram, чтобы узнать свой числовой ID."
@@ -394,22 +410,33 @@ collect_config() {
 
 # ─── Шаг 3: SSL-сертификат ───────────────────────────────────────────────────
 issue_ssl() {
-    step "Выпуск SSL-сертификата Let's Encrypt"
-    progress 52 "Запрос SSL-сертификата для ${DOMAIN}…"
+    step "Выпуск SSL-сертификата"
+    progress 52 "Настройка SSL для ${DOMAIN}…"
 
+    if [[ "${MIKRUS_MODE:-0}" -eq 1 ]]; then
+        ok "certbot пропущен — HTTPS обеспечивает прокси Mikrus"
+        info "Nginx внутри Docker работает по HTTP; снаружи пользователи видят https://${DOMAIN}"
+        echo "$DOMAIN" > .domain
+        progress 62 "SSL через Mikrus (автоматически)"
+        return
+    fi
+
+    info "Домен должен указывать A-записью на IP этого сервера."
     if lsof -iTCP:80 -sTCP:LISTEN -n -P &>/dev/null 2>&1; then
         warn "Порт 80 занят, пробую освободить…"
         systemctl stop nginx apache2 2>/dev/null || true
         sleep 1
     fi
 
-    run_step "Запрос сертификата Let's Encrypt (certbot --standalone)" \
+    if ! try_step "Запрос сертификата Let's Encrypt (certbot --standalone)" \
         certbot certonly \
             --standalone \
             --non-interactive \
             --agree-tos \
             --email "$LE_EMAIL" \
-            -d "$DOMAIN"
+            -d "$DOMAIN"; then
+        die "certbot не смог выпустить сертификат для ${DOMAIN}. На Mikrus (*.mikrus.xyz) используйте автоматический SSL прокси. Иначе проверьте: DNS A-запись, порт 80 с интернета."
+    fi
 
     info "Копирование сертификата в nginx/certs/…"
     mkdir -p nginx/certs
@@ -425,6 +452,12 @@ issue_ssl() {
 # ─── Шаг 4: Авторевыпуск сертификата ────────────────────────────────────────
 setup_renewal() {
     step "Настройка автоматического перевыпуска сертификата"
+
+    if [[ "${MIKRUS_MODE:-0}" -eq 1 ]]; then
+        ok "На Mikrus SSL обновляет прокси — cron certbot не требуется"
+        progress 65 "Автоперевыпуск SSL (Mikrus)"
+        return
+    fi
 
     local renew_script="${PROJECT_DIR}/scripts/renew_cert.sh"
     cat > "$renew_script" <<RENEW
@@ -460,7 +493,45 @@ RENEW
 write_nginx_conf() {
     step "Запись конфигурации Nginx"
     mkdir -p nginx/www nginx/certs
-    cat > nginx/video-bot.conf <<NGINX
+
+    if [[ "${MIKRUS_MODE:-0}" -eq 1 ]]; then
+        cat > nginx/video-bot.conf <<NGINX
+limit_req_zone \$binary_remote_addr zone=telegram_webhook_limit:10m rate=30r/s;
+
+upstream video_bot_backend {
+    server bot:8080;
+}
+
+# HTTP за прокси Mikrus (SSL терминируется на стороне Mikrus)
+server {
+    listen 80;
+    listen [::]:80;
+    server_name ${DOMAIN};
+
+    client_max_body_size 10m;
+
+    location /telegram/webhook {
+        limit_req zone=telegram_webhook_limit burst=60 nodelay;
+
+        proxy_pass         http://video_bot_backend;
+        proxy_http_version 1.1;
+        proxy_set_header   Host              \$host;
+        proxy_set_header   X-Real-IP         \$remote_addr;
+        proxy_set_header   X-Forwarded-For   \$proxy_add_x_forwarded_for;
+        proxy_set_header   X-Forwarded-Proto https;
+        proxy_connect_timeout 10s;
+        proxy_send_timeout    30s;
+        proxy_read_timeout    30s;
+    }
+
+    location /health {
+        proxy_pass http://video_bot_backend/health;
+    }
+}
+NGINX
+        ok "nginx/video-bot.conf записан для Mikrus (HTTP, порт ${NGINX_HTTP_PORT})"
+    else
+        cat > nginx/video-bot.conf <<NGINX
 limit_req_zone \$binary_remote_addr zone=telegram_webhook_limit:10m rate=30r/s;
 
 upstream video_bot_backend {
@@ -514,7 +585,8 @@ server {
     }
 }
 NGINX
-    ok "nginx/video-bot.conf записан для ${DOMAIN}"
+        ok "nginx/video-bot.conf записан для ${DOMAIN}"
+    fi
     progress 68 "Конфигурация Nginx записана"
 }
 
@@ -585,6 +657,25 @@ ENV
     chmod 600 .env
     ok ".env записан (права 600)"
     progress 72 "Файл .env создан"
+}
+
+# ─── Порты Docker (Mikrus: один HTTP-порт из панели) ─────────────────────────
+write_docker_ports() {
+    step "Настройка портов Docker"
+    if [[ "${MIKRUS_MODE:-0}" -eq 1 ]]; then
+        cat > docker-compose.override.yml <<OVR
+# Сгенерировано setup.sh — режим Mikrus (SSL на прокси)
+services:
+  nginx:
+    ports:
+      - "${NGINX_HTTP_PORT}:80"
+OVR
+        ok "nginx → порт ${NGINX_HTTP_PORT} (HTTP внутри, HTTPS снаружи через Mikrus)"
+        info "Панель Mikrus: ${DOMAIN} → порт ${NGINX_HTTP_PORT}, бэкенд HTTP"
+    else
+        rm -f docker-compose.override.yml 2>/dev/null || true
+        ok "nginx → порты 80 и 443 (стандартный режим с локальным SSL)"
+    fi
 }
 
 # ─── Шаг 7: systemd-служба ───────────────────────────────────────────────────
@@ -660,7 +751,11 @@ print_summary() {
     echo -e "  ${BOLD}Бот:${NC}           https://${DOMAIN}"
     echo -e "  ${BOLD}Webhook:${NC}       https://${DOMAIN}/telegram/webhook"
     echo -e "  ${BOLD}Администратор:${NC} ${ADMIN_ID}"
-    echo -e "  ${BOLD}Сертификат:${NC}    /etc/letsencrypt/live/${DOMAIN}/ (авторевыпуск ежедневно 03:15)"
+    if [[ "${MIKRUS_MODE:-0}" -eq 1 ]]; then
+        echo -e "  ${BOLD}SSL:${NC}           автоматически (прокси Mikrus, порт VPS ${NGINX_HTTP_PORT})"
+    else
+        echo -e "  ${BOLD}Сертификат:${NC}    /etc/letsencrypt/live/${DOMAIN}/ (авторевыпуск ежедневно 03:15)"
+    fi
     echo ""
     echo -e "  ${BOLD}Управление службой:${NC}"
     echo -e "    systemctl status video-bot      — статус службы"
@@ -699,6 +794,7 @@ main() {
     setup_renewal
     write_nginx_conf
     write_env
+    write_docker_ports
     setup_systemd
     start_services
     print_summary
