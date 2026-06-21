@@ -6,11 +6,8 @@ from aiogram import Bot, F, Router
 from aiogram.filters import Command
 from aiogram.types import Message
 
-from app.bot.access import _check_access
-from app.core.config import get_settings
 from app.db.repository import Repository
 from app.db.session import get_session
-from app.services.redis_client import get_redis
 from app.utils.platforms import PLATFORMS, platform_from_filename
 
 router = Router()
@@ -43,13 +40,6 @@ def _looks_like_netscape(text: str) -> bool:
 
 @router.message(Command("cookies"))
 async def cookies_info(message: Message) -> None:
-    settings = get_settings()
-    redis = get_redis()
-    allowed, denial_msg = _check_access(message.from_user.id, settings, redis)
-    if not allowed:
-        await message.answer(denial_msg)
-        return
-
     with get_session() as session:
         platforms = Repository(session).list_user_platforms(message.from_user.id)
 
@@ -62,13 +52,6 @@ async def cookies_info(message: Message) -> None:
 
 @router.message(Command("delcookies"))
 async def delete_cookies(message: Message) -> None:
-    settings = get_settings()
-    redis = get_redis()
-    allowed, denial_msg = _check_access(message.from_user.id, settings, redis)
-    if not allowed:
-        await message.answer(denial_msg)
-        return
-
     parts = (message.text or "").split(maxsplit=1)
     platform = parts[1].strip().lower() if len(parts) > 1 else ""
     if platform not in PLATFORMS:
@@ -90,13 +73,6 @@ async def delete_cookies(message: Message) -> None:
 # can broadcast documents (broadcast handler catches them first).
 @router.message(F.document)
 async def upload_cookies(message: Message, bot: Bot) -> None:
-    settings = get_settings()
-    redis = get_redis()
-    allowed, denial_msg = _check_access(message.from_user.id, settings, redis)
-    if not allowed:
-        await message.answer(denial_msg)
-        return
-
     document = message.document
     platform = platform_from_filename(document.file_name)
     if not platform:

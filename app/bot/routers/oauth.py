@@ -7,7 +7,6 @@ from aiogram import Router
 from aiogram.filters import Command
 from aiogram.types import Message
 
-from app.bot.access import _check_access
 from app.core.config import get_settings
 from app.db.repository import Repository
 from app.db.session import get_session
@@ -30,13 +29,7 @@ def _google_linking_key(user_id: int) -> str:
 
 @router.message(Command("link_google"))
 async def link_google(message: Message) -> None:
-    settings = get_settings()
     redis = get_redis()
-    allowed, denial_msg = _check_access(message.from_user.id, settings, redis)
-    if not allowed:
-        await message.answer(denial_msg)
-        return
-
     user_id = message.from_user.id
     link_key = _google_linking_key(user_id)
     if redis.exists(link_key):
@@ -138,13 +131,7 @@ async def _poll_google_link(
 
 @router.message(Command("unlink_google"))
 async def unlink_google(message: Message) -> None:
-    settings = get_settings()
     redis = get_redis()
-    allowed, denial_msg = _check_access(message.from_user.id, settings, redis)
-    if not allowed:
-        await message.answer(denial_msg)
-        return
-
     user_id = message.from_user.id
     redis.delete(_google_linking_key(user_id))
 

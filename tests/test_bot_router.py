@@ -395,19 +395,6 @@ async def test_admin_panel_shown_to_admin():
 
 
 @pytest.mark.asyncio
-async def test_toggle_bot_access_non_admin():
-    from app.bot.routers.admin import toggle_bot_access
-    cb = MagicMock()
-    cb.from_user.id = 999
-    cb.answer = AsyncMock()
-    settings = _make_settings(admin_user_ids=set())
-    with patch("app.bot.routers.admin.get_settings", return_value=settings):
-        await toggle_bot_access(cb)
-    cb.answer.assert_awaited_once()
-    assert "⛔" in cb.answer.call_args[0][0]
-
-
-@pytest.mark.asyncio
 async def test_toggle_bot_access_enables():
     from app.bot.routers.admin import toggle_bot_access
     cb = MagicMock()
@@ -537,37 +524,6 @@ async def test_list_trusted_users_with_entries():
 # ---------------------------------------------------------------------------
 # _process_url_message — all branches
 # ---------------------------------------------------------------------------
-
-@pytest.mark.asyncio
-async def test_process_url_message_bot_disabled():
-    message = _make_message(user_id=999)
-    settings = _make_settings()
-    redis = _make_redis_mock(disabled=True)
-
-    with patch("app.bot.routers.url_handler.get_settings", return_value=settings), \
-         patch("app.bot.routers.url_handler.get_redis", return_value=redis), \
-         patch("app.bot.routers.url_handler.RateLimiter"):
-        await _process_url_message(message, "https://youtube.com/watch?v=x", True)
-
-    message.answer.assert_awaited_once()
-    assert "🔴" in message.answer.call_args[0][0] or \
-           "недоступен" in message.answer.call_args[0][0].lower()
-
-
-@pytest.mark.asyncio
-async def test_process_url_message_not_allowed():
-    message = _make_message(user_id=999)
-    settings = _make_settings(allowed_user_ids={1, 2, 3})
-    redis = _make_redis_mock()
-
-    with patch("app.bot.routers.url_handler.get_settings", return_value=settings), \
-         patch("app.bot.routers.url_handler.get_redis", return_value=redis), \
-         patch("app.bot.routers.url_handler.RateLimiter"):
-        await _process_url_message(message, "https://youtube.com/watch?v=x", True)
-
-    message.answer.assert_awaited_once()
-    assert "⛔" in message.answer.call_args[0][0]
-
 
 @pytest.mark.asyncio
 async def test_process_url_message_rate_limited():
@@ -1003,9 +959,7 @@ async def test_upload_cookies_valid_youtube():
     settings = _make_settings()
     redis = _make_redis_mock()
 
-    with patch("app.bot.routers.cookies.get_settings", return_value=settings), \
-         patch("app.bot.routers.cookies.get_redis", return_value=redis), \
-         patch("app.bot.routers.cookies.get_session", return_value=session), \
+    with patch("app.bot.routers.cookies.get_session", return_value=session), \
          patch("app.bot.routers.cookies.Repository", return_value=repo):
         await upload_cookies(message, bot)
 
@@ -1026,11 +980,7 @@ async def test_upload_cookies_unknown_filename():
     settings = _make_settings()
     redis = _make_redis_mock()
 
-    with patch("app.bot.routers.cookies.get_settings", return_value=settings), \
-         patch("app.bot.routers.cookies.get_redis", return_value=redis), \
-         patch("app.bot.routers.cookies.get_session", return_value=session), \
-         patch("app.bot.routers.cookies.Repository", return_value=repo):
-        await upload_cookies(message, bot)
+    await upload_cookies(message, bot)
 
     repo.set_user_cookies.assert_not_called()
     bot.download.assert_not_called()
@@ -1049,9 +999,7 @@ async def test_upload_cookies_invalid_format_rejected():
     settings = _make_settings()
     redis = _make_redis_mock()
 
-    with patch("app.bot.routers.cookies.get_settings", return_value=settings), \
-         patch("app.bot.routers.cookies.get_redis", return_value=redis), \
-         patch("app.bot.routers.cookies.get_session", return_value=session), \
+    with patch("app.bot.routers.cookies.get_session", return_value=session), \
          patch("app.bot.routers.cookies.Repository", return_value=repo):
         await upload_cookies(message, bot)
 

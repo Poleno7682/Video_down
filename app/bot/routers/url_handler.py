@@ -7,7 +7,6 @@ from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import Command
 from aiogram.types import Message
 
-from app.bot.access import _check_access
 from app.core.config import get_settings
 from app.db.models import DownloadStatus
 from app.db.repository import Repository
@@ -53,11 +52,6 @@ async def _process_url_message(message: Message, text: str, reply_on_no_url: boo
     limiter = RateLimiter(redis)
 
     user_id = message.from_user.id
-
-    allowed, denial_msg = _check_access(user_id, settings, redis)
-    if not allowed:
-        await message.answer(denial_msg)
-        return
 
     rl_max = get_limit("rate_limit_max_messages", settings, redis)
     if rl_max > 0:

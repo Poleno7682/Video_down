@@ -6,6 +6,7 @@ from aiogram.filters import BaseFilter, Command
 from aiogram.types import CallbackQuery, Message
 
 from app.bot.access import _is_admin, _KEY_BOT_DISABLED, _KEY_TRUSTED_USERS
+from app.bot.filters import AdminFilter
 from app.core.config import get_settings
 from app.keyboards.admin import admin_keyboard, limits_keyboard
 from app.services.redis_client import get_redis
@@ -68,13 +69,10 @@ async def admin_panel(message: Message) -> None:
     )
 
 
-@router.callback_query(F.data == "admin:limits")
+@router.callback_query(F.data == "admin:limits", AdminFilter(alert_on_deny=True))
 async def show_limits(callback: CallbackQuery) -> None:
-    settings = get_settings()
-    if not _is_admin(callback.from_user.id, settings):
-        await callback.answer("⛔ Нет доступа", show_alert=True)
-        return
     await callback.answer()
+    settings = get_settings()
     redis = get_redis()
     effective = {f: get_limit(f, settings, redis) for f in EDITABLE_LIMITS}
     await callback.message.edit_text(
@@ -83,12 +81,8 @@ async def show_limits(callback: CallbackQuery) -> None:
     )
 
 
-@router.callback_query(F.data.startswith("limits:edit:"))
+@router.callback_query(F.data.startswith("limits:edit:"), AdminFilter(alert_on_deny=True))
 async def limits_start_edit(callback: CallbackQuery) -> None:
-    settings = get_settings()
-    if not _is_admin(callback.from_user.id, settings):
-        await callback.answer("⛔ Нет доступа", show_alert=True)
-        return
     await callback.answer()
 
     field = callback.data.split(":", 2)[2]
@@ -97,6 +91,7 @@ async def limits_start_edit(callback: CallbackQuery) -> None:
         return
 
     spec = EDITABLE_LIMITS[field]
+    settings = get_settings()
     redis = get_redis()
     current = get_limit(field, settings, redis)
     display = format_value(field, current)
@@ -112,12 +107,9 @@ async def limits_start_edit(callback: CallbackQuery) -> None:
     set_awaiting(callback.from_user.id, field, redis)
 
 
-@router.callback_query(F.data == "limits:reset_all")
+@router.callback_query(F.data == "limits:reset_all", AdminFilter(alert_on_deny=True))
 async def limits_reset_all(callback: CallbackQuery) -> None:
     settings = get_settings()
-    if not _is_admin(callback.from_user.id, settings):
-        await callback.answer("⛔ Нет доступа", show_alert=True)
-        return
     redis = get_redis()
     reset_all_limits(redis)
     await callback.answer("✅ Все лимиты сброшены к значениям .env", show_alert=True)
@@ -131,13 +123,10 @@ async def limits_reset_all(callback: CallbackQuery) -> None:
         pass
 
 
-@router.callback_query(F.data == "limits:back")
+@router.callback_query(F.data == "limits:back", AdminFilter(alert_on_deny=True))
 async def limits_back(callback: CallbackQuery) -> None:
-    settings = get_settings()
-    if not _is_admin(callback.from_user.id, settings):
-        await callback.answer("⛔ Нет доступа", show_alert=True)
-        return
     await callback.answer()
+    settings = get_settings()
     redis = get_redis()
     is_disabled = bool(redis.exists(_KEY_BOT_DISABLED))
     try:
@@ -149,13 +138,9 @@ async def limits_back(callback: CallbackQuery) -> None:
         pass
 
 
-@router.callback_query(F.data == "admin:toggle_access")
+@router.callback_query(F.data == "admin:toggle_access", AdminFilter(alert_on_deny=True))
 async def toggle_bot_access(callback: CallbackQuery) -> None:
     settings = get_settings()
-    if not _is_admin(callback.from_user.id, settings):
-        await callback.answer("⛔ Нет доступа", show_alert=True)
-        return
-
     redis = get_redis()
     if redis.exists(_KEY_BOT_DISABLED):
         redis.delete(_KEY_BOT_DISABLED)
