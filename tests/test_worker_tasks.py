@@ -223,8 +223,11 @@ def _task_ctx(req=None, settings=None, ready_video=None,
     fake_file.stat.return_value.st_size = 10 * 1024 * 1024
     dl_result = download_result if download_result is not None else (fake_file, {"title": "T"})
 
+    redis_mock = MagicMock()
+    redis_mock.get.return_value = None  # no runtime_config overrides in tests
+
     with patch("app.worker.tasks.get_settings", return_value=settings), \
-         patch("app.worker.tasks.get_redis"), \
+         patch("app.worker.tasks.get_redis", return_value=redis_mock), \
          patch("app.worker.tasks.RateLimiter", return_value=limiter), \
          patch("app.worker.tasks.get_session", return_value=session), \
          patch("app.worker.tasks.Repository", return_value=repo), \

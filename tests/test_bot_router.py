@@ -864,7 +864,8 @@ async def test_process_url_message_uses_user_quality_preference():
     message.answer = AsyncMock(return_value=status_msg)
     settings = _make_settings(default_quality="720p")
     redis = _make_redis_mock()
-    redis.get.return_value = "1080p"
+    # Return "1080p" only for the user-quality key; runtime_limit:* keys get None
+    redis.get.side_effect = lambda k: "1080p" if str(k).startswith("user_quality:") else None
 
     video = MagicMock()
     video.id = 1

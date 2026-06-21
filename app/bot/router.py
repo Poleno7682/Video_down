@@ -13,10 +13,21 @@ from app.core.config import Settings, get_settings
 from app.db.models import DownloadStatus
 from app.db.repository import Repository
 from app.db.session import get_session
-from app.keyboards.admin import admin_keyboard, broadcast_cancel_keyboard
+from app.keyboards.admin import admin_keyboard, broadcast_cancel_keyboard, limits_keyboard
 from app.keyboards.quality import quality_keyboard
 from app.services.rate_limiter import RateLimiter
 from app.services.redis_client import get_redis
+from app.services.runtime_config import (
+    EDITABLE_LIMITS,
+    clear_awaiting,
+    format_value,
+    get_awaiting,
+    get_limit,
+    reset_all_limits,
+    reset_limit,
+    set_awaiting,
+    set_limit,
+)
 from app.utils.broadcast import parse_buttons
 from app.utils.caption import get_caption
 from app.utils.platforms import PLATFORMS, platform_from_filename
@@ -211,6 +222,87 @@ async def admin_panel(message: Message) -> None:
         _admin_panel_text(settings, redis),
         reply_markup=admin_keyboard(is_disabled),
     )
+
+
+@router.callback_query(F.data == "admin:limits")
+async def show_limits(callback: CallbackQuery) -> None:
+    settings = get_settings()
+    if not _is_admin(callback.from_user.id, settings):
+        await callback.answer("⛔ Нет доступа", show_alert=True)
+        return
+    await callback.answer()
+    redis = get_redis()
+    effective = {f: get_limit(f, settings, redis) for f in EDITABLE_LIMITS}
+    await callback.message.edit_text(
+        "⚙️ <b>Лимиты</b>\n\nНажмите на лимит, чтобы изменить его значение.",
+        reply_markup=limits_keyboard(effective),
+    )
+
+
+@router.callback_query(F.data.startswith("limits:edit:"))
+async def limits_start_edit(callback: CallbackQuery) -> None:
+    settings = get_settings()
+    if not _is_admin(callback.from_user.id, settings):
+        await callback.answer("⛔ Нет доступа", show_alert=True)
+        return
+    await callback.answer()
+
+    field = callback.data.split(":", 2)[2]
+    if field not in EDITABLE_LIMITS:
+        await callback.message.answer("⚠️ Неизвестный лимит.")
+        return
+
+    spec = EDITABLE_LIMITS[field]
+    redis = get_redis()
+    current = get_limit(field, settings, redis)
+    display = format_value(field, current)
+
+    zero_hint = "\n0 = отключить лимит (без ограничений)" if spec.zero_disables else ""
+    await callback.message.answer(
+        f"✏️ <b>{spec.emoji} {spec.label}</b>\n\n"
+        f"Текущее значение: <b>{display}</b>\n\n"
+        f"Введите новое значение — целое число от {spec.min_val} до {spec.max_val}.{zero_hint}\n\n"
+        "Или введите <code>сброс</code>, чтобы вернуть значение из .env.\n"
+        "Или введите <code>/cancel</code> для отмены."
+    )
+    set_awaiting(callback.from_user.id, field, redis)
+
+
+@router.callback_query(F.data == "limits:reset_all")
+async def limits_reset_all(callback: CallbackQuery) -> None:
+    settings = get_settings()
+    if not _is_admin(callback.from_user.id, settings):
+        await callback.answer("⛔ Нет доступа", show_alert=True)
+        return
+    redis = get_redis()
+    reset_all_limits(redis)
+    await callback.answer("✅ Все лимиты сброшены к значениям .env", show_alert=True)
+    effective = {f: get_limit(f, settings, redis) for f in EDITABLE_LIMITS}
+    try:
+        await callback.message.edit_text(
+            "⚙️ <b>Лимиты</b>\n\nНажмите на лимит, чтобы изменить его значение.",
+            reply_markup=limits_keyboard(effective),
+        )
+    except Exception:
+        pass
+
+
+@router.callback_query(F.data == "limits:back")
+async def limits_back(callback: CallbackQuery) -> None:
+    settings = get_settings()
+    if not _is_admin(callback.from_user.id, settings):
+        await callback.answer("⛔ Нет доступа", show_alert=True)
+        return
+    await callback.answer()
+    redis = get_redis()
+    is_disabled = bool(redis.exists(_KEY_BOT_DISABLED))
+    try:
+        await callback.message.edit_text(
+            _admin_panel_text(settings, redis),
+            reply_markup=admin_keyboard(is_disabled),
+        )
+    except Exception:
+        pass
 
 
 @router.callback_query(F.data == "admin:toggle_access")
@@ -534,6 +626,66 @@ async def upload_cookies(message: Message, bot: Bot) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Admin limit input interceptor — must be registered BEFORE handle_link so
+# that an admin who is editing a limit doesn't accidentally trigger a download.
+# ---------------------------------------------------------------------------
+
+class _AdminAwaitingFilter(BaseFilter):
+    async def __call__(self, message: Message) -> bool:
+        if not _is_admin(message.from_user.id, get_settings()):
+            return False
+        return bool(get_awaiting(message.from_user.id, get_redis()))
+
+
+@router.message(_AdminAwaitingFilter(), F.text)
+async def handle_admin_limit_input(message: Message) -> None:
+    redis = get_redis()
+    settings = get_settings()
+    admin_id = message.from_user.id
+    field = get_awaiting(admin_id, redis)
+    if not field:
+        return
+
+    text = (message.text or "").strip().lower()
+
+    if text in ("/cancel", "отмена"):
+        clear_awaiting(admin_id, redis)
+        await message.answer("❌ Редактирование отменено.")
+        return
+
+    if text in ("сброс", "reset", "default"):
+        reset_limit(field, redis)
+        clear_awaiting(admin_id, redis)
+        spec = EDITABLE_LIMITS[field]
+        default_val = int(getattr(settings, field))
+        await message.answer(
+            f"↩️ <b>{spec.emoji} {spec.label}</b> сброшен к значению из .env: "
+            f"<b>{format_value(field, default_val)}</b>"
+        )
+        return
+
+    if not text.lstrip("-").isdigit():
+        await message.answer("⚠️ Введите целое число, <code>сброс</code> или /cancel.")
+        return
+
+    value = int(text)
+    spec = EDITABLE_LIMITS[field]
+
+    if value < spec.min_val or value > spec.max_val:
+        zero_hint = f" или 0 (отключить)" if spec.zero_disables and spec.min_val == 0 else ""
+        await message.answer(
+            f"⚠️ Значение должно быть от {spec.min_val} до {spec.max_val}{zero_hint}."
+        )
+        return
+
+    set_limit(field, value, redis)
+    clear_awaiting(admin_id, redis)
+    await message.answer(
+        f"✅ <b>{spec.emoji} {spec.label}</b> → <b>{format_value(field, value)}</b>"
+    )
+
+
+# ---------------------------------------------------------------------------
 # URL message handlers
 # ---------------------------------------------------------------------------
 
@@ -561,15 +713,19 @@ async def _process_url_message(message: Message, text: str, reply_on_no_url: boo
         await message.answer(denial_msg)
         return
 
-    allowed, ban_ttl = limiter.hit_or_ban(
-        user_id=user_id,
-        window_seconds=settings.rate_limit_window_seconds,
-        max_messages=settings.rate_limit_max_messages,
-        ban_seconds=settings.ban_seconds,
-    )
-    if not allowed:
-        await message.answer(f"⛔ Слишком много сообщений. Временный бан: {ban_ttl} сек.")
-        return
+    rl_max = get_limit("rate_limit_max_messages", settings, redis)
+    if rl_max > 0:
+        rl_window = get_limit("rate_limit_window_seconds", settings, redis)
+        rl_ban = get_limit("ban_seconds", settings, redis)
+        allowed, ban_ttl = limiter.hit_or_ban(
+            user_id=user_id,
+            window_seconds=rl_window,
+            max_messages=rl_max,
+            ban_seconds=rl_ban,
+        )
+        if not allowed:
+            await message.answer(f"⛔ Слишком много сообщений. Временный бан: {ban_ttl} сек.")
+            return
 
     raw_url = extract_url(text)
     if not raw_url:
@@ -595,15 +751,18 @@ async def _process_url_message(message: Message, text: str, reply_on_no_url: boo
             first_name=message.from_user.first_name,
         )
 
-        if repo.count_user_today_requests(user_id) >= settings.user_daily_limit:
+        daily_limit = get_limit("user_daily_limit", settings, redis)
+        if daily_limit > 0 and repo.count_user_today_requests(user_id) >= daily_limit:
             await message.answer("⚠️ Дневной лимит запросов исчерпан.")
             return
 
-        if repo.count_user_active_requests(user_id) >= settings.user_queue_limit:
+        queue_limit = get_limit("user_queue_limit", settings, redis)
+        if queue_limit > 0 and repo.count_user_active_requests(user_id) >= queue_limit:
             await message.answer("⚠️ У тебя слишком много активных задач в очереди.")
             return
 
-        if repo.count_global_active_requests() >= settings.global_queue_limit:
+        global_limit = get_limit("global_queue_limit", settings, redis)
+        if global_limit > 0 and repo.count_global_active_requests() >= global_limit:
             await message.answer("⚠️ Сервер сейчас перегружен. Попробуй позже.")
             return
 

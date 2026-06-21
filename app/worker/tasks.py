@@ -11,6 +11,7 @@ from app.db.repository import Repository
 from app.db.session import get_session
 from app.services.rate_limiter import RateLimiter
 from app.services.redis_client import get_redis
+from app.services.runtime_config import get_limit
 from app.utils.caption import get_caption
 from app.utils.platforms import detect_platform
 from app.worker.celery_app import celery_app
@@ -134,10 +135,10 @@ def process_download_request(self, request_id: int) -> None:
             logger.warning("Request %s not found", request_id)
             return
 
-        if not limiter.acquire_user_download_slot(
-            req.user_id,
-            settings.max_active_downloads_per_user,
-            settings.max_download_duration_seconds,
+        max_active = get_limit("max_active_downloads_per_user", settings, redis)
+        max_duration = get_limit("max_download_duration_seconds", settings, redis)
+        if max_active > 0 and not limiter.acquire_user_download_slot(
+            req.user_id, max_active, max_duration
         ):
             repo.update_request_status(
                 request_id,
@@ -164,7 +165,7 @@ def process_download_request(self, request_id: int) -> None:
             video_lock_acquired = limiter.acquire_video_lock(
                 req.url_hash,
                 req.quality,
-                settings.max_download_duration_seconds,
+                get_limit("max_download_duration_seconds", settings, redis),
             )
 
             if not video_lock_acquired:
@@ -215,7 +216,8 @@ def process_download_request(self, request_id: int) -> None:
             file_size_bytes = file_path.stat().st_size
             size_mb = file_size_bytes / (1024 * 1024)
 
-            if size_mb > settings.max_file_mb:
+            max_mb = get_limit("max_file_mb", settings, redis)
+            if max_mb > 0 and size_mb > max_mb:
                 repo.update_request_status(
                     request_id,
                     DownloadStatus.too_large,
@@ -225,7 +227,7 @@ def process_download_request(self, request_id: int) -> None:
                 edit_status(
                     req.chat_id,
                     req.status_message_id,
-                    f"⚠️ Файл слишком большой: {size_mb:.1f} MB. Лимит: {settings.max_file_mb} MB.",
+                    f"⚠️ Файл слишком большой: {size_mb:.1f} MB. Лимит: {max_mb} MB.",
                 )
                 file_path.unlink(missing_ok=True)
                 return
