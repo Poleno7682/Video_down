@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import threading
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -20,6 +21,20 @@ VIDEO_EXTENSIONS = {".mp4", ".mov", ".m4v", ".webm", ".mkv"}
 AUDIO_EXTENSIONS = {".m4a", ".mp3", ".ogg", ".opus", ".wav"}
 
 _UPLOAD_TIMEOUT = 600
+
+
+@dataclass(frozen=True)
+class _TypeSpec:
+    method: str        # "send_video", "send_audio", "send_document"
+    media_param: str   # параметр Bot API: "video", "audio", "document"
+    extra_kwargs: dict[str, Any]
+
+
+_TYPE_SPECS: dict[TelegramFileType, _TypeSpec] = {
+    TelegramFileType.video: _TypeSpec("send_video", "video", {"supports_streaming": True}),
+    TelegramFileType.audio: _TypeSpec("send_audio", "audio", {}),
+    TelegramFileType.document: _TypeSpec("send_document", "document", {}),
+}
 
 # Maps file suffix → TelegramFileType; OCP: add new types by extending this dict.
 _SUFFIX_TO_FILE_TYPE: dict[str, TelegramFileType] = {
@@ -83,45 +98,29 @@ async def _send_file_async(
     bot = _get_bot()
     input_file = FSInputFile(file_path)
     file_type = _SUFFIX_TO_FILE_TYPE.get(file_path.suffix.lower(), TelegramFileType.document)
+    spec = _TYPE_SPECS[file_type]
 
-    if file_type == TelegramFileType.video:
-        msg = await bot.send_video(
-            chat_id=chat_id,
-            video=input_file,
-            caption=caption,
-            supports_streaming=True,
-            request_timeout=_UPLOAD_TIMEOUT,
-        )
-        return msg.video.file_id, msg.video.file_unique_id, TelegramFileType.video
-
-    if file_type == TelegramFileType.audio:
-        msg = await bot.send_audio(
-            chat_id=chat_id,
-            audio=input_file,
-            caption=caption,
-            request_timeout=_UPLOAD_TIMEOUT,
-        )
-        return msg.audio.file_id, msg.audio.file_unique_id, TelegramFileType.audio
-
-    msg = await bot.send_document(
+    msg = await getattr(bot, spec.method)(
         chat_id=chat_id,
-        document=input_file,
+        **{spec.media_param: input_file},
         caption=caption,
         request_timeout=_UPLOAD_TIMEOUT,
+        **spec.extra_kwargs,
     )
-    return msg.document.file_id, msg.document.file_unique_id, TelegramFileType.document
+    media = getattr(msg, spec.media_param)
+    return media.file_id, media.file_unique_id, file_type
 
 
 async def _send_cached_async(
     chat_id: int, file_id: str, file_type: TelegramFileType, caption: str
 ) -> None:
     bot = _get_bot()
-    if file_type == TelegramFileType.video:
-        await bot.send_video(chat_id=chat_id, video=file_id, caption=caption)
-    elif file_type == TelegramFileType.audio:
-        await bot.send_audio(chat_id=chat_id, audio=file_id, caption=caption)
-    else:
-        await bot.send_document(chat_id=chat_id, document=file_id, caption=caption)
+    spec = _TYPE_SPECS[file_type]
+    await getattr(bot, spec.method)(
+        chat_id=chat_id,
+        **{spec.media_param: file_id},
+        caption=caption,
+    )
 
 
 async def _edit_status_async(chat_id: int, message_id: int | None, text: str) -> None:
