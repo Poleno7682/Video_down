@@ -94,21 +94,30 @@ def revoke_token(token: str) -> None:
 
 
 def generate_youtube_cookies(access_token: str) -> str:
-    """Convert an OAuth2 access_token into YouTube session cookies (Netscape format).
+    """Collect YouTube session cookies using an OAuth2 access_token.
 
-    Calls Google's OAuthLogin endpoint, follows redirects to YouTube, and collects
-    all cookies (SAPISID, SID, HSID, SSID, APISID) that yt-dlp needs for
-    authenticated requests.
+    Uses YouTube's signin endpoint with a Bearer token to obtain LOGIN_INFO and
+    visitor cookies (YEC, PREF, YENID).  These help YouTube identify the request
+    as coming from a signed-in user and reduce bot-detection friction.
+
+    Note: yt-dlp also needs SAPISID / __Secure-3PAPISID for age-restricted /
+    private content.  Those cookies require a full browser session — they cannot
+    be obtained from a device-flow OAuth token.  For that use case the user must
+    export cookies from their browser and upload them via /cookies.
     """
     jar = CookieJar()
     opener = build_opener(HTTPCookieProcessor(jar))
-    opener.addheaders = [("User-Agent", _UA)]
+    opener.addheaders = [
+        ("User-Agent", _UA),
+        ("Authorization", f"Bearer {access_token}"),
+        ("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"),
+        ("Accept-Language", "en-US,en;q=0.5"),
+    ]
 
-    url = (
-        f"{_OAUTH_LOGIN_URL}"
-        f"?source=device&issueuserinfo=1&access_token={urllib.parse.quote(access_token)}"
+    opener.open(
+        "https://www.youtube.com/signin?action_handle_signin=true&hl=en&service=youtube",
+        timeout=30,
     )
-    opener.open(url, timeout=30)
 
     lines = ["# Netscape HTTP Cookie File\n"]
     for cookie in jar:
@@ -123,6 +132,6 @@ def generate_youtube_cookies(access_token: str) -> str:
         )
 
     if len(lines) <= 1:
-        raise RuntimeError("Google OAuthLogin returned no cookies — token may be invalid")
+        raise RuntimeError("YouTube signin returned no cookies — token may be invalid")
 
     return "".join(lines)

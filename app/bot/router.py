@@ -574,7 +574,9 @@ async def _poll_google_link(
 
             await message.answer(
                 "✅ <b>Google-аккаунт привязан!</b>\n\n"
-                "YouTube cookies сохранены и будут использоваться при скачивании.\n"
+                "YouTube cookies сохранены — они помогут обойти bot-detection при скачивании.\n\n"
+                "<b>Ограничение:</b> для видео 18+ и приватных видео по-прежнему нужны полные "
+                "cookies из браузера. Загрузи их командой /cookies (файл <code>youtube.txt</code>).\n\n"
                 "Для отвязки: /unlink_google"
             )
             return
