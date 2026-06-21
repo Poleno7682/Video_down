@@ -9,9 +9,9 @@ from aiogram.types import Message
 
 from app.core.config import get_settings
 from app.db.models import DownloadStatus
-from app.db.repository import Repository
+from app.db.repository import RequestRepository, UserRepository, VideoRepository
 from app.db.session import get_session
-from app.services.rate_limiter import RateLimiter
+from app.services.rate_limiter import RateLimiter, check_rate_limit
 from app.services.redis_client import get_redis
 from app.services.runtime_config import get_limit
 from app.utils.caption import get_caption
@@ -53,19 +53,10 @@ async def _process_url_message(message: Message, text: str, reply_on_no_url: boo
 
     user_id = message.from_user.id
 
-    rl_max = get_limit("rate_limit_max_messages", settings, redis)
-    if rl_max > 0:
-        rl_window = get_limit("rate_limit_window_seconds", settings, redis)
-        rl_ban = get_limit("ban_seconds", settings, redis)
-        allowed, ban_ttl = limiter.hit_or_ban(
-            user_id=user_id,
-            window_seconds=rl_window,
-            max_messages=rl_max,
-            ban_seconds=rl_ban,
-        )
-        if not allowed:
-            await message.answer(f"⛔ Слишком много сообщений. Временный бан: {ban_ttl} сек.")
-            return
+    allowed, ban_ttl = check_rate_limit(user_id, settings, redis, limiter)
+    if not allowed:
+        await message.answer(f"⛔ Слишком много сообщений. Временный бан: {ban_ttl} сек.")
+        return
 
     raw_url = extract_url(text)
     if not raw_url:
@@ -83,30 +74,32 @@ async def _process_url_message(message: Message, text: str, reply_on_no_url: boo
     quality_value = normalize_quality(quality_value, settings.default_quality)
 
     with get_session() as session:
-        repo = Repository(session)
+        user_repo = UserRepository(session)
+        req_repo = RequestRepository(session)
+        video_repo = VideoRepository(session)
 
-        repo.upsert_user(
+        user_repo.upsert_user(
             user_id=user_id,
             username=message.from_user.username,
             first_name=message.from_user.first_name,
         )
 
         daily_limit = get_limit("user_daily_limit", settings, redis)
-        if daily_limit > 0 and repo.count_user_today_requests(user_id) >= daily_limit:
+        if daily_limit > 0 and req_repo.count_user_today_requests(user_id) >= daily_limit:
             await message.answer("⚠️ Дневной лимит запросов исчерпан.")
             return
 
         queue_limit = get_limit("user_queue_limit", settings, redis)
-        if queue_limit > 0 and repo.count_user_active_requests(user_id) >= queue_limit:
+        if queue_limit > 0 and req_repo.count_user_active_requests(user_id) >= queue_limit:
             await message.answer("⚠️ У тебя слишком много активных задач в очереди.")
             return
 
         global_limit = get_limit("global_queue_limit", settings, redis)
-        if global_limit > 0 and repo.count_global_active_requests() >= global_limit:
+        if global_limit > 0 and req_repo.count_global_active_requests() >= global_limit:
             await message.answer("⚠️ Сервер сейчас перегружен. Попробуй позже.")
             return
 
-        ready_video = repo.get_ready_video(h, quality_value)
+        ready_video = video_repo.get_ready_video(h, quality_value)
         if ready_video and ready_video.telegram_file_id and ready_video.telegram_file_type:
             try:
                 await send_cached_file(message, ready_video.telegram_file_id, ready_video.telegram_file_type.value)
@@ -116,10 +109,10 @@ async def _process_url_message(message: Message, text: str, reply_on_no_url: boo
                     "Cached file_id for video %s is invalid, clearing and re-queuing",
                     ready_video.id,
                 )
-                repo.invalidate_video_cache(ready_video.id)
+                video_repo.invalidate_video_cache(ready_video.id)
                 await message.answer("⚠️ Кэш устарел, скачиваю заново...")
 
-        video = repo.get_or_create_video(
+        video = video_repo.get_or_create_video(
             original_url=raw_url,
             normalized_url=normalized,
             url_hash=h,
@@ -131,7 +124,7 @@ async def _process_url_message(message: Message, text: str, reply_on_no_url: boo
             f"Качество: {quality_value}"
         )
 
-        req = repo.create_request(
+        req = req_repo.create_request(
             user_id=user_id,
             chat_id=message.chat.id,
             message_id=message.message_id,
@@ -145,4 +138,4 @@ async def _process_url_message(message: Message, text: str, reply_on_no_url: boo
         )
 
         task = process_download_request.delay(req.id)
-        repo.set_request_task_id(req.id, task.id)
+        req_repo.set_request_task_id(req.id, task.id)

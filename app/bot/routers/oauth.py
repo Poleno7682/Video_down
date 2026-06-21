@@ -8,7 +8,7 @@ from aiogram.filters import Command
 from aiogram.types import Message
 
 from app.core.config import get_settings
-from app.db.repository import Repository
+from app.db.repository import CookieRepository, GoogleTokenRepository
 from app.db.session import get_session
 from app.services.google_oauth import (
     DeviceFlowExpired,
@@ -110,10 +110,9 @@ async def _poll_google_link(
                 return
 
             with get_session() as session:
-                repo = Repository(session)
-                repo.set_user_cookies(user_id, "youtube", cookie_text)
+                CookieRepository(session).set_user_cookies(user_id, "youtube", cookie_text)
                 if refresh_tok:
-                    repo.set_google_token(user_id, refresh_tok)
+                    GoogleTokenRepository(session).set_google_token(user_id, refresh_tok)
 
             await message.answer(
                 "✅ <b>Google-аккаунт привязан!</b>\n\n"
@@ -138,13 +137,14 @@ async def unlink_google(message: Message) -> None:
     refresh_token_str: str | None = None
     had_token: bool = False
     with get_session() as session:
-        repo = Repository(session)
-        token_rec = repo.get_google_token(user_id)
+        google_repo = GoogleTokenRepository(session)
+        cookie_repo = CookieRepository(session)
+        token_rec = google_repo.get_google_token(user_id)
         if token_rec:
             had_token = True
             refresh_token_str = token_rec.refresh_token
-            repo.delete_google_token(user_id)
-        removed_cookies = repo.delete_user_cookies(user_id, "youtube")
+            google_repo.delete_google_token(user_id)
+        removed_cookies = cookie_repo.delete_user_cookies(user_id, "youtube")
 
     if refresh_token_str:
         await asyncio.to_thread(revoke_token, refresh_token_str)

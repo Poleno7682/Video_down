@@ -57,6 +57,11 @@ EDITABLE_LIMITS: dict[str, LimitSpec] = {
 }
 
 
+def get_effective_limits(settings: Settings, redis: Redis) -> dict[str, int]:
+    """Effective value for every admin-editable limit."""
+    return {f: get_limit(f, settings, redis) for f in EDITABLE_LIMITS}
+
+
 def get_limit(field: str, settings: Settings, redis: Redis) -> int:
     """Return the effective value: Redis override if set, otherwise from Settings."""
     raw = redis.get(f"{_LIMIT_PREFIX}{field}")

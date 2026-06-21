@@ -6,7 +6,7 @@ from aiogram import Bot, F, Router
 from aiogram.filters import Command
 from aiogram.types import Message
 
-from app.db.repository import Repository
+from app.db.repository import CookieRepository
 from app.db.session import get_session
 from app.utils.platforms import PLATFORMS, platform_from_filename
 
@@ -41,7 +41,7 @@ def _looks_like_netscape(text: str) -> bool:
 @router.message(Command("cookies"))
 async def cookies_info(message: Message) -> None:
     with get_session() as session:
-        platforms = Repository(session).list_user_platforms(message.from_user.id)
+        platforms = CookieRepository(session).list_user_platforms(message.from_user.id)
 
     if platforms:
         status = "Загружены: " + ", ".join(sorted(platforms))
@@ -62,7 +62,7 @@ async def delete_cookies(message: Message) -> None:
         return
 
     with get_session() as session:
-        removed = Repository(session).delete_user_cookies(message.from_user.id, platform)
+        removed = CookieRepository(session).delete_user_cookies(message.from_user.id, platform)
     if removed:
         await message.answer(f"✅ Cookies для <b>{platform}</b> удалены.")
     else:
@@ -105,5 +105,5 @@ async def upload_cookies(message: Message, bot: Bot) -> None:
         return
 
     with get_session() as session:
-        Repository(session).set_user_cookies(message.from_user.id, platform, content)
+        CookieRepository(session).set_user_cookies(message.from_user.id, platform, content)
     await message.answer(f"✅ Cookies для <b>{platform}</b> сохранены.")

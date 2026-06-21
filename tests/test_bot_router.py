@@ -202,7 +202,7 @@ async def test_start_handler():
     repo = MagicMock()
     session = _make_session(repo)
     with patch("app.bot.routers.user.get_session", return_value=session), \
-         patch("app.bot.routers.user.Repository", return_value=repo):
+         patch("app.bot.routers.user.UserRepository", return_value=repo):
         await start(message)
     message.answer.assert_awaited_once_with(HELP_TEXT)
     repo.upsert_user.assert_called_once()
@@ -310,7 +310,7 @@ async def test_status_handler():
     with patch("app.bot.routers.user.get_settings", return_value=settings), \
          patch("app.bot.routers.user.get_redis", return_value=redis), \
          patch("app.bot.routers.user.get_session", return_value=session), \
-         patch("app.bot.routers.user.Repository", return_value=repo):
+         patch("app.bot.routers.user.RequestRepository", return_value=repo):
         await status(message)
 
     message.answer.assert_awaited_once()
@@ -370,16 +370,6 @@ async def test_handle_caption_link_calls_process_url_message():
 # ---------------------------------------------------------------------------
 # Admin handlers
 # ---------------------------------------------------------------------------
-
-@pytest.mark.asyncio
-async def test_admin_panel_non_admin_ignored():
-    from app.bot.routers.admin import admin_panel
-    message = _make_message(user_id=999)
-    settings = _make_settings(admin_user_ids=set())
-    with patch("app.bot.routers.admin.get_settings", return_value=settings):
-        await admin_panel(message)
-    message.answer.assert_not_awaited()
-
 
 @pytest.mark.asyncio
 async def test_admin_panel_shown_to_admin():
@@ -456,16 +446,6 @@ async def test_add_trusted_user_bad_id():
          patch("app.bot.routers.admin.get_redis", return_value=redis):
         await add_trusted_user(message)
     redis.sadd.assert_not_called()
-
-
-@pytest.mark.asyncio
-async def test_add_trusted_user_non_admin_ignored():
-    from app.bot.routers.admin import add_trusted_user
-    message = _make_message(user_id=999, text="/adduser 111")
-    settings = _make_settings(admin_user_ids=set())
-    with patch("app.bot.routers.admin.get_settings", return_value=settings):
-        await add_trusted_user(message)
-    message.answer.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -615,7 +595,9 @@ async def test_process_url_message_daily_limit():
          patch("app.bot.routers.url_handler.get_redis", return_value=redis), \
          patch("app.bot.routers.url_handler.RateLimiter", return_value=limiter), \
          patch("app.bot.routers.url_handler.get_session", return_value=session), \
-         patch("app.bot.routers.url_handler.Repository", return_value=repo):
+         patch("app.bot.routers.url_handler.UserRepository", return_value=repo), \
+         patch("app.bot.routers.url_handler.RequestRepository", return_value=repo), \
+         patch("app.bot.routers.url_handler.VideoRepository", return_value=repo):
         await _process_url_message(message, "https://youtube.com/watch?v=x", True)
 
     assert "лимит" in message.answer.call_args[0][0].lower() or "⚠️" in message.answer.call_args[0][0]
@@ -641,7 +623,9 @@ async def test_process_url_message_user_queue_limit():
          patch("app.bot.routers.url_handler.get_redis", return_value=redis), \
          patch("app.bot.routers.url_handler.RateLimiter", return_value=limiter), \
          patch("app.bot.routers.url_handler.get_session", return_value=session), \
-         patch("app.bot.routers.url_handler.Repository", return_value=repo):
+         patch("app.bot.routers.url_handler.UserRepository", return_value=repo), \
+         patch("app.bot.routers.url_handler.RequestRepository", return_value=repo), \
+         patch("app.bot.routers.url_handler.VideoRepository", return_value=repo):
         await _process_url_message(message, "https://youtube.com/watch?v=x", True)
 
     assert "⚠️" in message.answer.call_args[0][0]
@@ -667,7 +651,9 @@ async def test_process_url_message_global_queue_limit():
          patch("app.bot.routers.url_handler.get_redis", return_value=redis), \
          patch("app.bot.routers.url_handler.RateLimiter", return_value=limiter), \
          patch("app.bot.routers.url_handler.get_session", return_value=session), \
-         patch("app.bot.routers.url_handler.Repository", return_value=repo):
+         patch("app.bot.routers.url_handler.UserRepository", return_value=repo), \
+         patch("app.bot.routers.url_handler.RequestRepository", return_value=repo), \
+         patch("app.bot.routers.url_handler.VideoRepository", return_value=repo):
         await _process_url_message(message, "https://youtube.com/watch?v=x", True)
 
     assert "⚠️" in message.answer.call_args[0][0]
@@ -704,7 +690,9 @@ async def test_process_url_message_cache_hit_success():
          patch("app.bot.routers.url_handler.get_redis", return_value=redis), \
          patch("app.bot.routers.url_handler.RateLimiter", return_value=limiter), \
          patch("app.bot.routers.url_handler.get_session", return_value=session), \
-         patch("app.bot.routers.url_handler.Repository", return_value=repo), \
+         patch("app.bot.routers.url_handler.UserRepository", return_value=repo), \
+         patch("app.bot.routers.url_handler.RequestRepository", return_value=repo), \
+         patch("app.bot.routers.url_handler.VideoRepository", return_value=repo), \
          patch("app.bot.routers.url_handler.send_cached_file", new=AsyncMock()) as mock_send:
         await _process_url_message(message, "https://youtube.com/watch?v=x", True)
 
@@ -753,7 +741,9 @@ async def test_process_url_message_cache_hit_telegram_bad_request():
          patch("app.bot.routers.url_handler.get_redis", return_value=redis), \
          patch("app.bot.routers.url_handler.RateLimiter", return_value=limiter), \
          patch("app.bot.routers.url_handler.get_session", return_value=session), \
-         patch("app.bot.routers.url_handler.Repository", return_value=repo), \
+         patch("app.bot.routers.url_handler.UserRepository", return_value=repo), \
+         patch("app.bot.routers.url_handler.RequestRepository", return_value=repo), \
+         patch("app.bot.routers.url_handler.VideoRepository", return_value=repo), \
          patch("app.bot.routers.url_handler.send_cached_file", new=AsyncMock(
              side_effect=TelegramBadRequest(method=MagicMock(), message="Bad file id")
          )), \
@@ -798,7 +788,9 @@ async def test_process_url_message_normal_queue_path():
          patch("app.bot.routers.url_handler.get_redis", return_value=redis), \
          patch("app.bot.routers.url_handler.RateLimiter", return_value=limiter), \
          patch("app.bot.routers.url_handler.get_session", return_value=session), \
-         patch("app.bot.routers.url_handler.Repository", return_value=repo), \
+         patch("app.bot.routers.url_handler.UserRepository", return_value=repo), \
+         patch("app.bot.routers.url_handler.RequestRepository", return_value=repo), \
+         patch("app.bot.routers.url_handler.VideoRepository", return_value=repo), \
          patch("app.bot.routers.url_handler.process_download_request") as mock_task:
         mock_task.delay.return_value = task
         await _process_url_message(message, "https://youtube.com/watch?v=x", True)
@@ -842,7 +834,9 @@ async def test_process_url_message_uses_user_quality_preference():
          patch("app.bot.routers.url_handler.get_redis", return_value=redis), \
          patch("app.bot.routers.url_handler.RateLimiter", return_value=limiter), \
          patch("app.bot.routers.url_handler.get_session", return_value=session), \
-         patch("app.bot.routers.url_handler.Repository", return_value=repo), \
+         patch("app.bot.routers.url_handler.UserRepository", return_value=repo), \
+         patch("app.bot.routers.url_handler.RequestRepository", return_value=repo), \
+         patch("app.bot.routers.url_handler.VideoRepository", return_value=repo), \
          patch("app.bot.routers.url_handler.process_download_request") as mock_task:
         mock_task.delay.return_value = task
         await _process_url_message(message, "https://youtube.com/watch?v=x", True)
@@ -901,16 +895,6 @@ async def test_toggle_bot_access_swallows_telegram_bad_request():
 
 
 @pytest.mark.asyncio
-async def test_remove_trusted_user_non_admin_ignored():
-    from app.bot.routers.admin import remove_trusted_user
-    message = _make_message(user_id=999, text="/removeuser 111")
-    settings = _make_settings(admin_user_ids=set())
-    with patch("app.bot.routers.admin.get_settings", return_value=settings):
-        await remove_trusted_user(message)
-    message.answer.assert_not_awaited()
-
-
-@pytest.mark.asyncio
 async def test_remove_trusted_user_bad_id_shows_usage():
     from app.bot.routers.admin import remove_trusted_user
     message = _make_message(user_id=1, text="/removeuser notanid")
@@ -922,16 +906,6 @@ async def test_remove_trusted_user_bad_id_shows_usage():
     message.answer.assert_awaited_once()
     assert "Использование" in message.answer.call_args[0][0]
     redis.srem.assert_not_called()
-
-
-@pytest.mark.asyncio
-async def test_list_trusted_users_non_admin_ignored():
-    from app.bot.routers.admin import list_trusted_users
-    message = _make_message(user_id=999)
-    settings = _make_settings(admin_user_ids=set())
-    with patch("app.bot.routers.admin.get_settings", return_value=settings):
-        await list_trusted_users(message)
-    message.answer.assert_not_awaited()
 
 
 # ---------------------------------------------------------------------------
@@ -960,7 +934,7 @@ async def test_upload_cookies_valid_youtube():
     redis = _make_redis_mock()
 
     with patch("app.bot.routers.cookies.get_session", return_value=session), \
-         patch("app.bot.routers.cookies.Repository", return_value=repo):
+         patch("app.bot.routers.cookies.CookieRepository", return_value=repo):
         await upload_cookies(message, bot)
 
     repo.set_user_cookies.assert_called_once()
@@ -1000,7 +974,7 @@ async def test_upload_cookies_invalid_format_rejected():
     redis = _make_redis_mock()
 
     with patch("app.bot.routers.cookies.get_session", return_value=session), \
-         patch("app.bot.routers.cookies.Repository", return_value=repo):
+         patch("app.bot.routers.cookies.CookieRepository", return_value=repo):
         await upload_cookies(message, bot)
 
     repo.set_user_cookies.assert_not_called()
@@ -1042,7 +1016,7 @@ async def test_broadcast_to_all_text_uses_copy_message():
     session = _make_session(repo)
 
     with patch("app.bot.routers.broadcast.get_session", return_value=session), \
-         patch("app.bot.routers.broadcast.Repository", return_value=repo), \
+         patch("app.bot.routers.broadcast.UserRepository", return_value=repo), \
          patch("app.bot.routers.broadcast.asyncio.sleep", new=AsyncMock()):
         ok, failed, total = await _broadcast_to_all(bot, source)
 
@@ -1065,7 +1039,7 @@ async def test_broadcast_to_all_text_with_buttons_uses_send_message():
     session = _make_session(repo)
 
     with patch("app.bot.routers.broadcast.get_session", return_value=session), \
-         patch("app.bot.routers.broadcast.Repository", return_value=repo), \
+         patch("app.bot.routers.broadcast.UserRepository", return_value=repo), \
          patch("app.bot.routers.broadcast.asyncio.sleep", new=AsyncMock()):
         ok, failed, total = await _broadcast_to_all(bot, source)
 
@@ -1087,7 +1061,7 @@ async def test_broadcast_to_all_counts_failures():
     session = _make_session(repo)
 
     with patch("app.bot.routers.broadcast.get_session", return_value=session), \
-         patch("app.bot.routers.broadcast.Repository", return_value=repo), \
+         patch("app.bot.routers.broadcast.UserRepository", return_value=repo), \
          patch("app.bot.routers.broadcast.asyncio.sleep", new=AsyncMock()):
         ok, failed, total = await _broadcast_to_all(bot, source)
 

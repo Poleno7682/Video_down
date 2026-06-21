@@ -4,6 +4,9 @@ import logging
 
 from redis import Redis
 
+from app.core.config import Settings
+from app.services.runtime_config import get_limit
+
 logger = logging.getLogger(__name__)
 
 # Lua script: atomically check ban, increment rate counter, ban if exceeded.
@@ -102,3 +105,24 @@ class RateLimiter:
 
     def release_video_lock(self, url_hash: str, quality: str) -> None:
         self.redis.delete(f"lock:video:{url_hash}:{quality}")
+
+
+def check_rate_limit(
+    user_id: int,
+    settings: Settings,
+    redis: Redis,
+    limiter: RateLimiter,
+) -> tuple[bool, int]:
+    """Apply message rate limit. Returns (is_allowed, ban_ttl_seconds).
+
+    Returns (True, 0) when rate limiting is disabled (rl_max == 0).
+    """
+    rl_max = get_limit("rate_limit_max_messages", settings, redis)
+    if rl_max == 0:
+        return True, 0
+    return limiter.hit_or_ban(
+        user_id=user_id,
+        window_seconds=get_limit("rate_limit_window_seconds", settings, redis),
+        max_messages=rl_max,
+        ban_seconds=get_limit("ban_seconds", settings, redis),
+    )

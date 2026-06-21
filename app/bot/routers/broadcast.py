@@ -4,13 +4,14 @@ import asyncio
 import logging
 
 from aiogram import Bot, F, Router
-from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import BaseFilter, Command
 from aiogram.types import CallbackQuery, Message
 
 from app.bot.access import _is_admin
+from app.bot.filters import AdminFilter
+from app.bot.utils import safe_edit_text
 from app.core.config import get_settings
-from app.db.repository import Repository
+from app.db.repository import UserRepository
 from app.db.session import get_session
 from app.keyboards.admin import broadcast_cancel_keyboard
 from app.services.redis_client import get_redis
@@ -50,39 +51,28 @@ async def _enter_broadcast_mode(target: Message, admin_id: int) -> None:
     )
 
 
-@router.message(Command("broadcast"))
+@router.message(Command("broadcast"), AdminFilter())
 async def broadcast_command(message: Message) -> None:
-    if not _is_admin(message.from_user.id, get_settings()):
-        return
     await _enter_broadcast_mode(message, message.from_user.id)
 
 
-@router.callback_query(F.data == "admin:broadcast")
+@router.callback_query(F.data == "admin:broadcast", AdminFilter(alert_on_deny=True))
 async def broadcast_start_callback(callback: CallbackQuery) -> None:
-    if not _is_admin(callback.from_user.id, get_settings()):
-        await callback.answer("⛔ Нет доступа", show_alert=True)
-        return
     await callback.answer()
     await _enter_broadcast_mode(callback.message, callback.from_user.id)
 
 
-@router.callback_query(F.data == "broadcast:cancel")
+@router.callback_query(F.data == "broadcast:cancel", AdminFilter(alert_on_deny=True))
 async def broadcast_cancel_callback(callback: CallbackQuery) -> None:
-    if not _is_admin(callback.from_user.id, get_settings()):
-        await callback.answer("⛔ Нет доступа", show_alert=True)
-        return
     get_redis().delete(_broadcast_key(callback.from_user.id))
     await callback.answer("Рассылка отменена")
-    try:
-        await callback.message.edit_text("❌ Режим рассылки выключен.")
-    except TelegramBadRequest:
-        pass
+    await safe_edit_text(callback.message, "❌ Режим рассылки выключен.")
 
 
 async def _broadcast_to_all(bot: Bot, source: Message) -> tuple[int, int, int]:
     """Send a copy of `source` to every user. Returns (ok, failed, total)."""
     with get_session() as session:
-        user_ids = Repository(session).get_all_user_ids()
+        user_ids = UserRepository(session).get_all_user_ids()
 
     from_chat_id = source.chat.id
     message_id = source.message_id

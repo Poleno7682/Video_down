@@ -6,10 +6,10 @@ from aiogram.types import CallbackQuery, Message
 
 from app.bot.access import _check_access
 from app.core.config import get_settings
-from app.db.repository import Repository
+from app.db.repository import RequestRepository, UserRepository
 from app.db.session import get_session
 from app.keyboards.quality import quality_keyboard
-from app.services.rate_limiter import RateLimiter
+from app.services.rate_limiter import RateLimiter, check_rate_limit
 from app.services.redis_client import get_redis
 from app.services.runtime_config import get_limit
 from app.utils.quality import normalize_quality
@@ -29,7 +29,7 @@ HELP_TEXT = (
 @router.message(Command("start", "help"))
 async def start(message: Message) -> None:
     with get_session() as session:
-        Repository(session).upsert_user(
+        UserRepository(session).upsert_user(
             user_id=message.from_user.id,
             username=message.from_user.username,
             first_name=message.from_user.first_name,
@@ -53,17 +53,10 @@ async def set_quality(callback: CallbackQuery) -> None:
         return
 
     limiter = RateLimiter(redis)
-    rl_max = get_limit("rate_limit_max_messages", settings, redis)
-    if rl_max > 0:
-        allowed, ban_ttl = limiter.hit_or_ban(
-            user_id=callback.from_user.id,
-            window_seconds=get_limit("rate_limit_window_seconds", settings, redis),
-            max_messages=rl_max,
-            ban_seconds=get_limit("ban_seconds", settings, redis),
-        )
-        if not allowed:
-            await callback.answer(f"⛔ Слишком быстро. Подожди {ban_ttl} сек.", show_alert=True)
-            return
+    allowed, ban_ttl = check_rate_limit(callback.from_user.id, settings, redis, limiter)
+    if not allowed:
+        await callback.answer(f"⛔ Слишком быстро. Подожди {ban_ttl} сек.", show_alert=True)
+        return
 
     quality_value = normalize_quality(callback.data.split(":", 1)[1])
     redis.setex(
@@ -86,7 +79,7 @@ async def status(message: Message) -> None:
         return
 
     with get_session() as session:
-        repo = Repository(session)
+        repo = RequestRepository(session)
         user_active = repo.count_user_active_requests(message.from_user.id)
         global_active = repo.count_global_active_requests()
         today = repo.count_user_today_requests(message.from_user.id)

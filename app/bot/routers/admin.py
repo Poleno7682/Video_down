@@ -1,11 +1,11 @@
 from __future__ import annotations
 
 from aiogram import F, Router
-from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import BaseFilter, Command
 from aiogram.types import CallbackQuery, Message
 
 from app.bot.access import _is_admin, _KEY_BOT_DISABLED, _KEY_TRUSTED_USERS
+from app.bot.utils import safe_edit_text
 from app.bot.filters import AdminFilter
 from app.core.config import get_settings
 from app.keyboards.admin import admin_keyboard, limits_keyboard
@@ -15,6 +15,7 @@ from app.services.runtime_config import (
     clear_awaiting,
     format_value,
     get_awaiting,
+    get_effective_limits,
     get_limit,
     reset_all_limits,
     reset_limit,
@@ -55,12 +56,9 @@ def _admin_panel_text(settings, redis) -> str:
 # Admin panel
 # ---------------------------------------------------------------------------
 
-@router.message(Command("admin"))
+@router.message(Command("admin"), AdminFilter())
 async def admin_panel(message: Message) -> None:
     settings = get_settings()
-    if not _is_admin(message.from_user.id, settings):
-        return
-
     redis = get_redis()
     is_disabled = bool(redis.exists(_KEY_BOT_DISABLED))
     await message.answer(
@@ -74,7 +72,7 @@ async def show_limits(callback: CallbackQuery) -> None:
     await callback.answer()
     settings = get_settings()
     redis = get_redis()
-    effective = {f: get_limit(f, settings, redis) for f in EDITABLE_LIMITS}
+    effective = get_effective_limits(settings, redis)
     await callback.message.edit_text(
         "⚙️ <b>Лимиты</b>\n\nНажмите на лимит, чтобы изменить его значение.",
         reply_markup=limits_keyboard(effective),
@@ -113,14 +111,12 @@ async def limits_reset_all(callback: CallbackQuery) -> None:
     redis = get_redis()
     reset_all_limits(redis)
     await callback.answer("✅ Все лимиты сброшены к значениям .env", show_alert=True)
-    effective = {f: get_limit(f, settings, redis) for f in EDITABLE_LIMITS}
-    try:
-        await callback.message.edit_text(
-            "⚙️ <b>Лимиты</b>\n\nНажмите на лимит, чтобы изменить его значение.",
-            reply_markup=limits_keyboard(effective),
-        )
-    except Exception:
-        pass
+    effective = get_effective_limits(settings, redis)
+    await safe_edit_text(
+        callback.message,
+        "⚙️ <b>Лимиты</b>\n\nНажмите на лимит, чтобы изменить его значение.",
+        reply_markup=limits_keyboard(effective),
+    )
 
 
 @router.callback_query(F.data == "limits:back", AdminFilter(alert_on_deny=True))
@@ -129,13 +125,11 @@ async def limits_back(callback: CallbackQuery) -> None:
     settings = get_settings()
     redis = get_redis()
     is_disabled = bool(redis.exists(_KEY_BOT_DISABLED))
-    try:
-        await callback.message.edit_text(
-            _admin_panel_text(settings, redis),
-            reply_markup=admin_keyboard(is_disabled),
-        )
-    except Exception:
-        pass
+    await safe_edit_text(
+        callback.message,
+        _admin_panel_text(settings, redis),
+        reply_markup=admin_keyboard(is_disabled),
+    )
 
 
 @router.callback_query(F.data == "admin:toggle_access", AdminFilter(alert_on_deny=True))
@@ -152,25 +146,19 @@ async def toggle_bot_access(callback: CallbackQuery) -> None:
         is_disabled = True
 
     await callback.answer(alert_text, show_alert=True)
-    try:
-        await callback.message.edit_text(
-            _admin_panel_text(settings, redis),
-            reply_markup=admin_keyboard(is_disabled),
-        )
-    except TelegramBadRequest:
-        pass
+    await safe_edit_text(
+        callback.message,
+        _admin_panel_text(settings, redis),
+        reply_markup=admin_keyboard(is_disabled),
+    )
 
 
 # ---------------------------------------------------------------------------
 # User management
 # ---------------------------------------------------------------------------
 
-@router.message(Command("adduser"))
+@router.message(Command("adduser"), AdminFilter())
 async def add_trusted_user(message: Message) -> None:
-    settings = get_settings()
-    if not _is_admin(message.from_user.id, settings):
-        return
-
     parts = (message.text or "").split(maxsplit=1)
     if len(parts) < 2 or not parts[1].strip().lstrip("-").isdigit():
         await message.answer(
@@ -184,12 +172,8 @@ async def add_trusted_user(message: Message) -> None:
     await message.answer(f"✅ Пользователь <code>{uid}</code> добавлен в доверенные.")
 
 
-@router.message(Command("removeuser"))
+@router.message(Command("removeuser"), AdminFilter())
 async def remove_trusted_user(message: Message) -> None:
-    settings = get_settings()
-    if not _is_admin(message.from_user.id, settings):
-        return
-
     parts = (message.text or "").split(maxsplit=1)
     if len(parts) < 2 or not parts[1].strip().lstrip("-").isdigit():
         await message.answer(
@@ -206,12 +190,8 @@ async def remove_trusted_user(message: Message) -> None:
         await message.answer(f"⚠️ Пользователь <code>{uid}</code> не найден в списке доверенных.")
 
 
-@router.message(Command("listusers"))
+@router.message(Command("listusers"), AdminFilter())
 async def list_trusted_users(message: Message) -> None:
-    settings = get_settings()
-    if not _is_admin(message.from_user.id, settings):
-        return
-
     members = get_redis().smembers(_KEY_TRUSTED_USERS)
     if not members:
         await message.answer("Список доверенных пользователей пуст.\nДобавьте: /adduser &lt;id&gt;")
