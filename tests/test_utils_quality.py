@@ -46,7 +46,14 @@ class TestFormatSelector:
     def test_portrait_streams_preferred_for_shorts(self):
         fmt = format_selector("720p")
         assert "aspect_ratio<1" in fmt
+        # Portrait selectors must appear before landscape ones
         assert fmt.index("aspect_ratio<1") < fmt.index("bestvideo[height<=720]")
+
+    def test_h264_preferred_before_any_codec(self):
+        fmt = format_selector("720p")
+        # H.264 (avc1) variant must come before the codec-agnostic variant
+        assert "vcodec^=avc1" in fmt
+        assert fmt.index("vcodec^=avc1") < fmt.index("bestvideo[aspect_ratio<1][height<=720]+bestaudio/")
 
     def test_no_forced_mp4_video_stream(self):
         fmt = format_selector("720p")

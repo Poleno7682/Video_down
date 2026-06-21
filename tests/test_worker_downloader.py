@@ -220,11 +220,12 @@ def test_download_video_success():
         settings.default_quality = "720p"
         settings.use_cookies = False
 
-        fake_file = Path(tmp) / "active" / "video.mp4"
-        fake_file.parent.mkdir(parents=True, exist_ok=True)
+        fixed_hex = "aabbccdd11223344aabbccdd11223344"
+        work_subdir = Path(tmp) / "active" / fixed_hex
 
         def fake_extract_info(url, download):
-            fake_file.write_bytes(b"x" * 100)
+            work_subdir.mkdir(parents=True, exist_ok=True)
+            (work_subdir / "video.mp4").write_bytes(b"x" * 100)
             return {"title": "Test Video"}
 
         mock_ydl = MagicMock()
@@ -232,10 +233,15 @@ def test_download_video_success():
         mock_ydl.__exit__ = MagicMock(return_value=False)
         mock_ydl.extract_info.side_effect = fake_extract_info
 
-        with patch("app.worker.downloader.YoutubeDL", return_value=mock_ydl):
-            path, info = download_video("https://youtube.com/watch?v=x", "720p", settings)
+        mock_uuid = MagicMock()
+        mock_uuid.hex = fixed_hex
 
-        assert path == fake_file
+        with patch("app.worker.downloader.uuid.uuid4", return_value=mock_uuid):
+            with patch("app.worker.downloader.YoutubeDL", return_value=mock_ydl):
+                path, info = download_video("https://youtube.com/watch?v=x", "720p", settings)
+
+        expected = Path(tmp) / "active" / "video.mp4"
+        assert path == expected
         assert info["title"] == "Test Video"
 
 
@@ -246,11 +252,12 @@ def test_download_video_empty_info():
         settings.default_quality = "720p"
         settings.use_cookies = False
 
-        fake_file = Path(tmp) / "active" / "audio.m4a"
-        fake_file.parent.mkdir(parents=True, exist_ok=True)
+        fixed_hex = "ccdd11223344aabbccdd11223344aabb"
+        work_subdir = Path(tmp) / "active" / fixed_hex
 
         def fake_extract_info(url, download):
-            fake_file.write_bytes(b"a" * 50)
+            work_subdir.mkdir(parents=True, exist_ok=True)
+            (work_subdir / "audio.m4a").write_bytes(b"a" * 50)
             return None  # yt-dlp can return None
 
         mock_ydl = MagicMock()
@@ -258,7 +265,11 @@ def test_download_video_empty_info():
         mock_ydl.__exit__ = MagicMock(return_value=False)
         mock_ydl.extract_info.side_effect = fake_extract_info
 
-        with patch("app.worker.downloader.YoutubeDL", return_value=mock_ydl):
-            path, info = download_video("https://youtube.com/watch?v=x", "audio", settings)
+        mock_uuid = MagicMock()
+        mock_uuid.hex = fixed_hex
+
+        with patch("app.worker.downloader.uuid.uuid4", return_value=mock_uuid):
+            with patch("app.worker.downloader.YoutubeDL", return_value=mock_ydl):
+                path, info = download_video("https://youtube.com/watch?v=x", "audio", settings)
 
         assert info == {}

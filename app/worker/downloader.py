@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import logging
+import shutil
+import uuid
 from pathlib import Path
 from typing import Callable
 
@@ -96,16 +98,24 @@ def download_video(
     cookie_file: Path | None = None,
 ) -> tuple[Path, dict]:
     quality = normalize_quality(quality, settings.default_quality)
-    work_dir = settings.download_dir / "active"
+    # Each download gets its own subdirectory so concurrent workers cannot
+    # interfere with each other's _select_output_file result.
+    work_dir = settings.download_dir / "active" / uuid.uuid4().hex
     work_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        # Per-user cookies (cookie_file) take priority over the global shared file.
+        if cookie_file is None:
+            cookie_file = cookie_file_for_url(url, settings)
+        opts = _build_ydl_opts(quality, work_dir, progress_hook, cookie_file)
 
-    before = set(work_dir.iterdir())
-    # Per-user cookies (cookie_file) take priority over the global shared file.
-    if cookie_file is None:
-        cookie_file = cookie_file_for_url(url, settings)
-    opts = _build_ydl_opts(quality, work_dir, progress_hook, cookie_file)
+        with YoutubeDL(opts) as ydl:
+            info = ydl.extract_info(url, download=True)
 
-    with YoutubeDL(opts) as ydl:
-        info = ydl.extract_info(url, download=True)
-
-    return _select_output_file(work_dir, before), info or {}
+        file_path = _select_output_file(work_dir, set())
+        # Move the finished file one level up so callers can clean it up without
+        # knowing about the per-download subdirectory.
+        dest = settings.download_dir / "active" / file_path.name
+        shutil.move(str(file_path), str(dest))
+        return dest, info or {}
+    finally:
+        shutil.rmtree(work_dir, ignore_errors=True)

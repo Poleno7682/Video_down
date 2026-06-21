@@ -4,20 +4,31 @@ def _video_format(max_height: int | None) -> str:
     YouTube often serves Shorts as a 16:9 container with letterboxing. Native
     vertical streams have aspect_ratio < 1 (width/height). We try those first,
     then fall back to the usual landscape selectors.
-    """
-    if max_height is None:
-        portrait = "bestvideo[aspect_ratio<1]+bestaudio/best[aspect_ratio<1]"
-        landscape = "bestvideo+bestaudio/best"
-        return f"{portrait}/{landscape}/best"
 
-    h = max_height
+    H.264 (avc1) is preferred in every tier: when merged into MP4 with -c copy,
+    VP9 (WebM codec) ends up in a non-standard VP9-in-MP4 container that many
+    Telegram clients cannot decode as video, showing only the first keyframe
+    (static image) while audio plays normally. AV1-in-MP4 has similar issues on
+    older clients. Falling back to any codec is still offered so downloads work
+    even when H.264 is unavailable.
+    """
+    h_filter = f"[height<={max_height}]" if max_height is not None else ""
+
     portrait = (
-        f"bestvideo[aspect_ratio<1][height<={h}]+bestaudio/"
-        f"best[aspect_ratio<1][height<={h}]"
+        # H.264 portrait — best MP4 compatibility
+        f"bestvideo[vcodec^=avc1][aspect_ratio<1]{h_filter}+bestaudio[ext=m4a]/"
+        # Any codec portrait (AV1 / VP9 fallback)
+        f"bestvideo[aspect_ratio<1]{h_filter}+bestaudio/"
+        # Combined portrait stream (rare on YouTube, common on TikTok/Instagram)
+        f"best[aspect_ratio<1]{h_filter}"
     )
     landscape = (
-        f"bestvideo[height<={h}]+bestaudio/"
-        f"best[height<={h}]"
+        # H.264 landscape
+        f"bestvideo[vcodec^=avc1]{h_filter}+bestaudio[ext=m4a]/"
+        # Any codec landscape
+        f"bestvideo{h_filter}+bestaudio/"
+        # Combined landscape
+        f"best{h_filter}"
     )
     return f"{portrait}/{landscape}/best"
 
