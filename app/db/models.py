@@ -103,6 +103,22 @@ class Video(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow, nullable=False)
 
 
+class UserGoogleToken(Base):
+    """Google OAuth2 refresh token for automatic YouTube cookie renewal."""
+
+    __tablename__ = "user_google_tokens"
+    __table_args__ = (
+        UniqueConstraint("user_id", name="uq_google_token_user"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    refresh_token: Mapped[str] = mapped_column(Text, nullable=False)
+
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow, nullable=False)
+
+
 class DownloadRequest(Base):
     __tablename__ = "download_requests"
     __table_args__ = (

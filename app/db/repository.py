@@ -6,7 +6,7 @@ from sqlalchemy import func, select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.orm import Session
 
-from app.db.models import DownloadRequest, DownloadStatus, TelegramFileType, User, UserCookies, Video
+from app.db.models import DownloadRequest, DownloadStatus, TelegramFileType, User, UserCookies, UserGoogleToken, Video
 from app.db.utils import utcnow
 
 # Single source of truth for "request is still in flight" states.
@@ -110,6 +110,39 @@ class CookieRepository:
     def list_user_platforms(self, user_id: int) -> list[str]:
         stmt = select(UserCookies.platform).where(UserCookies.user_id == user_id)
         return list(self.session.execute(stmt).scalars().all())
+
+
+class GoogleTokenRepository:
+    """Manages Google OAuth2 refresh tokens for YouTube cookie renewal."""
+
+    def __init__(self, session: Session) -> None:
+        self.session = session
+
+    def set_google_token(self, user_id: int, refresh_token: str) -> None:
+        stmt = (
+            insert(UserGoogleToken)
+            .values(user_id=user_id, refresh_token=refresh_token, created_at=utcnow(), updated_at=utcnow())
+            .on_conflict_do_update(
+                constraint="uq_google_token_user",
+                set_={"refresh_token": refresh_token, "updated_at": utcnow()},
+            )
+        )
+        self.session.execute(stmt)
+        self.session.commit()
+
+    def get_google_token(self, user_id: int) -> UserGoogleToken | None:
+        stmt = select(UserGoogleToken).where(UserGoogleToken.user_id == user_id)
+        return self.session.execute(stmt).scalar_one_or_none()
+
+    def delete_google_token(self, user_id: int) -> bool:
+        rec = self.session.execute(
+            select(UserGoogleToken).where(UserGoogleToken.user_id == user_id)
+        ).scalar_one_or_none()
+        if not rec:
+            return False
+        self.session.delete(rec)
+        self.session.commit()
+        return True
 
 
 class VideoRepository:
@@ -293,7 +326,7 @@ class RequestRepository:
         return int(self.session.execute(stmt).scalar_one()) > 0
 
 
-class Repository(UserRepository, CookieRepository, VideoRepository, RequestRepository):
+class Repository(UserRepository, CookieRepository, GoogleTokenRepository, VideoRepository, RequestRepository):
     """Unified facade over all domain repositories — preserves existing call sites."""
 
     def __init__(self, session: Session) -> None:

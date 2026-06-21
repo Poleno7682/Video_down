@@ -98,6 +98,26 @@ def _materialize_user_cookies(repo: Repository, user_id: int, url: str) -> Path 
     return path
 
 
+def _try_refresh_google_cookies(repo: Repository, user_id: int) -> bool:
+    """Refresh YouTube cookies from the stored Google refresh_token.
+
+    Returns True if cookies were successfully refreshed so the caller can
+    show a "try again" message instead of the stale-cookie error.
+    """
+    try:
+        from app.services.google_oauth import generate_youtube_cookies, refresh_access_token
+
+        token_rec = repo.get_google_token(user_id)
+        if not token_rec:
+            return False
+        new_tokens = refresh_access_token(token_rec.refresh_token)
+        new_cookies = generate_youtube_cookies(new_tokens["access_token"])
+        repo.set_user_cookies(user_id, "youtube", new_cookies)
+        return True
+    except Exception:
+        return False
+
+
 def _handle_task_failure(
     repo: Repository,
     request_id: int,
@@ -112,9 +132,14 @@ def _handle_task_failure(
     if req.video_id:
         repo.mark_video_failed(req.video_id, error_msg)
 
-    if _is_cookie_error(exc):
-        message = _STALE_COOKIE_FAILURE if cookies_were_used else _COOKIE_FAILURE
-    elif _is_youtube_challenge_error(exc):
+    if _is_cookie_error(exc) or _is_youtube_challenge_error(exc):
+        if cookies_were_used and _try_refresh_google_cookies(repo, req.user_id):
+            edit_status(
+                req.chat_id,
+                req.status_message_id,
+                "🔄 YouTube cookies автоматически обновлены. Отправь ссылку ещё раз.",
+            )
+            return
         message = _STALE_COOKIE_FAILURE if cookies_were_used else _COOKIE_FAILURE
     else:
         message = _GENERIC_FAILURE
