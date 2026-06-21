@@ -8,3 +8,4 @@ logs/*
 cookies/*.txt
 nginx/certs/*
 nginx/www/*
+docs/
