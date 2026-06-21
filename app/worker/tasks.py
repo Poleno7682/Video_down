@@ -71,6 +71,13 @@ _TOO_LARGE_FAILURE = (
     "Попробуй выбрать качество пониже — /quality."
 )
 
+# Redis key TTL after a Google OAuth cookie refresh to prevent refresh loops.
+_GOOGLE_REFRESH_COOLDOWN = 300  # seconds
+
+
+def _google_refresh_key(user_id: int) -> str:
+    return f"google_cookie_refresh:{user_id}"
+
 
 def _is_cookie_error(exc: Exception) -> bool:
     text = str(exc).lower()
@@ -322,11 +329,16 @@ def process_download_request(self, request_id: int) -> None:
 
         except Exception as exc:
             logger.exception("Failed request %s", request_id)
+            refresh_key = _google_refresh_key(req.user_id)
+            recently_refreshed = bool(redis.exists(refresh_key))
             cookie_refreshed = (
-                cookies_were_used
+                not recently_refreshed
+                and cookies_were_used
                 and (_is_cookie_error(exc) or _is_youtube_challenge_error(exc))
                 and _try_refresh_google_cookies(repo, req.user_id)
             )
+            if cookie_refreshed:
+                redis.setex(refresh_key, _GOOGLE_REFRESH_COOLDOWN, "1")
             _handle_task_failure(
                 repo, request_id, req, exc,
                 cookies_were_used=cookies_were_used,
