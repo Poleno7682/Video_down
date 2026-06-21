@@ -24,12 +24,13 @@ class UserRepository:
         self.session = session
 
     def upsert_user(self, user_id: int, username: str | None, first_name: str | None) -> User:
+        now = utcnow()
         stmt = (
             insert(User)
-            .values(id=user_id, username=username, first_name=first_name, updated_at=utcnow())
+            .values(id=user_id, username=username, first_name=first_name, updated_at=now)
             .on_conflict_do_update(
                 index_elements=[User.id],
-                set_={"username": username, "first_name": first_name, "updated_at": utcnow()},
+                set_={"username": username, "first_name": first_name, "updated_at": now},
             )
             .returning(User)
         )
@@ -70,18 +71,19 @@ class CookieRepository:
         self.session = session
 
     def set_user_cookies(self, user_id: int, platform: str, cookies_text: str) -> None:
+        now = utcnow()
         stmt = (
             insert(UserCookies)
             .values(
                 user_id=user_id,
                 platform=platform,
                 cookies_text=cookies_text,
-                created_at=utcnow(),
-                updated_at=utcnow(),
+                created_at=now,
+                updated_at=now,
             )
             .on_conflict_do_update(
                 constraint="uq_user_cookies_user_platform",
-                set_={"cookies_text": cookies_text, "updated_at": utcnow()},
+                set_={"cookies_text": cookies_text, "updated_at": now},
             )
         )
         self.session.execute(stmt)
@@ -119,12 +121,13 @@ class GoogleTokenRepository:
         self.session = session
 
     def set_google_token(self, user_id: int, refresh_token: str) -> None:
+        now = utcnow()
         stmt = (
             insert(UserGoogleToken)
-            .values(user_id=user_id, refresh_token=refresh_token, created_at=utcnow(), updated_at=utcnow())
+            .values(user_id=user_id, refresh_token=refresh_token, created_at=now, updated_at=now)
             .on_conflict_do_update(
                 constraint="uq_google_token_user",
-                set_={"refresh_token": refresh_token, "updated_at": utcnow()},
+                set_={"refresh_token": refresh_token, "updated_at": now},
             )
         )
         self.session.execute(stmt)
@@ -167,6 +170,7 @@ class VideoRepository:
         url_hash: str,
         quality: str,
     ) -> Video:
+        now = utcnow()
         stmt = (
             insert(Video)
             .values(
@@ -175,12 +179,12 @@ class VideoRepository:
                 url_hash=url_hash,
                 quality=quality,
                 is_ready=False,
-                created_at=utcnow(),
-                updated_at=utcnow(),
+                created_at=now,
+                updated_at=now,
             )
             .on_conflict_do_update(
                 constraint="uq_video_url_quality",
-                set_={"updated_at": utcnow()},
+                set_={"updated_at": now},
             )
             .returning(Video)
         )
@@ -289,11 +293,12 @@ class RequestRepository:
         req = self.session.get(DownloadRequest, request_id)
         if not req:
             return
+        now = utcnow()
         req.status = status
         req.error = error
-        req.updated_at = utcnow()
+        req.updated_at = now
         if finished:
-            req.finished_at = utcnow()
+            req.finished_at = now
         self.session.commit()
 
     def count_user_active_requests(self, user_id: int) -> int:

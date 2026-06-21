@@ -18,10 +18,12 @@ from app.core.logging import setup_logging
 
 
 _USER_COMMANDS = [
-    BotCommand(command="start",   description="Справка по боту"),
-    BotCommand(command="quality", description="Выбрать качество видео"),
-    BotCommand(command="status",  description="Статус очереди"),
-    BotCommand(command="cookies", description="Личные cookies для скачивания"),
+    BotCommand(command="start",        description="Справка по боту"),
+    BotCommand(command="quality",      description="Выбрать качество видео"),
+    BotCommand(command="status",       description="Статус очереди"),
+    BotCommand(command="cookies",      description="Личные cookies для скачивания"),
+    BotCommand(command="link_google",  description="Привязать Google-аккаунт (YouTube)"),
+    BotCommand(command="unlink_google", description="Отвязать Google-аккаунт"),
 ]
 
 _ADMIN_COMMANDS = _USER_COMMANDS + [
