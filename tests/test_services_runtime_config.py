@@ -42,15 +42,15 @@ def _make_settings(**overrides):
 
 
 def _make_redis(stored: dict | None = None):
-    """Fake Redis that stores keys in a plain dict."""
-    store: dict[str, bytes] = {}
+    """Fake Redis matching decode_responses=True — values are str, not bytes."""
+    store: dict[str, str] = {}
     if stored:
-        store.update({k: str(v).encode() for k, v in stored.items()})
+        store.update({k: str(v) for k, v in stored.items()})
 
     r = MagicMock()
     r.get.side_effect = lambda k: store.get(k)
-    r.set.side_effect = lambda k, v: store.__setitem__(k, str(v).encode())
-    r.setex.side_effect = lambda k, ttl, v: store.__setitem__(k, str(v).encode())
+    r.set.side_effect = lambda k, v: store.__setitem__(k, str(v))
+    r.setex.side_effect = lambda k, ttl, v: store.__setitem__(k, str(v))
     r.delete.side_effect = lambda *keys: [store.pop(k, None) for k in keys]
     r.keys.side_effect = lambda pattern: [
         k for k in store if k.startswith(pattern.rstrip("*"))

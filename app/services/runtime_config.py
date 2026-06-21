@@ -97,7 +97,9 @@ def set_awaiting(admin_id: int, field: str, redis: Redis) -> None:
 
 def get_awaiting(admin_id: int, redis: Redis) -> str | None:
     raw = redis.get(f"{_AWAITING_PREFIX}{admin_id}")
-    return raw.decode() if raw else None
+    if raw is None:
+        return None
+    return raw.decode() if isinstance(raw, bytes) else raw
 
 
 def clear_awaiting(admin_id: int, redis: Redis) -> None:
