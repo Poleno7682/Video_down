@@ -5,13 +5,9 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from aiogram.exceptions import TelegramBadRequest
 
-from app.bot.router import (
-    HELP_TEXT,
-    _is_allowed,
-    _check_access,
-    send_cached_file,
-    _process_url_message,
-)
+from app.bot.access import _check_access, _is_allowed
+from app.bot.routers.user import HELP_TEXT
+from app.bot.routers.url_handler import _process_url_message, send_cached_file
 from app.db.models import DownloadStatus, TelegramFileType
 
 
@@ -110,7 +106,7 @@ def test_check_access_public_bot():
 async def test_send_cached_file_video():
     message = MagicMock()
     message.answer_video = AsyncMock()
-    with patch("app.bot.router.get_caption", return_value="CAP"):
+    with patch("app.bot.routers.url_handler.get_caption", return_value="CAP"):
         await send_cached_file(message, "fid", "video")
     message.answer_video.assert_awaited_once_with("fid", caption="CAP")
 
@@ -119,7 +115,7 @@ async def test_send_cached_file_video():
 async def test_send_cached_file_audio():
     message = MagicMock()
     message.answer_audio = AsyncMock()
-    with patch("app.bot.router.get_caption", return_value="CAP"):
+    with patch("app.bot.routers.url_handler.get_caption", return_value="CAP"):
         await send_cached_file(message, "fid", "audio")
     message.answer_audio.assert_awaited_once_with("fid", caption="CAP")
 
@@ -128,7 +124,7 @@ async def test_send_cached_file_audio():
 async def test_send_cached_file_document():
     message = MagicMock()
     message.answer_document = AsyncMock()
-    with patch("app.bot.router.get_caption", return_value="CAP"):
+    with patch("app.bot.routers.url_handler.get_caption", return_value="CAP"):
         await send_cached_file(message, "fid", "document")
     message.answer_document.assert_awaited_once_with("fid", caption="CAP")
 
@@ -201,12 +197,12 @@ def _make_session(repo):
 
 @pytest.mark.asyncio
 async def test_start_handler():
-    from app.bot.router import start
+    from app.bot.routers.user import start
     message = _make_message()
     repo = MagicMock()
     session = _make_session(repo)
-    with patch("app.bot.router.get_session", return_value=session), \
-         patch("app.bot.router.Repository", return_value=repo):
+    with patch("app.bot.routers.user.get_session", return_value=session), \
+         patch("app.bot.routers.user.Repository", return_value=repo):
         await start(message)
     message.answer.assert_awaited_once_with(HELP_TEXT)
     repo.upsert_user.assert_called_once()
@@ -218,7 +214,7 @@ async def test_start_handler():
 
 @pytest.mark.asyncio
 async def test_quality_handler():
-    from app.bot.router import quality
+    from app.bot.routers.user import quality
     message = _make_message()
     await quality(message)
     message.answer.assert_awaited_once()
@@ -241,7 +237,7 @@ def _make_callback(data="quality:720p", user_id=1):
 
 @pytest.mark.asyncio
 async def test_set_quality_allowed():
-    from app.bot.router import set_quality
+    from app.bot.routers.user import set_quality
     cb = _make_callback(data="quality:720p")
     settings = _make_settings()
     redis = _make_redis_mock()
@@ -249,9 +245,9 @@ async def test_set_quality_allowed():
     limiter = MagicMock()
     limiter.hit_or_ban.return_value = (True, 0)
 
-    with patch("app.bot.router.get_settings", return_value=settings), \
-         patch("app.bot.router.get_redis", return_value=redis), \
-         patch("app.bot.router.RateLimiter", return_value=limiter):
+    with patch("app.bot.routers.user.get_settings", return_value=settings), \
+         patch("app.bot.routers.user.get_redis", return_value=redis), \
+         patch("app.bot.routers.user.RateLimiter", return_value=limiter):
         await set_quality(cb)
 
     cb.answer.assert_awaited_once_with("Сохранено")
@@ -261,7 +257,7 @@ async def test_set_quality_allowed():
 
 @pytest.mark.asyncio
 async def test_set_quality_rate_limited():
-    from app.bot.router import set_quality
+    from app.bot.routers.user import set_quality
     cb = _make_callback()
     settings = _make_settings()
     redis = _make_redis_mock()
@@ -269,9 +265,9 @@ async def test_set_quality_rate_limited():
     limiter = MagicMock()
     limiter.hit_or_ban.return_value = (False, 120)
 
-    with patch("app.bot.router.get_settings", return_value=settings), \
-         patch("app.bot.router.get_redis", return_value=redis), \
-         patch("app.bot.router.RateLimiter", return_value=limiter):
+    with patch("app.bot.routers.user.get_settings", return_value=settings), \
+         patch("app.bot.routers.user.get_redis", return_value=redis), \
+         patch("app.bot.routers.user.RateLimiter", return_value=limiter):
         await set_quality(cb)
 
     assert "120" in cb.answer.call_args[0][0]
@@ -280,13 +276,13 @@ async def test_set_quality_rate_limited():
 
 @pytest.mark.asyncio
 async def test_set_quality_access_denied():
-    from app.bot.router import set_quality
+    from app.bot.routers.user import set_quality
     cb = _make_callback()
     settings = _make_settings()
     redis = _make_redis_mock(disabled=True)
 
-    with patch("app.bot.router.get_settings", return_value=settings), \
-         patch("app.bot.router.get_redis", return_value=redis):
+    with patch("app.bot.routers.user.get_settings", return_value=settings), \
+         patch("app.bot.routers.user.get_redis", return_value=redis):
         await set_quality(cb)
 
     cb.answer.assert_awaited_once()
@@ -300,7 +296,7 @@ async def test_set_quality_access_denied():
 
 @pytest.mark.asyncio
 async def test_status_handler():
-    from app.bot.router import status
+    from app.bot.routers.user import status
     message = _make_message()
     settings = _make_settings()
     redis = _make_redis_mock()
@@ -311,10 +307,10 @@ async def test_status_handler():
     repo.count_user_today_requests.return_value = 10
     session = _make_session(repo)
 
-    with patch("app.bot.router.get_settings", return_value=settings), \
-         patch("app.bot.router.get_redis", return_value=redis), \
-         patch("app.bot.router.get_session", return_value=session), \
-         patch("app.bot.router.Repository", return_value=repo):
+    with patch("app.bot.routers.user.get_settings", return_value=settings), \
+         patch("app.bot.routers.user.get_redis", return_value=redis), \
+         patch("app.bot.routers.user.get_session", return_value=session), \
+         patch("app.bot.routers.user.Repository", return_value=repo):
         await status(message)
 
     message.answer.assert_awaited_once()
@@ -322,13 +318,13 @@ async def test_status_handler():
 
 @pytest.mark.asyncio
 async def test_status_handler_access_denied():
-    from app.bot.router import status
+    from app.bot.routers.user import status
     message = _make_message()
     settings = _make_settings()
     redis = _make_redis_mock(disabled=True)
 
-    with patch("app.bot.router.get_settings", return_value=settings), \
-         patch("app.bot.router.get_redis", return_value=redis):
+    with patch("app.bot.routers.user.get_settings", return_value=settings), \
+         patch("app.bot.routers.user.get_redis", return_value=redis):
         await status(message)
 
     message.answer.assert_awaited_once()
@@ -342,29 +338,29 @@ async def test_status_handler_access_denied():
 
 @pytest.mark.asyncio
 async def test_handle_link_calls_process_url_message():
-    from app.bot.router import handle_link
+    from app.bot.routers.url_handler import handle_link
     message = _make_message(text="hello")
-    with patch("app.bot.router._process_url_message", new=AsyncMock()) as mock_proc:
+    with patch("app.bot.routers.url_handler._process_url_message", new=AsyncMock()) as mock_proc:
         await handle_link(message)
     mock_proc.assert_awaited_once_with(message, "hello", reply_on_no_url=True)
 
 
 @pytest.mark.asyncio
 async def test_handle_link_empty_text():
-    from app.bot.router import handle_link
+    from app.bot.routers.url_handler import handle_link
     message = _make_message()
     message.text = None
-    with patch("app.bot.router._process_url_message", new=AsyncMock()) as mock_proc:
+    with patch("app.bot.routers.url_handler._process_url_message", new=AsyncMock()) as mock_proc:
         await handle_link(message)
     mock_proc.assert_awaited_once_with(message, "", reply_on_no_url=True)
 
 
 @pytest.mark.asyncio
 async def test_handle_caption_link_calls_process_url_message():
-    from app.bot.router import handle_caption_link
+    from app.bot.routers.url_handler import handle_caption_link
     message = _make_message()
     message.caption = "Check this https://youtube.com/watch?v=x"
-    with patch("app.bot.router._process_url_message", new=AsyncMock()) as mock_proc:
+    with patch("app.bot.routers.url_handler._process_url_message", new=AsyncMock()) as mock_proc:
         await handle_caption_link(message)
     mock_proc.assert_awaited_once_with(
         message, "Check this https://youtube.com/watch?v=x", reply_on_no_url=False
@@ -377,22 +373,22 @@ async def test_handle_caption_link_calls_process_url_message():
 
 @pytest.mark.asyncio
 async def test_admin_panel_non_admin_ignored():
-    from app.bot.router import admin_panel
+    from app.bot.routers.admin import admin_panel
     message = _make_message(user_id=999)
     settings = _make_settings(admin_user_ids=set())
-    with patch("app.bot.router.get_settings", return_value=settings):
+    with patch("app.bot.routers.admin.get_settings", return_value=settings):
         await admin_panel(message)
     message.answer.assert_not_awaited()
 
 
 @pytest.mark.asyncio
 async def test_admin_panel_shown_to_admin():
-    from app.bot.router import admin_panel
+    from app.bot.routers.admin import admin_panel
     message = _make_message(user_id=42)
     settings = _make_settings(admin_user_ids={42})
     redis = _make_redis_mock()
-    with patch("app.bot.router.get_settings", return_value=settings), \
-         patch("app.bot.router.get_redis", return_value=redis):
+    with patch("app.bot.routers.admin.get_settings", return_value=settings), \
+         patch("app.bot.routers.admin.get_redis", return_value=redis):
         await admin_panel(message)
     message.answer.assert_awaited_once()
     assert "reply_markup" in message.answer.call_args[1]
@@ -400,12 +396,12 @@ async def test_admin_panel_shown_to_admin():
 
 @pytest.mark.asyncio
 async def test_toggle_bot_access_non_admin():
-    from app.bot.router import toggle_bot_access
+    from app.bot.routers.admin import toggle_bot_access
     cb = MagicMock()
     cb.from_user.id = 999
     cb.answer = AsyncMock()
     settings = _make_settings(admin_user_ids=set())
-    with patch("app.bot.router.get_settings", return_value=settings):
+    with patch("app.bot.routers.admin.get_settings", return_value=settings):
         await toggle_bot_access(cb)
     cb.answer.assert_awaited_once()
     assert "⛔" in cb.answer.call_args[0][0]
@@ -413,7 +409,7 @@ async def test_toggle_bot_access_non_admin():
 
 @pytest.mark.asyncio
 async def test_toggle_bot_access_enables():
-    from app.bot.router import toggle_bot_access
+    from app.bot.routers.admin import toggle_bot_access
     cb = MagicMock()
     cb.from_user.id = 1
     cb.answer = AsyncMock()
@@ -422,8 +418,8 @@ async def test_toggle_bot_access_enables():
     settings = _make_settings(admin_user_ids={1})
     redis = _make_redis_mock(disabled=True)  # currently disabled
 
-    with patch("app.bot.router.get_settings", return_value=settings), \
-         patch("app.bot.router.get_redis", return_value=redis):
+    with patch("app.bot.routers.admin.get_settings", return_value=settings), \
+         patch("app.bot.routers.admin.get_redis", return_value=redis):
         await toggle_bot_access(cb)
 
     redis.delete.assert_called_once()   # enabled → delete key
@@ -433,7 +429,7 @@ async def test_toggle_bot_access_enables():
 
 @pytest.mark.asyncio
 async def test_toggle_bot_access_disables():
-    from app.bot.router import toggle_bot_access
+    from app.bot.routers.admin import toggle_bot_access
     cb = MagicMock()
     cb.from_user.id = 1
     cb.answer = AsyncMock()
@@ -442,8 +438,8 @@ async def test_toggle_bot_access_disables():
     settings = _make_settings(admin_user_ids={1})
     redis = _make_redis_mock(disabled=False)  # currently enabled
 
-    with patch("app.bot.router.get_settings", return_value=settings), \
-         patch("app.bot.router.get_redis", return_value=redis):
+    with patch("app.bot.routers.admin.get_settings", return_value=settings), \
+         patch("app.bot.routers.admin.get_redis", return_value=redis):
         await toggle_bot_access(cb)
 
     redis.set.assert_called()   # disabled → set key
@@ -452,12 +448,12 @@ async def test_toggle_bot_access_disables():
 
 @pytest.mark.asyncio
 async def test_add_trusted_user_success():
-    from app.bot.router import add_trusted_user
+    from app.bot.routers.admin import add_trusted_user
     message = _make_message(user_id=1, text="/adduser 123456")
     settings = _make_settings(admin_user_ids={1})
     redis = _make_redis_mock()
-    with patch("app.bot.router.get_settings", return_value=settings), \
-         patch("app.bot.router.get_redis", return_value=redis):
+    with patch("app.bot.routers.admin.get_settings", return_value=settings), \
+         patch("app.bot.routers.admin.get_redis", return_value=redis):
         await add_trusted_user(message)
     redis.sadd.assert_called_once_with("trusted_users", "123456")
     assert "✅" in message.answer.call_args[0][0]
@@ -465,74 +461,74 @@ async def test_add_trusted_user_success():
 
 @pytest.mark.asyncio
 async def test_add_trusted_user_bad_id():
-    from app.bot.router import add_trusted_user
+    from app.bot.routers.admin import add_trusted_user
     message = _make_message(user_id=1, text="/adduser notanid")
     settings = _make_settings(admin_user_ids={1})
     redis = _make_redis_mock()
-    with patch("app.bot.router.get_settings", return_value=settings), \
-         patch("app.bot.router.get_redis", return_value=redis):
+    with patch("app.bot.routers.admin.get_settings", return_value=settings), \
+         patch("app.bot.routers.admin.get_redis", return_value=redis):
         await add_trusted_user(message)
     redis.sadd.assert_not_called()
 
 
 @pytest.mark.asyncio
 async def test_add_trusted_user_non_admin_ignored():
-    from app.bot.router import add_trusted_user
+    from app.bot.routers.admin import add_trusted_user
     message = _make_message(user_id=999, text="/adduser 111")
     settings = _make_settings(admin_user_ids=set())
-    with patch("app.bot.router.get_settings", return_value=settings):
+    with patch("app.bot.routers.admin.get_settings", return_value=settings):
         await add_trusted_user(message)
     message.answer.assert_not_awaited()
 
 
 @pytest.mark.asyncio
 async def test_remove_trusted_user_found():
-    from app.bot.router import remove_trusted_user
+    from app.bot.routers.admin import remove_trusted_user
     message = _make_message(user_id=1, text="/removeuser 777")
     settings = _make_settings(admin_user_ids={1})
     redis = _make_redis_mock()
     redis.srem.return_value = 1
-    with patch("app.bot.router.get_settings", return_value=settings), \
-         patch("app.bot.router.get_redis", return_value=redis):
+    with patch("app.bot.routers.admin.get_settings", return_value=settings), \
+         patch("app.bot.routers.admin.get_redis", return_value=redis):
         await remove_trusted_user(message)
     assert "✅" in message.answer.call_args[0][0]
 
 
 @pytest.mark.asyncio
 async def test_remove_trusted_user_not_found():
-    from app.bot.router import remove_trusted_user
+    from app.bot.routers.admin import remove_trusted_user
     message = _make_message(user_id=1, text="/removeuser 777")
     settings = _make_settings(admin_user_ids={1})
     redis = _make_redis_mock()
     redis.srem.return_value = 0
-    with patch("app.bot.router.get_settings", return_value=settings), \
-         patch("app.bot.router.get_redis", return_value=redis):
+    with patch("app.bot.routers.admin.get_settings", return_value=settings), \
+         patch("app.bot.routers.admin.get_redis", return_value=redis):
         await remove_trusted_user(message)
     assert "⚠️" in message.answer.call_args[0][0]
 
 
 @pytest.mark.asyncio
 async def test_list_trusted_users_empty():
-    from app.bot.router import list_trusted_users
+    from app.bot.routers.admin import list_trusted_users
     message = _make_message(user_id=1)
     settings = _make_settings(admin_user_ids={1})
     redis = _make_redis_mock()
     redis.smembers.return_value = set()
-    with patch("app.bot.router.get_settings", return_value=settings), \
-         patch("app.bot.router.get_redis", return_value=redis):
+    with patch("app.bot.routers.admin.get_settings", return_value=settings), \
+         patch("app.bot.routers.admin.get_redis", return_value=redis):
         await list_trusted_users(message)
     assert "пуст" in message.answer.call_args[0][0].lower()
 
 
 @pytest.mark.asyncio
 async def test_list_trusted_users_with_entries():
-    from app.bot.router import list_trusted_users
+    from app.bot.routers.admin import list_trusted_users
     message = _make_message(user_id=1)
     settings = _make_settings(admin_user_ids={1})
     redis = _make_redis_mock()
     redis.smembers.return_value = {"111", "222", "333"}
-    with patch("app.bot.router.get_settings", return_value=settings), \
-         patch("app.bot.router.get_redis", return_value=redis):
+    with patch("app.bot.routers.admin.get_settings", return_value=settings), \
+         patch("app.bot.routers.admin.get_redis", return_value=redis):
         await list_trusted_users(message)
     text = message.answer.call_args[0][0]
     assert "111" in text
@@ -548,9 +544,9 @@ async def test_process_url_message_bot_disabled():
     settings = _make_settings()
     redis = _make_redis_mock(disabled=True)
 
-    with patch("app.bot.router.get_settings", return_value=settings), \
-         patch("app.bot.router.get_redis", return_value=redis), \
-         patch("app.bot.router.RateLimiter"):
+    with patch("app.bot.routers.url_handler.get_settings", return_value=settings), \
+         patch("app.bot.routers.url_handler.get_redis", return_value=redis), \
+         patch("app.bot.routers.url_handler.RateLimiter"):
         await _process_url_message(message, "https://youtube.com/watch?v=x", True)
 
     message.answer.assert_awaited_once()
@@ -564,9 +560,9 @@ async def test_process_url_message_not_allowed():
     settings = _make_settings(allowed_user_ids={1, 2, 3})
     redis = _make_redis_mock()
 
-    with patch("app.bot.router.get_settings", return_value=settings), \
-         patch("app.bot.router.get_redis", return_value=redis), \
-         patch("app.bot.router.RateLimiter"):
+    with patch("app.bot.routers.url_handler.get_settings", return_value=settings), \
+         patch("app.bot.routers.url_handler.get_redis", return_value=redis), \
+         patch("app.bot.routers.url_handler.RateLimiter"):
         await _process_url_message(message, "https://youtube.com/watch?v=x", True)
 
     message.answer.assert_awaited_once()
@@ -582,9 +578,9 @@ async def test_process_url_message_rate_limited():
     limiter = MagicMock()
     limiter.hit_or_ban.return_value = (False, 300)
 
-    with patch("app.bot.router.get_settings", return_value=settings), \
-         patch("app.bot.router.get_redis", return_value=redis), \
-         patch("app.bot.router.RateLimiter", return_value=limiter):
+    with patch("app.bot.routers.url_handler.get_settings", return_value=settings), \
+         patch("app.bot.routers.url_handler.get_redis", return_value=redis), \
+         patch("app.bot.routers.url_handler.RateLimiter", return_value=limiter):
         await _process_url_message(message, "https://youtube.com/watch?v=x", True)
 
     assert "300" in message.answer.call_args[0][0]
@@ -599,9 +595,9 @@ async def test_process_url_message_no_url_reply():
     limiter = MagicMock()
     limiter.hit_or_ban.return_value = (True, 0)
 
-    with patch("app.bot.router.get_settings", return_value=settings), \
-         patch("app.bot.router.get_redis", return_value=redis), \
-         patch("app.bot.router.RateLimiter", return_value=limiter):
+    with patch("app.bot.routers.url_handler.get_settings", return_value=settings), \
+         patch("app.bot.routers.url_handler.get_redis", return_value=redis), \
+         patch("app.bot.routers.url_handler.RateLimiter", return_value=limiter):
         await _process_url_message(message, "just some text", reply_on_no_url=True)
 
     message.answer.assert_awaited_once()
@@ -616,9 +612,9 @@ async def test_process_url_message_no_url_no_reply():
     limiter = MagicMock()
     limiter.hit_or_ban.return_value = (True, 0)
 
-    with patch("app.bot.router.get_settings", return_value=settings), \
-         patch("app.bot.router.get_redis", return_value=redis), \
-         patch("app.bot.router.RateLimiter", return_value=limiter):
+    with patch("app.bot.routers.url_handler.get_settings", return_value=settings), \
+         patch("app.bot.routers.url_handler.get_redis", return_value=redis), \
+         patch("app.bot.routers.url_handler.RateLimiter", return_value=limiter):
         await _process_url_message(message, "just some text", reply_on_no_url=False)
 
     message.answer.assert_not_awaited()
@@ -633,11 +629,11 @@ async def test_process_url_message_invalid_url():
     limiter = MagicMock()
     limiter.hit_or_ban.return_value = (True, 0)
 
-    with patch("app.bot.router.get_settings", return_value=settings), \
-         patch("app.bot.router.get_redis", return_value=redis), \
-         patch("app.bot.router.RateLimiter", return_value=limiter), \
-         patch("app.bot.router.extract_url", return_value="not-a-url"), \
-         patch("app.bot.router.is_valid_url", return_value=False):
+    with patch("app.bot.routers.url_handler.get_settings", return_value=settings), \
+         patch("app.bot.routers.url_handler.get_redis", return_value=redis), \
+         patch("app.bot.routers.url_handler.RateLimiter", return_value=limiter), \
+         patch("app.bot.routers.url_handler.extract_url", return_value="not-a-url"), \
+         patch("app.bot.routers.url_handler.is_valid_url", return_value=False):
         await _process_url_message(message, "not-a-url", True)
 
     assert "некорректно" in message.answer.call_args[0][0].lower()
@@ -659,11 +655,11 @@ async def test_process_url_message_daily_limit():
     repo.count_global_active_requests.return_value = 0
     session = _make_session(repo)
 
-    with patch("app.bot.router.get_settings", return_value=settings), \
-         patch("app.bot.router.get_redis", return_value=redis), \
-         patch("app.bot.router.RateLimiter", return_value=limiter), \
-         patch("app.bot.router.get_session", return_value=session), \
-         patch("app.bot.router.Repository", return_value=repo):
+    with patch("app.bot.routers.url_handler.get_settings", return_value=settings), \
+         patch("app.bot.routers.url_handler.get_redis", return_value=redis), \
+         patch("app.bot.routers.url_handler.RateLimiter", return_value=limiter), \
+         patch("app.bot.routers.url_handler.get_session", return_value=session), \
+         patch("app.bot.routers.url_handler.Repository", return_value=repo):
         await _process_url_message(message, "https://youtube.com/watch?v=x", True)
 
     assert "лимит" in message.answer.call_args[0][0].lower() or "⚠️" in message.answer.call_args[0][0]
@@ -685,11 +681,11 @@ async def test_process_url_message_user_queue_limit():
     repo.count_global_active_requests.return_value = 0
     session = _make_session(repo)
 
-    with patch("app.bot.router.get_settings", return_value=settings), \
-         patch("app.bot.router.get_redis", return_value=redis), \
-         patch("app.bot.router.RateLimiter", return_value=limiter), \
-         patch("app.bot.router.get_session", return_value=session), \
-         patch("app.bot.router.Repository", return_value=repo):
+    with patch("app.bot.routers.url_handler.get_settings", return_value=settings), \
+         patch("app.bot.routers.url_handler.get_redis", return_value=redis), \
+         patch("app.bot.routers.url_handler.RateLimiter", return_value=limiter), \
+         patch("app.bot.routers.url_handler.get_session", return_value=session), \
+         patch("app.bot.routers.url_handler.Repository", return_value=repo):
         await _process_url_message(message, "https://youtube.com/watch?v=x", True)
 
     assert "⚠️" in message.answer.call_args[0][0]
@@ -711,11 +707,11 @@ async def test_process_url_message_global_queue_limit():
     repo.count_global_active_requests.return_value = 20
     session = _make_session(repo)
 
-    with patch("app.bot.router.get_settings", return_value=settings), \
-         patch("app.bot.router.get_redis", return_value=redis), \
-         patch("app.bot.router.RateLimiter", return_value=limiter), \
-         patch("app.bot.router.get_session", return_value=session), \
-         patch("app.bot.router.Repository", return_value=repo):
+    with patch("app.bot.routers.url_handler.get_settings", return_value=settings), \
+         patch("app.bot.routers.url_handler.get_redis", return_value=redis), \
+         patch("app.bot.routers.url_handler.RateLimiter", return_value=limiter), \
+         patch("app.bot.routers.url_handler.get_session", return_value=session), \
+         patch("app.bot.routers.url_handler.Repository", return_value=repo):
         await _process_url_message(message, "https://youtube.com/watch?v=x", True)
 
     assert "⚠️" in message.answer.call_args[0][0]
@@ -748,12 +744,12 @@ async def test_process_url_message_cache_hit_success():
     limiter = MagicMock()
     limiter.hit_or_ban.return_value = (True, 0)
 
-    with patch("app.bot.router.get_settings", return_value=settings), \
-         patch("app.bot.router.get_redis", return_value=redis), \
-         patch("app.bot.router.RateLimiter", return_value=limiter), \
-         patch("app.bot.router.get_session", return_value=session), \
-         patch("app.bot.router.Repository", return_value=repo), \
-         patch("app.bot.router.send_cached_file", new=AsyncMock()) as mock_send:
+    with patch("app.bot.routers.url_handler.get_settings", return_value=settings), \
+         patch("app.bot.routers.url_handler.get_redis", return_value=redis), \
+         patch("app.bot.routers.url_handler.RateLimiter", return_value=limiter), \
+         patch("app.bot.routers.url_handler.get_session", return_value=session), \
+         patch("app.bot.routers.url_handler.Repository", return_value=repo), \
+         patch("app.bot.routers.url_handler.send_cached_file", new=AsyncMock()) as mock_send:
         await _process_url_message(message, "https://youtube.com/watch?v=x", True)
 
     mock_send.assert_awaited_once()
@@ -797,15 +793,15 @@ async def test_process_url_message_cache_hit_telegram_bad_request():
     task = MagicMock()
     task.id = "task-uuid"
 
-    with patch("app.bot.router.get_settings", return_value=settings), \
-         patch("app.bot.router.get_redis", return_value=redis), \
-         patch("app.bot.router.RateLimiter", return_value=limiter), \
-         patch("app.bot.router.get_session", return_value=session), \
-         patch("app.bot.router.Repository", return_value=repo), \
-         patch("app.bot.router.send_cached_file", new=AsyncMock(
+    with patch("app.bot.routers.url_handler.get_settings", return_value=settings), \
+         patch("app.bot.routers.url_handler.get_redis", return_value=redis), \
+         patch("app.bot.routers.url_handler.RateLimiter", return_value=limiter), \
+         patch("app.bot.routers.url_handler.get_session", return_value=session), \
+         patch("app.bot.routers.url_handler.Repository", return_value=repo), \
+         patch("app.bot.routers.url_handler.send_cached_file", new=AsyncMock(
              side_effect=TelegramBadRequest(method=MagicMock(), message="Bad file id")
          )), \
-         patch("app.bot.router.process_download_request") as mock_task:
+         patch("app.bot.routers.url_handler.process_download_request") as mock_task:
         mock_task.delay.return_value = task
         await _process_url_message(message, "https://youtube.com/watch?v=x", True)
 
@@ -842,12 +838,12 @@ async def test_process_url_message_normal_queue_path():
     task = MagicMock()
     task.id = "task-uuid"
 
-    with patch("app.bot.router.get_settings", return_value=settings), \
-         patch("app.bot.router.get_redis", return_value=redis), \
-         patch("app.bot.router.RateLimiter", return_value=limiter), \
-         patch("app.bot.router.get_session", return_value=session), \
-         patch("app.bot.router.Repository", return_value=repo), \
-         patch("app.bot.router.process_download_request") as mock_task:
+    with patch("app.bot.routers.url_handler.get_settings", return_value=settings), \
+         patch("app.bot.routers.url_handler.get_redis", return_value=redis), \
+         patch("app.bot.routers.url_handler.RateLimiter", return_value=limiter), \
+         patch("app.bot.routers.url_handler.get_session", return_value=session), \
+         patch("app.bot.routers.url_handler.Repository", return_value=repo), \
+         patch("app.bot.routers.url_handler.process_download_request") as mock_task:
         mock_task.delay.return_value = task
         await _process_url_message(message, "https://youtube.com/watch?v=x", True)
 
@@ -864,7 +860,6 @@ async def test_process_url_message_uses_user_quality_preference():
     message.answer = AsyncMock(return_value=status_msg)
     settings = _make_settings(default_quality="720p")
     redis = _make_redis_mock()
-    # Return "1080p" only for the user-quality key; runtime_limit:* keys get None
     redis.get.side_effect = lambda k: "1080p" if str(k).startswith("user_quality:") else None
 
     video = MagicMock()
@@ -887,12 +882,12 @@ async def test_process_url_message_uses_user_quality_preference():
     task = MagicMock()
     task.id = "t"
 
-    with patch("app.bot.router.get_settings", return_value=settings), \
-         patch("app.bot.router.get_redis", return_value=redis), \
-         patch("app.bot.router.RateLimiter", return_value=limiter), \
-         patch("app.bot.router.get_session", return_value=session), \
-         patch("app.bot.router.Repository", return_value=repo), \
-         patch("app.bot.router.process_download_request") as mock_task:
+    with patch("app.bot.routers.url_handler.get_settings", return_value=settings), \
+         patch("app.bot.routers.url_handler.get_redis", return_value=redis), \
+         patch("app.bot.routers.url_handler.RateLimiter", return_value=limiter), \
+         patch("app.bot.routers.url_handler.get_session", return_value=session), \
+         patch("app.bot.routers.url_handler.Repository", return_value=repo), \
+         patch("app.bot.routers.url_handler.process_download_request") as mock_task:
         mock_task.delay.return_value = task
         await _process_url_message(message, "https://youtube.com/watch?v=x", True)
 
@@ -900,18 +895,17 @@ async def test_process_url_message_uses_user_quality_preference():
 
 
 # ---------------------------------------------------------------------------
-# Coverage gap tests — router.py lines 93, 95, 220-221, 247, 251-255, 269
+# Coverage gap tests
 # ---------------------------------------------------------------------------
 
 @pytest.mark.asyncio
 async def test_admin_panel_text_static_whitelist_mode():
-    """_admin_panel_text with non-empty allowed_user_ids → line 93."""
-    from app.bot.router import admin_panel
+    from app.bot.routers.admin import admin_panel
     message = _make_message(user_id=42)
     settings = _make_settings(admin_user_ids={42}, allowed_user_ids={10, 20})
     redis = _make_redis_mock()
-    with patch("app.bot.router.get_settings", return_value=settings), \
-         patch("app.bot.router.get_redis", return_value=redis):
+    with patch("app.bot.routers.admin.get_settings", return_value=settings), \
+         patch("app.bot.routers.admin.get_redis", return_value=redis):
         await admin_panel(message)
     text = message.answer.call_args[0][0]
     assert "Статичный список" in text
@@ -919,13 +913,12 @@ async def test_admin_panel_text_static_whitelist_mode():
 
 @pytest.mark.asyncio
 async def test_admin_panel_text_trusted_users_mode():
-    """_admin_panel_text with trusted_count > 0 and no static list → line 95."""
-    from app.bot.router import admin_panel
+    from app.bot.routers.admin import admin_panel
     message = _make_message(user_id=42)
     settings = _make_settings(admin_user_ids={42}, allowed_user_ids=set())
     redis = _make_redis_mock(trusted_count=5)
-    with patch("app.bot.router.get_settings", return_value=settings), \
-         patch("app.bot.router.get_redis", return_value=redis):
+    with patch("app.bot.routers.admin.get_settings", return_value=settings), \
+         patch("app.bot.routers.admin.get_redis", return_value=redis):
         await admin_panel(message)
     text = message.answer.call_args[0][0]
     assert "Доверенные пользователи" in text
@@ -933,8 +926,7 @@ async def test_admin_panel_text_trusted_users_mode():
 
 @pytest.mark.asyncio
 async def test_toggle_bot_access_swallows_telegram_bad_request():
-    """edit_text raising TelegramBadRequest is silently swallowed → lines 220-221."""
-    from app.bot.router import toggle_bot_access
+    from app.bot.routers.admin import toggle_bot_access
     cb = MagicMock()
     cb.from_user.id = 1
     cb.answer = AsyncMock()
@@ -945,33 +937,31 @@ async def test_toggle_bot_access_swallows_telegram_bad_request():
     settings = _make_settings(admin_user_ids={1})
     redis = _make_redis_mock(disabled=False)
 
-    with patch("app.bot.router.get_settings", return_value=settings), \
-         patch("app.bot.router.get_redis", return_value=redis):
-        await toggle_bot_access(cb)  # must not raise
+    with patch("app.bot.routers.admin.get_settings", return_value=settings), \
+         patch("app.bot.routers.admin.get_redis", return_value=redis):
+        await toggle_bot_access(cb)
 
     cb.answer.assert_awaited_once()
 
 
 @pytest.mark.asyncio
 async def test_remove_trusted_user_non_admin_ignored():
-    """Non-admin calling /removeuser returns silently → line 247."""
-    from app.bot.router import remove_trusted_user
+    from app.bot.routers.admin import remove_trusted_user
     message = _make_message(user_id=999, text="/removeuser 111")
     settings = _make_settings(admin_user_ids=set())
-    with patch("app.bot.router.get_settings", return_value=settings):
+    with patch("app.bot.routers.admin.get_settings", return_value=settings):
         await remove_trusted_user(message)
     message.answer.assert_not_awaited()
 
 
 @pytest.mark.asyncio
 async def test_remove_trusted_user_bad_id_shows_usage():
-    """Admin sends /removeuser with non-numeric arg → usage message → lines 251-255."""
-    from app.bot.router import remove_trusted_user
+    from app.bot.routers.admin import remove_trusted_user
     message = _make_message(user_id=1, text="/removeuser notanid")
     settings = _make_settings(admin_user_ids={1})
     redis = _make_redis_mock()
-    with patch("app.bot.router.get_settings", return_value=settings), \
-         patch("app.bot.router.get_redis", return_value=redis):
+    with patch("app.bot.routers.admin.get_settings", return_value=settings), \
+         patch("app.bot.routers.admin.get_redis", return_value=redis):
         await remove_trusted_user(message)
     message.answer.assert_awaited_once()
     assert "Использование" in message.answer.call_args[0][0]
@@ -980,11 +970,10 @@ async def test_remove_trusted_user_bad_id_shows_usage():
 
 @pytest.mark.asyncio
 async def test_list_trusted_users_non_admin_ignored():
-    """Non-admin calling /listusers returns silently → line 269."""
-    from app.bot.router import list_trusted_users
+    from app.bot.routers.admin import list_trusted_users
     message = _make_message(user_id=999)
     settings = _make_settings(admin_user_ids=set())
-    with patch("app.bot.router.get_settings", return_value=settings):
+    with patch("app.bot.routers.admin.get_settings", return_value=settings):
         await list_trusted_users(message)
     message.answer.assert_not_awaited()
 
@@ -1004,7 +993,7 @@ def _make_doc_message(file_name, file_size=100, user_id=1):
 @pytest.mark.asyncio
 async def test_upload_cookies_valid_youtube():
     import io
-    from app.bot.router import upload_cookies
+    from app.bot.routers.cookies import upload_cookies
 
     message = _make_doc_message("youtube.txt")
     bot = MagicMock()
@@ -1014,10 +1003,10 @@ async def test_upload_cookies_valid_youtube():
     settings = _make_settings()
     redis = _make_redis_mock()
 
-    with patch("app.bot.router.get_settings", return_value=settings), \
-         patch("app.bot.router.get_redis", return_value=redis), \
-         patch("app.bot.router.get_session", return_value=session), \
-         patch("app.bot.router.Repository", return_value=repo):
+    with patch("app.bot.routers.cookies.get_settings", return_value=settings), \
+         patch("app.bot.routers.cookies.get_redis", return_value=redis), \
+         patch("app.bot.routers.cookies.get_session", return_value=session), \
+         patch("app.bot.routers.cookies.Repository", return_value=repo):
         await upload_cookies(message, bot)
 
     repo.set_user_cookies.assert_called_once()
@@ -1027,7 +1016,7 @@ async def test_upload_cookies_valid_youtube():
 
 @pytest.mark.asyncio
 async def test_upload_cookies_unknown_filename():
-    from app.bot.router import upload_cookies
+    from app.bot.routers.cookies import upload_cookies
 
     message = _make_doc_message("random.txt")
     bot = MagicMock()
@@ -1037,10 +1026,10 @@ async def test_upload_cookies_unknown_filename():
     settings = _make_settings()
     redis = _make_redis_mock()
 
-    with patch("app.bot.router.get_settings", return_value=settings), \
-         patch("app.bot.router.get_redis", return_value=redis), \
-         patch("app.bot.router.get_session", return_value=session), \
-         patch("app.bot.router.Repository", return_value=repo):
+    with patch("app.bot.routers.cookies.get_settings", return_value=settings), \
+         patch("app.bot.routers.cookies.get_redis", return_value=redis), \
+         patch("app.bot.routers.cookies.get_session", return_value=session), \
+         patch("app.bot.routers.cookies.Repository", return_value=repo):
         await upload_cookies(message, bot)
 
     repo.set_user_cookies.assert_not_called()
@@ -1050,7 +1039,7 @@ async def test_upload_cookies_unknown_filename():
 @pytest.mark.asyncio
 async def test_upload_cookies_invalid_format_rejected():
     import io
-    from app.bot.router import upload_cookies
+    from app.bot.routers.cookies import upload_cookies
 
     message = _make_doc_message("youtube.txt")
     bot = MagicMock()
@@ -1060,10 +1049,10 @@ async def test_upload_cookies_invalid_format_rejected():
     settings = _make_settings()
     redis = _make_redis_mock()
 
-    with patch("app.bot.router.get_settings", return_value=settings), \
-         patch("app.bot.router.get_redis", return_value=redis), \
-         patch("app.bot.router.get_session", return_value=session), \
-         patch("app.bot.router.Repository", return_value=repo):
+    with patch("app.bot.routers.cookies.get_settings", return_value=settings), \
+         patch("app.bot.routers.cookies.get_redis", return_value=redis), \
+         patch("app.bot.routers.cookies.get_session", return_value=session), \
+         patch("app.bot.routers.cookies.Repository", return_value=repo):
         await upload_cookies(message, bot)
 
     repo.set_user_cookies.assert_not_called()
@@ -1075,25 +1064,25 @@ async def test_upload_cookies_invalid_format_rejected():
 
 @pytest.mark.asyncio
 async def test_broadcast_filter_requires_admin_and_mode():
-    from app.bot.router import BroadcastModeFilter
+    from app.bot.routers.broadcast import BroadcastModeFilter
 
     message = _make_message(user_id=1)
     settings = _make_settings(admin_user_ids={1})
     redis = _make_redis_mock()
     redis.exists.return_value = 1
-    with patch("app.bot.router.get_settings", return_value=settings), \
-         patch("app.bot.router.get_redis", return_value=redis):
+    with patch("app.bot.routers.broadcast.get_settings", return_value=settings), \
+         patch("app.bot.routers.broadcast.get_redis", return_value=redis):
         assert await BroadcastModeFilter()(message) is True
 
     settings2 = _make_settings(admin_user_ids=set())
-    with patch("app.bot.router.get_settings", return_value=settings2), \
-         patch("app.bot.router.get_redis", return_value=redis):
+    with patch("app.bot.routers.broadcast.get_settings", return_value=settings2), \
+         patch("app.bot.routers.broadcast.get_redis", return_value=redis):
         assert await BroadcastModeFilter()(message) is False
 
 
 @pytest.mark.asyncio
 async def test_broadcast_to_all_text_uses_copy_message():
-    from app.bot.router import _broadcast_to_all
+    from app.bot.routers.broadcast import _broadcast_to_all
 
     source = _make_message(user_id=1, text="Привет")
     source.html_text = "Привет"
@@ -1104,9 +1093,9 @@ async def test_broadcast_to_all_text_uses_copy_message():
     repo.get_all_user_ids.return_value = [10, 20]
     session = _make_session(repo)
 
-    with patch("app.bot.router.get_session", return_value=session), \
-         patch("app.bot.router.Repository", return_value=repo), \
-         patch("app.bot.router.asyncio.sleep", new=AsyncMock()):
+    with patch("app.bot.routers.broadcast.get_session", return_value=session), \
+         patch("app.bot.routers.broadcast.Repository", return_value=repo), \
+         patch("app.bot.routers.broadcast.asyncio.sleep", new=AsyncMock()):
         ok, failed, total = await _broadcast_to_all(bot, source)
 
     assert (ok, failed, total) == (2, 0, 2)
@@ -1116,7 +1105,7 @@ async def test_broadcast_to_all_text_uses_copy_message():
 
 @pytest.mark.asyncio
 async def test_broadcast_to_all_text_with_buttons_uses_send_message():
-    from app.bot.router import _broadcast_to_all
+    from app.bot.routers.broadcast import _broadcast_to_all
 
     source = _make_message(user_id=1, text="Hi")
     source.html_text = "Hi\n---\nOpen | https://example.com"
@@ -1127,9 +1116,9 @@ async def test_broadcast_to_all_text_with_buttons_uses_send_message():
     repo.get_all_user_ids.return_value = [10]
     session = _make_session(repo)
 
-    with patch("app.bot.router.get_session", return_value=session), \
-         patch("app.bot.router.Repository", return_value=repo), \
-         patch("app.bot.router.asyncio.sleep", new=AsyncMock()):
+    with patch("app.bot.routers.broadcast.get_session", return_value=session), \
+         patch("app.bot.routers.broadcast.Repository", return_value=repo), \
+         patch("app.bot.routers.broadcast.asyncio.sleep", new=AsyncMock()):
         ok, failed, total = await _broadcast_to_all(bot, source)
 
     assert (ok, failed, total) == (1, 0, 1)
@@ -1139,7 +1128,7 @@ async def test_broadcast_to_all_text_with_buttons_uses_send_message():
 
 @pytest.mark.asyncio
 async def test_broadcast_to_all_counts_failures():
-    from app.bot.router import _broadcast_to_all
+    from app.bot.routers.broadcast import _broadcast_to_all
 
     source = _make_message(user_id=1, text="Hi")
     source.html_text = "Hi"
@@ -1149,9 +1138,9 @@ async def test_broadcast_to_all_counts_failures():
     repo.get_all_user_ids.return_value = [10, 20, 30]
     session = _make_session(repo)
 
-    with patch("app.bot.router.get_session", return_value=session), \
-         patch("app.bot.router.Repository", return_value=repo), \
-         patch("app.bot.router.asyncio.sleep", new=AsyncMock()):
+    with patch("app.bot.routers.broadcast.get_session", return_value=session), \
+         patch("app.bot.routers.broadcast.Repository", return_value=repo), \
+         patch("app.bot.routers.broadcast.asyncio.sleep", new=AsyncMock()):
         ok, failed, total = await _broadcast_to_all(bot, source)
 
     assert (ok, failed, total) == (0, 3, 3)
@@ -1159,7 +1148,7 @@ async def test_broadcast_to_all_counts_failures():
 
 @pytest.mark.asyncio
 async def test_broadcast_message_resets_timer():
-    from app.bot.router import broadcast_message
+    from app.bot.routers.broadcast import broadcast_message
 
     message = _make_message(user_id=1, text="Hi")
     message.html_text = "Hi"
@@ -1167,9 +1156,9 @@ async def test_broadcast_message_resets_timer():
     settings = _make_settings(admin_user_ids={1}, broadcast_timeout_seconds=300)
     redis = _make_redis_mock()
 
-    with patch("app.bot.router.get_settings", return_value=settings), \
-         patch("app.bot.router.get_redis", return_value=redis), \
-         patch("app.bot.router._broadcast_to_all", new=AsyncMock(return_value=(2, 0, 2))):
+    with patch("app.bot.routers.broadcast.get_settings", return_value=settings), \
+         patch("app.bot.routers.broadcast.get_redis", return_value=redis), \
+         patch("app.bot.routers.broadcast._broadcast_to_all", new=AsyncMock(return_value=(2, 0, 2))):
         await broadcast_message(message, bot)
 
     redis.setex.assert_called_once()
@@ -1180,7 +1169,7 @@ async def test_broadcast_message_resets_timer():
 
 @pytest.mark.asyncio
 async def test_broadcast_cancel_clears_key():
-    from app.bot.router import broadcast_cancel_callback
+    from app.bot.routers.broadcast import broadcast_cancel_callback
 
     cb = MagicMock()
     cb.from_user.id = 1
@@ -1190,8 +1179,8 @@ async def test_broadcast_cancel_clears_key():
     settings = _make_settings(admin_user_ids={1})
     redis = _make_redis_mock()
 
-    with patch("app.bot.router.get_settings", return_value=settings), \
-         patch("app.bot.router.get_redis", return_value=redis):
+    with patch("app.bot.routers.broadcast.get_settings", return_value=settings), \
+         patch("app.bot.routers.broadcast.get_redis", return_value=redis):
         await broadcast_cancel_callback(cb)
 
     redis.delete.assert_called_once_with("broadcast_mode:1")
