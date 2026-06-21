@@ -7,7 +7,7 @@
 [![Python](https://img.shields.io/badge/Python-3.12-blue?logo=python)](https://python.org)
 [![aiogram](https://img.shields.io/badge/aiogram-3.x-blue?logo=telegram)](https://docs.aiogram.dev)
 [![Docker](https://img.shields.io/badge/Docker-Compose-2496ED?logo=docker)](https://docs.docker.com/compose/)
-[![Tests](https://img.shields.io/badge/Tests-342%20passed-brightgreen?logo=pytest)](tests/)
+[![Tests](https://img.shields.io/badge/Tests-372%20passed-brightgreen?logo=pytest)](tests/)
 [![Coverage](https://img.shields.io/badge/Coverage-high-brightgreen)](tests/)
 [![License](https://img.shields.io/badge/License-MIT-green)](LICENSE)
 
@@ -79,7 +79,9 @@
 - **Celery-воркер** — задачи выполняются асинхронно, бот не блокируется во время скачивания
 - **Прогресс-хук** — пользователь видит обновления статуса в реальном времени во время загрузки
 - **Alembic-миграции** применяются автоматически при каждом запуске бота
-- **Repository паттерн** — единая точка доступа к данным, изолированная от бизнес-логики
+- **ISP-сегрегированные репозитории** — `UserRepository`, `CookieRepository`, `VideoRepository`, `RequestRepository` — каждый caller получает только нужный интерфейс
+- **AccessMiddleware + AdminFilter** — доступ и проверка администратора вынесены в aiogram middleware и фильтр; обработчики не содержат guard-кода
+- **Динамические лимиты** через Redis — rate limit, дневные лимиты и лимиты очереди меняются в `/admin` без перезапуска
 - **Healthcheck** — Docker Compose проверяет готовность PostgreSQL и Redis перед стартом бота
 - **systemd-служба** — автозапуск всего стека при перезагрузке сервера
 
@@ -596,13 +598,13 @@ pytest tests/ -q
 **Результат:**
 
 ```
-342 passed
+372 passed
 ```
 
 Тесты покрывают все модули изолированно через моки — без реального Docker, Redis или PostgreSQL. Включают:
 - Unit-тесты для всех утилит, сервисов, моделей (включая `platforms`, `broadcast`, `caption`)
-- Тесты всех веток обработчиков роутера: доступ, cookie-загрузка, режим рассылки
-- Тесты Celery-задачи, включая прогресс-хук и материализацию персональных cookie
+- Тесты AccessMiddleware, AdminFilter и всех sub-роутеров: доступ, cookie-загрузка, режим рассылки
+- Тесты Celery-задачи, включая прогресс-хук, материализацию персональных cookie и вспомогательные функции
 - Тесты системы логирования с исправлением Windows file-lock
 
 ---
@@ -615,21 +617,34 @@ Video_down/
 ├── app/
 │   ├── bot/
 │   │   ├── main.py              # Запуск в режиме webhook или polling, регистрация команд
-│   │   └── router.py            # Обработчики: доступ, антиспам, скачивание, /admin, cookie, рассылка
+│   │   ├── router.py            # Агрегатор sub-роутеров; подключает AccessMiddleware
+│   │   ├── access.py            # _is_admin, _is_allowed, _check_access — логика доступа
+│   │   ├── middleware.py        # AccessMiddleware — блокирует неавторизованных до хэндлера
+│   │   ├── filters.py           # AdminFilter — aiogram-фильтр для команд администратора
+│   │   ├── utils.py             # safe_edit_text — edit_text без TelegramBadRequest
+│   │   └── routers/
+│   │       ├── user.py          # /start, /help, /quality, /status
+│   │       ├── admin.py         # /admin, /adduser, /removeuser, /listusers, лимиты
+│   │       ├── broadcast.py     # /broadcast, BroadcastModeFilter, рассылка всем
+│   │       ├── cookies.py       # /cookies, /delcookies, загрузка файлов cookie
+│   │       ├── oauth.py         # /link_google, /unlink_google, Google OAuth2 device flow
+│   │       └── url_handler.py   # Обработка ссылок: rate limit, кэш, очередь
 │   ├── core/
 │   │   ├── config.py            # Pydantic Settings — типизированный .env с кэшем
 │   │   └── logging.py           # Ротирующие файловые логи + вывод в stdout
 │   ├── db/
 │   │   ├── models.py            # SQLAlchemy модели: User, Video, DownloadRequest, UserCookies
-│   │   ├── repository.py        # Repository паттерн — User/Cookie/Video/Request репозитории
+│   │   ├── repository.py        # ISP-репозитории: UserRepository, CookieRepository, VideoRepository, RequestRepository
 │   │   ├── session.py           # Фабрика сессий БД
 │   │   └── utils.py             # Вспомогательные функции БД
 │   ├── keyboards/
-│   │   ├── admin.py             # Инлайн-клавиатура панели администратора
+│   │   ├── admin.py             # Инлайн-клавиатура панели администратора и лимитов
 │   │   └── quality.py           # Инлайн-клавиатура выбора качества
 │   ├── services/
-│   │   ├── rate_limiter.py      # Redis rate limiter с атомарными Lua-скриптами
-│   │   └── redis_client.py      # Синглтон-клиент Redis
+│   │   ├── rate_limiter.py      # Redis rate limiter с атомарными Lua-скриптами + check_rate_limit()
+│   │   ├── redis_client.py      # Синглтон-клиент Redis
+│   │   ├── runtime_config.py    # Динамические лимиты через Redis (get_limit, get_effective_limits)
+│   │   └── google_oauth.py      # Google OAuth2 device flow — токены и YouTube cookies
 │   ├── utils/
 │   │   ├── quality.py           # Нормализация и форматирование качества для yt-dlp
 │   │   ├── url_tools.py         # Извлечение URL, валидация, нормализация, SHA256-хэш
@@ -639,7 +654,7 @@ Video_down/
 │   └── worker/
 │       ├── celery_app.py        # Конфигурация Celery (очередь downloads)
 │       ├── downloader.py        # Обёртка над yt-dlp (опции, выбор файла, личные/глобальные cookies)
-│       ├── tasks.py             # Celery-задача: скачать → отправить → закэшировать
+│       ├── tasks.py             # Celery-задача + хелперы: кэш, прогресс-хук, загрузка
 │       └── telegram_sender.py   # Синхронный мост для вызова asyncio из Celery-воркера
 │
 ├── alembic/
@@ -656,9 +671,9 @@ Video_down/
 │   ├── renew_cert.sh            # Автоперевыпуск Let's Encrypt (генерируется setup.sh)
 │   └── update_ytdlp.sh          # Обновление yt-dlp без пересборки образа
 │
-├── tests/                       # 342 теста
-│   ├── test_bot_router.py       # Тесты всех обработчиков, доступа, cookie, рассылки
-│   ├── test_worker_tasks.py     # Тесты Celery-задачи
+├── tests/                       # 372 теста
+│   ├── test_bot_router.py       # Тесты всех sub-роутеров, AccessMiddleware, AdminFilter
+│   ├── test_worker_tasks.py     # Тесты Celery-задачи и вспомогательных функций
 │   └── ...                      # Тесты каждого модуля
 │
 ├── downloads/                   # Временные файлы (монтируется в контейнер)
