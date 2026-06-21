@@ -18,6 +18,8 @@ from app.utils.caption import get_caption
 from app.utils.platforms import detect_platform
 from app.worker.celery_app import celery_app
 from app.worker.downloader import cookie_file_for_url, download_video
+from aiogram.exceptions import TelegramEntityTooLarge
+
 from app.worker.telegram_sender import delete_status, edit_status, send_cached, send_file
 
 logger = logging.getLogger(__name__)
@@ -62,6 +64,11 @@ _STALE_COOKIE_FAILURE = (
     "Экспортируйте <b>свежий</b> cookies.txt из браузера, где вы залогинены, "
     "и пришлите файл <code>youtube.txt</code> заново.\n"
     "Подробнее: /cookies"
+)
+
+_TOO_LARGE_FAILURE = (
+    "⚠️ Файл слишком большой для Telegram (лимит 50 МБ).\n\n"
+    "Попробуй выбрать качество пониже — /quality."
 )
 
 
@@ -139,6 +146,8 @@ def _handle_task_failure(
 
     if cookie_refreshed:
         message = "🔄 YouTube cookies автоматически обновлены. Отправь ссылку ещё раз."
+    elif isinstance(exc, TelegramEntityTooLarge):
+        message = _TOO_LARGE_FAILURE
     elif _is_cookie_error(exc) or _is_youtube_challenge_error(exc):
         message = _STALE_COOKIE_FAILURE if cookies_were_used else _COOKIE_FAILURE
     else:
