@@ -14,6 +14,7 @@ from app.services.redis_client import get_redis
 from app.services.runtime_config import get_limit
 from app.utils.caption import get_caption
 from app.utils.platforms import detect_platform
+from app.services.google_oauth import generate_youtube_cookies, refresh_access_token
 from app.worker.celery_app import celery_app
 from app.worker.downloader import cookie_file_for_url, download_video
 from app.worker.telegram_sender import delete_status, edit_status, send_cached, send_file
@@ -101,12 +102,9 @@ def _materialize_user_cookies(repo: Repository, user_id: int, url: str) -> Path 
 def _try_refresh_google_cookies(repo: Repository, user_id: int) -> bool:
     """Refresh YouTube cookies from the stored Google refresh_token.
 
-    Returns True if cookies were successfully refreshed so the caller can
-    show a "try again" message instead of the stale-cookie error.
+    Returns True if cookies were successfully refreshed.
     """
     try:
-        from app.services.google_oauth import generate_youtube_cookies, refresh_access_token
-
         token_rec = repo.get_google_token(user_id)
         if not token_rec:
             return False
@@ -125,21 +123,17 @@ def _handle_task_failure(
     exc: Exception,
     *,
     cookies_were_used: bool = False,
+    cookie_refreshed: bool = False,
 ) -> None:
-    """DRY: consolidates the status update + Telegram notification on failure."""
+    """Record the failure in the DB and send a Telegram notification."""
     error_msg = f"{type(exc).__name__}: {exc}"
     repo.update_request_status(request_id, DownloadStatus.failed, error=error_msg, finished=True)
     if req.video_id:
         repo.mark_video_failed(req.video_id, error_msg)
 
-    if _is_cookie_error(exc) or _is_youtube_challenge_error(exc):
-        if cookies_were_used and _try_refresh_google_cookies(repo, req.user_id):
-            edit_status(
-                req.chat_id,
-                req.status_message_id,
-                "🔄 YouTube cookies автоматически обновлены. Отправь ссылку ещё раз.",
-            )
-            return
+    if cookie_refreshed:
+        message = "🔄 YouTube cookies автоматически обновлены. Отправь ссылку ещё раз."
+    elif _is_cookie_error(exc) or _is_youtube_challenge_error(exc):
         message = _STALE_COOKIE_FAILURE if cookies_were_used else _COOKIE_FAILURE
     else:
         message = _GENERIC_FAILURE
@@ -284,7 +278,16 @@ def process_download_request(self, request_id: int) -> None:
 
         except Exception as exc:
             logger.exception("Failed request %s", request_id)
-            _handle_task_failure(repo, request_id, req, exc, cookies_were_used=cookies_were_used)
+            cookie_refreshed = (
+                cookies_were_used
+                and (_is_cookie_error(exc) or _is_youtube_challenge_error(exc))
+                and _try_refresh_google_cookies(repo, req.user_id)
+            )
+            _handle_task_failure(
+                repo, request_id, req, exc,
+                cookies_were_used=cookies_were_used,
+                cookie_refreshed=cookie_refreshed,
+            )
             raise
 
         finally:

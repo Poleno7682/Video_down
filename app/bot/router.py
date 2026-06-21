@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 
 from aiogram import Bot, F, Router
 from aiogram.exceptions import TelegramBadRequest
@@ -68,7 +69,8 @@ HELP_TEXT = (
     "/unlink_google — отвязать Google-аккаунт"
 )
 
-_GOOGLE_LINKING_KEY = "google_linking:{}"
+def _google_linking_key(user_id: int) -> str:
+    return f"google_linking:{user_id}"
 
 
 # ---------------------------------------------------------------------------
@@ -486,7 +488,7 @@ async def link_google(message: Message) -> None:
         return
 
     user_id = message.from_user.id
-    link_key = _GOOGLE_LINKING_KEY.format(user_id)
+    link_key = _google_linking_key(user_id)
     if redis.exists(link_key):
         await message.answer(
             "⏳ Авторизация уже в процессе.\n"
@@ -530,14 +532,12 @@ async def _poll_google_link(
     link_key: str,
 ) -> None:
     """Background polling loop for the Google OAuth device flow."""
-    import time as _time
-
     redis = get_redis()
     user_id = message.from_user.id
-    deadline = _time.monotonic() + expires_in
+    deadline = time.monotonic() + expires_in
 
     try:
-        while _time.monotonic() < deadline:
+        while time.monotonic() < deadline:
             await asyncio.sleep(interval)
             try:
                 token_info = await asyncio.to_thread(poll_token, device_code)
@@ -596,17 +596,26 @@ async def unlink_google(message: Message) -> None:
         return
 
     user_id = message.from_user.id
-    redis.delete(_GOOGLE_LINKING_KEY.format(user_id))
+    redis.delete(_google_linking_key(user_id))
 
+    # Extract only the string value we need before closing the session,
+    # and delete DB records while the session is open.
+    refresh_token_str: str | None = None
+    had_token: bool = False
     with get_session() as session:
         repo = Repository(session)
         token_rec = repo.get_google_token(user_id)
         if token_rec:
-            await asyncio.to_thread(revoke_token, token_rec.refresh_token)
+            had_token = True
+            refresh_token_str = token_rec.refresh_token
             repo.delete_google_token(user_id)
         removed_cookies = repo.delete_user_cookies(user_id, "youtube")
 
-    if token_rec or removed_cookies:
+    # Network call outside the DB session — revocation is best-effort.
+    if refresh_token_str:
+        await asyncio.to_thread(revoke_token, refresh_token_str)
+
+    if had_token or removed_cookies:
         await message.answer("✅ Google-аккаунт отвязан. YouTube cookies удалены.")
     else:
         await message.answer("ℹ️ Привязки к Google-аккаунту не найдено.")
