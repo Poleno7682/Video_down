@@ -25,6 +25,7 @@ from app.worker.downloader import (
     cookie_file_for_url,
     download_video,
     is_active_livestream,
+    probe_video_dimensions,
     validate_media_file,
 )
 
@@ -146,7 +147,7 @@ def test_build_ydl_opts_basic():
     assert opts["progress_hooks"] == []
     assert opts["postprocessors"] == []
     assert opts["remote_components"] == ["ejs:github"]
-    assert opts["postprocessor_args"] == {"Merger+ffmpeg": ["-c", "copy"]}
+    assert opts["postprocessor_args"] == {"Merger+ffmpeg": ["-c", "copy", "-movflags", "+faststart"]}
     assert "cookiefile" not in opts
 
 
@@ -459,6 +460,41 @@ def test_validate_media_file_raises_when_not_decodable():
          patch("app.worker.downloader._streams_are_decodable", return_value=False):
         with pytest.raises(MediaValidationError, match="corrupt"):
             validate_media_file(Path("/tmp/x.mp4"), "720p")
+
+
+# ---------------------------------------------------------------------------
+# probe_video_dimensions
+# ---------------------------------------------------------------------------
+
+def test_probe_video_dimensions_parses_width_height_duration():
+    stdout = '{"streams": [{"width": 1080, "height": 1920}], "format": {"duration": "12.7"}}'
+    with patch("app.worker.downloader._run_ffmpeg", return_value=_completed(stdout=stdout)):
+        width, height, duration = probe_video_dimensions(Path("/tmp/x.mp4"))
+    assert (width, height, duration) == (1080, 1920, 12)
+
+
+def test_probe_video_dimensions_none_on_ffprobe_error():
+    with patch("app.worker.downloader._run_ffmpeg", return_value=_completed(returncode=1, stderr="bad")):
+        assert probe_video_dimensions(Path("/tmp/x.mp4")) == (None, None, None)
+
+
+def test_probe_video_dimensions_none_on_timeout():
+    with patch("app.worker.downloader._run_ffmpeg", side_effect=subprocess.TimeoutExpired("ffprobe", 20)):
+        assert probe_video_dimensions(Path("/tmp/x.mp4")) == (None, None, None)
+
+
+def test_probe_video_dimensions_no_video_stream_audio_only():
+    stdout = '{"streams": [], "format": {"duration": "180.0"}}'
+    with patch("app.worker.downloader._run_ffmpeg", return_value=_completed(stdout=stdout)):
+        width, height, duration = probe_video_dimensions(Path("/tmp/x.m4a"))
+    assert (width, height, duration) == (None, None, 180)
+
+
+def test_probe_video_dimensions_missing_duration_field():
+    stdout = '{"streams": [{"width": 640, "height": 360}], "format": {}}'
+    with patch("app.worker.downloader._run_ffmpeg", return_value=_completed(stdout=stdout)):
+        width, height, duration = probe_video_dimensions(Path("/tmp/x.mp4"))
+    assert (width, height, duration) == (640, 360, None)
 
 
 # ---------------------------------------------------------------------------

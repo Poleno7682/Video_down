@@ -109,7 +109,11 @@ def _build_ydl_opts(
         "windowsfilenames": True,
         "restrictfilenames": True,
         # Avoid ffmpeg re-encoding on merge — keeps native aspect ratio intact.
-        "postprocessor_args": {"Merger+ffmpeg": ["-c", "copy"]},
+        # +faststart moves the moov atom (container metadata, incl. frame size)
+        # to the front of the file. Without it Telegram's servers can't quickly
+        # probe width/height from a freshly muxed file and fall back to a
+        # square placeholder player even though the video itself is fine.
+        "postprocessor_args": {"Merger+ffmpeg": ["-c", "copy", "-movflags", "+faststart"]},
         # YouTube EJS: Deno alone is not enough — yt-dlp must fetch challenge solver scripts.
         # See https://github.com/yt-dlp/yt-dlp/wiki/EJS
         "remote_components": ["ejs:github"],
@@ -302,6 +306,47 @@ def validate_media_file(file_path: Path, quality: str) -> None:
         raise MediaValidationError(f"Downloaded file is missing stream(s): {', '.join(missing)}")
     if not _streams_are_decodable(file_path):
         raise MediaValidationError("Downloaded file has a corrupt or non-decodable stream")
+
+
+def probe_video_dimensions(file_path: Path) -> tuple[int | None, int | None, int | None]:
+    """Return (width, height, duration_seconds) from the actual file on disk.
+
+    Passed to Telegram's send_video/send_audio so its clients render the
+    correct aspect ratio immediately instead of falling back to a square
+    placeholder while they probe the file themselves. Reads the real,
+    possibly-compressed file rather than yt-dlp's info dict, since Mini
+    compression changes the pixel dimensions.
+    """
+    command = [
+        "ffprobe", "-v", "error", "-select_streams", "v:0",
+        "-show_entries", "stream=width,height:format=duration",
+        "-of", "json", str(file_path),
+    ]
+    try:
+        result = _run_ffmpeg(command, timeout=_FFPROBE_TIMEOUT)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        logger.warning("ffprobe dimension probe failed for %s: %s", file_path, exc)
+        return None, None, None
+    if result.returncode != 0:
+        return None, None, None
+    try:
+        data = json.loads(result.stdout)
+    except json.JSONDecodeError:
+        return None, None, None
+
+    width = height = None
+    streams = data.get("streams") or []
+    if streams and isinstance(streams[0], dict):
+        width = streams[0].get("width")
+        height = streams[0].get("height")
+
+    duration = None
+    try:
+        duration = int(float((data.get("format") or {}).get("duration")))
+    except (TypeError, ValueError):
+        duration = None
+
+    return width, height, duration
 
 
 def _probe_duration_seconds(file_path: Path) -> float | None:

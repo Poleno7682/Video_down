@@ -23,6 +23,7 @@ from app.worker.downloader import (
     cookie_file_for_url,
     download_video,
     is_active_livestream,
+    probe_video_dimensions,
     validate_media_file,
 )
 from aiogram.exceptions import TelegramEntityTooLarge
@@ -235,7 +236,10 @@ def _upload_and_cache(
     edit_status(req.chat_id, req.status_message_id, f"✅ Скачано {size_mb:.1f} MB. Отправляю...")
 
     title = info.get("title") if isinstance(info, dict) else None
-    file_id, file_unique_id, file_type = send_file(req.chat_id, file_path, get_caption(settings))
+    width, height, duration = probe_video_dimensions(file_path)
+    file_id, file_unique_id, file_type = send_file(
+        req.chat_id, file_path, get_caption(settings), width=width, height=height, duration=duration
+    )
 
     if req.video_id:
         repo.mark_video_ready(

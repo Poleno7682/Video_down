@@ -156,6 +156,69 @@ async def test_send_file_video(mocker):
 
 
 @pytest.mark.asyncio
+async def test_send_file_video_passes_dimension_hints(mocker):
+    """Width/height/duration must reach Bot API so Telegram doesn't fall back
+    to a square placeholder while it probes the file itself."""
+    msg = MagicMock()
+    msg.video.file_id = "video_fid"
+    msg.video.file_unique_id = "video_uid"
+
+    mock_bot = MagicMock()
+    mock_bot.send_video = AsyncMock(return_value=msg)
+    mocker.patch("app.worker.telegram_sender._get_bot", return_value=mock_bot)
+    mocker.patch("app.worker.telegram_sender.FSInputFile")
+
+    from app.worker.telegram_sender import _send_file_async
+    await _send_file_async(123, Path("video.mp4"), "caption", width=1080, height=1920, duration=42)
+
+    _, kwargs = mock_bot.send_video.call_args
+    assert kwargs["width"] == 1080
+    assert kwargs["height"] == 1920
+    assert kwargs["duration"] == 42
+
+
+@pytest.mark.asyncio
+async def test_send_file_video_omits_hints_when_missing(mocker):
+    msg = MagicMock()
+    msg.video.file_id = "video_fid"
+    msg.video.file_unique_id = "video_uid"
+
+    mock_bot = MagicMock()
+    mock_bot.send_video = AsyncMock(return_value=msg)
+    mocker.patch("app.worker.telegram_sender._get_bot", return_value=mock_bot)
+    mocker.patch("app.worker.telegram_sender.FSInputFile")
+
+    from app.worker.telegram_sender import _send_file_async
+    await _send_file_async(123, Path("video.mp4"), "caption")
+
+    _, kwargs = mock_bot.send_video.call_args
+    assert "width" not in kwargs
+    assert "height" not in kwargs
+    assert "duration" not in kwargs
+
+
+@pytest.mark.asyncio
+async def test_send_file_document_ignores_dimension_hints(mocker):
+    """send_document has no width/height/duration params — must not be passed."""
+    msg = MagicMock()
+    msg.document.file_id = "doc_fid"
+    msg.document.file_unique_id = "doc_uid"
+
+    mock_bot = MagicMock()
+    mock_bot.send_document = AsyncMock(return_value=msg)
+    mocker.patch("app.worker.telegram_sender._get_bot", return_value=mock_bot)
+    mocker.patch("app.worker.telegram_sender.FSInputFile")
+
+    from app.worker.telegram_sender import _send_file_async
+    await _send_file_async(123, Path("file.pdf"), "cap", width=100, height=100, duration=5)
+
+    _, kwargs = mock_bot.send_document.call_args
+    assert "width" not in kwargs
+    assert "height" not in kwargs
+    assert "duration" not in kwargs
+
+
+@pytest.mark.asyncio
 async def test_send_file_audio(mocker):
     msg = MagicMock()
     msg.audio.file_id = "audio_fid"

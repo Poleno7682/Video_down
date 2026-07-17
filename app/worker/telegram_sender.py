@@ -92,8 +92,28 @@ def close_bot_session() -> None:
             _bot = None
 
 
+def _media_hints(
+    file_type: TelegramFileType, width: int | None, height: int | None, duration: int | None
+) -> dict[str, Any]:
+    """Bot API kwargs so Telegram clients render the correct aspect ratio right
+    away instead of falling back to a square placeholder while probing the file.
+    """
+    hints: dict[str, Any] = {}
+    if file_type == TelegramFileType.video and width and height:
+        hints["width"] = width
+        hints["height"] = height
+    if file_type in (TelegramFileType.video, TelegramFileType.audio) and duration:
+        hints["duration"] = duration
+    return hints
+
+
 async def _send_file_async(
-    chat_id: int, file_path: Path, caption: str
+    chat_id: int,
+    file_path: Path,
+    caption: str,
+    width: int | None = None,
+    height: int | None = None,
+    duration: int | None = None,
 ) -> tuple[str, str | None, TelegramFileType]:
     bot = _get_bot()
     input_file = FSInputFile(file_path)
@@ -106,6 +126,7 @@ async def _send_file_async(
         caption=caption,
         request_timeout=_UPLOAD_TIMEOUT,
         **spec.extra_kwargs,
+        **_media_hints(file_type, width, height, duration),
     )
     media = getattr(msg, spec.media_param)
     return media.file_id, media.file_unique_id, file_type
@@ -143,8 +164,15 @@ async def _delete_status_async(chat_id: int, message_id: int | None) -> None:
         logger.debug("Could not delete status message %s in chat %s: %s", message_id, chat_id, exc)
 
 
-def send_file(chat_id: int, file_path: Path, caption: str) -> tuple[str, str | None, TelegramFileType]:
-    return _run(_send_file_async(chat_id, file_path, caption))
+def send_file(
+    chat_id: int,
+    file_path: Path,
+    caption: str,
+    width: int | None = None,
+    height: int | None = None,
+    duration: int | None = None,
+) -> tuple[str, str | None, TelegramFileType]:
+    return _run(_send_file_async(chat_id, file_path, caption, width, height, duration))
 
 
 def send_cached(chat_id: int, file_id: str, file_type: TelegramFileType, caption: str) -> None:
