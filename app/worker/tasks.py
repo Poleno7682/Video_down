@@ -17,7 +17,14 @@ from app.services.runtime_config import get_limit
 from app.utils.caption import get_caption
 from app.utils.platforms import detect_platform
 from app.worker.celery_app import celery_app
-from app.worker.downloader import cookie_file_for_url, download_video
+from app.worker.downloader import (
+    MediaValidationError,
+    compress_to_size_limit,
+    cookie_file_for_url,
+    download_video,
+    is_active_livestream,
+    validate_media_file,
+)
 from aiogram.exceptions import TelegramEntityTooLarge
 
 from app.worker.telegram_sender import delete_status, edit_status, send_cached, send_file
@@ -69,6 +76,16 @@ _STALE_COOKIE_FAILURE = (
 _TOO_LARGE_FAILURE = (
     "⚠️ Файл слишком большой для Telegram (лимит 50 МБ).\n\n"
     "Попробуй выбрать качество пониже — /quality."
+)
+
+_LIVESTREAM_FAILURE = (
+    "🔴 Это активная трансляция, а не готовая запись.\n\n"
+    "Бот не скачивает незавершённые эфиры — попробуй ссылку ещё раз после окончания трансляции."
+)
+
+_CORRUPT_MEDIA_FAILURE = (
+    "❌ Скачанный файл повреждён (сайт отдал несовместимый видео/аудио поток).\n\n"
+    "Попробуй ещё раз или выбери другое качество — /quality."
 )
 
 # Redis key TTL after a Google OAuth cookie refresh to prevent refresh loops.
@@ -155,6 +172,8 @@ def _handle_task_failure(
         message = "🔄 YouTube cookies автоматически обновлены. Отправь ссылку ещё раз."
     elif isinstance(exc, TelegramEntityTooLarge):
         message = _TOO_LARGE_FAILURE
+    elif isinstance(exc, MediaValidationError):
+        message = _CORRUPT_MEDIA_FAILURE
     elif _is_cookie_error(exc) or _is_youtube_challenge_error(exc):
         message = _STALE_COOKIE_FAILURE if cookies_were_used else _COOKIE_FAILURE
     else:
@@ -291,6 +310,16 @@ def process_download_request(self, request_id: int) -> None:
                 )
                 return
 
+            if is_active_livestream(req.normalized_url):
+                repo.update_request_status(
+                    request_id,
+                    DownloadStatus.failed,
+                    error="Active livestream, not a finished recording",
+                    finished=True,
+                )
+                edit_status(req.chat_id, req.status_message_id, _LIVESTREAM_FAILURE)
+                return
+
             repo.update_request_status(request_id, DownloadStatus.downloading)
             edit_status(req.chat_id, req.status_message_id, "⬇️ Скачиваю видео...")
 
@@ -304,12 +333,28 @@ def process_download_request(self, request_id: int) -> None:
                 settings,
                 progress_hook=_build_progress_hook(req.chat_id, req.status_message_id),
                 cookie_file=user_cookie_path,
+                embed_subtitles=settings.embed_subtitles,
             )
+
+            validate_media_file(file_path, req.quality)
 
             file_size_bytes = file_path.stat().st_size
             size_mb = file_size_bytes / (1024 * 1024)
 
             max_mb = get_limit("max_file_mb", settings, redis)
+            if max_mb > 0 and size_mb > max_mb:
+                edit_status(
+                    req.chat_id,
+                    req.status_message_id,
+                    f"⚠️ Файл слишком большой ({size_mb:.1f} MB). Пробую сжать под лимит {max_mb} MB...",
+                )
+                compressed_path = compress_to_size_limit(file_path, max_mb)
+                if compressed_path is not None:
+                    file_path.unlink(missing_ok=True)
+                    file_path = compressed_path
+                    file_size_bytes = file_path.stat().st_size
+                    size_mb = file_size_bytes / (1024 * 1024)
+
             if max_mb > 0 and size_mb > max_mb:
                 repo.update_request_status(
                     request_id,

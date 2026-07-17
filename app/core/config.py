@@ -59,6 +59,11 @@ class Settings(BaseSettings):
     # Each broadcast message resets the timer (implemented via Redis key TTL).
     broadcast_timeout_seconds: int = Field(default=300, alias="BROADCAST_TIMEOUT_SECONDS")
 
+    # Hard-burn subtitles (native or auto-generated, ru/en) into the video
+    # picture when yt-dlp finds them. Off by default: adds an extra ffmpeg
+    # re-encode pass to every download.
+    embed_subtitles: bool = Field(default=False, alias="EMBED_SUBTITLES")
+
     use_cookies: bool = Field(default=True, alias="USE_COOKIES")
     facebook_cookies_file: Path = Field(default=Path("/app/cookies/facebook.txt"), alias="FACEBOOK_COOKIES_FILE")
     instagram_cookies_file: Path = Field(default=Path("/app/cookies/instagram.txt"), alias="INSTAGRAM_COOKIES_FILE")

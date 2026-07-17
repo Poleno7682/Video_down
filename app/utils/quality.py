@@ -30,7 +30,11 @@ def _video_format(max_height: int | None) -> str:
         # Combined landscape
         f"best{h_filter}"
     )
-    return f"{portrait}/{landscape}/best"
+    # Absolute last resort for direct CDN links yt-dlp can't fully probe
+    # (no height/codec metadata available before download): grab whatever a
+    # plain HTTP(S) request returns rather than failing outright.
+    direct_fallback = "best[protocol^=http]/best"
+    return f"{portrait}/{landscape}/{direct_fallback}"
 
 
 QUALITY_FORMATS: dict[str, str] = {

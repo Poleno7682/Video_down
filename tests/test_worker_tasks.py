@@ -235,6 +235,8 @@ def _task_ctx(req=None, settings=None, ready_video=None,
          patch("app.worker.tasks.delete_status"), \
          patch("app.worker.tasks.send_cached"), \
          patch("app.worker.tasks.send_file", return_value=("fid", "uid", TelegramFileType.video)), \
+         patch("app.worker.tasks.is_active_livestream", return_value=False), \
+         patch("app.worker.tasks.validate_media_file"), \
          patch("app.worker.tasks.download_video", return_value=dl_result):
         yield repo, limiter
 
@@ -319,7 +321,7 @@ class TestProcessDownloadRequest:
         fake_file.stat.return_value.st_size = 5 * 1024 * 1024
         captured = {}
 
-        def capture(url, quality, settings, progress_hook=None, cookie_file=None):
+        def capture(url, quality, settings, progress_hook=None, cookie_file=None, embed_subtitles=False):
             captured["cookie_file"] = cookie_file
             return fake_file, {}
 
@@ -386,6 +388,54 @@ class TestProcessDownloadRequest:
             process_download_request.apply(args=[1])
         repo.mark_video_ready.assert_not_called()
 
+    def test_active_livestream_rejected_before_download(self):
+        with _task_ctx() as (repo, _):
+            with patch("app.worker.tasks.is_active_livestream", return_value=True) as mock_live, \
+                 patch("app.worker.tasks.download_video") as mock_download:
+                process_download_request.apply(args=[1])
+        mock_live.assert_called_once()
+        mock_download.assert_not_called()
+        statuses = {c[0][1] for c in repo.update_request_status.call_args_list}
+        assert DownloadStatus.failed in statuses
+
+    def test_corrupt_media_marks_failed(self):
+        from app.worker.downloader import MediaValidationError
+
+        with _task_ctx() as (repo, _):
+            with patch("app.worker.tasks.validate_media_file", side_effect=MediaValidationError("bad")):
+                with pytest.raises(MediaValidationError):
+                    process_download_request.apply(args=[1])
+        statuses = {c[0][1] for c in repo.update_request_status.call_args_list}
+        assert DownloadStatus.failed in statuses
+
+    def test_oversized_file_gets_compressed_under_limit(self):
+        big_file = MagicMock(spec=Path)
+        big_file.stat.return_value.st_size = 100 * 1024 * 1024
+        small_file = MagicMock(spec=Path)
+        small_file.stat.return_value.st_size = 10 * 1024 * 1024
+
+        with _task_ctx(download_result=(big_file, {})) as (repo, _):
+            with patch("app.worker.tasks.compress_to_size_limit", return_value=small_file) as mock_compress:
+                process_download_request.apply(args=[1])
+
+        mock_compress.assert_called_once()
+        statuses = {c[0][1] for c in repo.update_request_status.call_args_list}
+        assert DownloadStatus.too_large not in statuses
+        assert DownloadStatus.done in statuses
+        big_file.unlink.assert_called_once_with(missing_ok=True)
+
+    def test_compression_failure_still_reports_too_large(self):
+        big_file = MagicMock(spec=Path)
+        big_file.stat.return_value.st_size = 100 * 1024 * 1024
+
+        with _task_ctx(download_result=(big_file, {})) as (repo, _):
+            with patch("app.worker.tasks.compress_to_size_limit", return_value=None) as mock_compress:
+                process_download_request.apply(args=[1])
+
+        mock_compress.assert_called_once()
+        statuses = {c[0][1] for c in repo.update_request_status.call_args_list}
+        assert DownloadStatus.too_large in statuses
+
     def test_download_exception_calls_handle_failure(self):
         with _task_ctx() as (repo, limiter):
             with patch("app.worker.tasks.download_video", side_effect=RuntimeError("yt-dlp fail")), \
@@ -421,7 +471,7 @@ class TestProgressHook:
         """Run the task once with a download_video mock that captures progress_hook."""
         captured = {}
 
-        def capture(url, quality, settings, progress_hook=None, cookie_file=None):
+        def capture(url, quality, settings, progress_hook=None, cookie_file=None, embed_subtitles=False):
             if progress_hook:
                 captured["hook"] = progress_hook
             f = MagicMock(spec=Path)
