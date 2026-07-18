@@ -340,6 +340,54 @@ def log_media_debug_info(file_path: Path, *, context: str = "") -> dict[str, str
     return codecs
 
 
+def _transcode_to_h264(file_path: Path, timeout: int = _COMPRESSION_TIMEOUT) -> Path | None:
+    """Re-encode file_path's video track to H.264/AAC, same resolution/bitrate ballpark.
+
+    Used as a last-resort fix when the source only offered a codec Telegram
+    clients render as a static frame (vp9/av1) — see _RISKY_TELEGRAM_VIDEO_CODECS.
+    Returns the transcoded file, or None on failure.
+    """
+    output_path = file_path.with_name(f"{file_path.stem}.h264{file_path.suffix}")
+    output_path.unlink(missing_ok=True)
+    command = [
+        "ffmpeg", "-y", "-nostdin", "-hide_banner", "-loglevel", "warning",
+        "-i", str(file_path),
+        "-c:v", "libx264", "-preset", "veryfast", "-crf", "20", "-pix_fmt", "yuv420p",
+        "-c:a", "aac", "-b:a", "160k",
+        "-movflags", "+faststart",
+        str(output_path),
+    ]
+    try:
+        result = _run_ffmpeg(command, timeout=timeout)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        logger.warning("H.264 transcode failed for %s: %s", file_path, exc)
+        return None
+    if result.returncode != 0 or not output_path.exists():
+        logger.warning("ffmpeg H.264 transcode error: %s", (result.stderr or "").strip()[-500:])
+        output_path.unlink(missing_ok=True)
+        return None
+    return output_path
+
+
+def ensure_telegram_compatible_video(file_path: Path, codecs: dict[str, str]) -> Path:
+    """Transcode to H.264 when the downloaded vcodec is known to break Telegram's player.
+
+    codecs is the dict returned by log_media_debug_info()/_probe_codec_names()
+    for file_path, so the caller doesn't need to probe twice. Returns the
+    original path unchanged when the codec is fine or the transcode fails
+    (falling back to sending the risky-but-playable-in-ffmpeg file rather than
+    losing the download entirely).
+    """
+    vcodec = codecs.get("video")
+    if vcodec not in _RISKY_TELEGRAM_VIDEO_CODECS:
+        return file_path
+    transcoded = _transcode_to_h264(file_path)
+    if transcoded is None:
+        return file_path
+    file_path.unlink(missing_ok=True)
+    return transcoded
+
+
 def _streams_are_decodable(file_path: Path) -> bool:
     command = [
         "ffmpeg", "-v", "error", "-xerror", "-i", str(file_path),

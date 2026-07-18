@@ -22,9 +22,11 @@ from app.worker.downloader import (
     _select_output_file,
     _select_subtitle_file,
     _streams_are_decodable,
+    _transcode_to_h264,
     compress_to_size_limit,
     cookie_file_for_url,
     download_video,
+    ensure_telegram_compatible_video,
     is_active_livestream,
     log_media_debug_info,
     probe_video_dimensions,
@@ -522,6 +524,88 @@ def test_log_media_debug_info_warns_on_av1(caplog):
         with caplog.at_level(logging.WARNING, logger="app.worker.downloader"):
             log_media_debug_info(Path("/tmp/x.mp4"))
     assert "static frame" in caplog.text
+
+
+# ---------------------------------------------------------------------------
+# _transcode_to_h264 / ensure_telegram_compatible_video
+# ---------------------------------------------------------------------------
+
+def test_transcode_to_h264_success():
+    with tempfile.TemporaryDirectory() as tmp:
+        src = Path(tmp) / "video.mp4"
+        src.write_bytes(b"x")
+
+        def fake_run(command, *, timeout, cwd=None):
+            Path(command[-1]).write_bytes(b"transcoded")
+            return _completed(returncode=0)
+
+        with patch("app.worker.downloader._run_ffmpeg", side_effect=fake_run):
+            result = _transcode_to_h264(src)
+
+        assert result == src.with_name("video.h264.mp4")
+        assert result.exists()
+
+
+def test_transcode_to_h264_returns_none_on_failure():
+    with tempfile.TemporaryDirectory() as tmp:
+        src = Path(tmp) / "video.mp4"
+        src.write_bytes(b"x")
+        with patch("app.worker.downloader._run_ffmpeg", return_value=_completed(returncode=1, stderr="bad")):
+            assert _transcode_to_h264(src) is None
+
+
+def test_transcode_to_h264_returns_none_on_timeout():
+    with tempfile.TemporaryDirectory() as tmp:
+        src = Path(tmp) / "video.mp4"
+        src.write_bytes(b"x")
+        with patch("app.worker.downloader._run_ffmpeg", side_effect=subprocess.TimeoutExpired("ffmpeg", 600)):
+            assert _transcode_to_h264(src) is None
+
+
+def test_ensure_telegram_compatible_video_passthrough_for_h264():
+    video = Path("/tmp/video.mp4")
+    with patch("app.worker.downloader._transcode_to_h264") as mock_transcode:
+        result = ensure_telegram_compatible_video(video, {"video": "h264", "audio": "aac"})
+    assert result is video
+    mock_transcode.assert_not_called()
+
+
+def test_ensure_telegram_compatible_video_transcodes_av1():
+    with tempfile.TemporaryDirectory() as tmp:
+        video = Path(tmp) / "video.mp4"
+        video.write_bytes(b"x")
+        transcoded = Path(tmp) / "video.h264.mp4"
+        transcoded.write_bytes(b"y")
+
+        with patch("app.worker.downloader._transcode_to_h264", return_value=transcoded) as mock_transcode:
+            result = ensure_telegram_compatible_video(video, {"video": "av1", "audio": "aac"})
+
+        mock_transcode.assert_called_once_with(video)
+        assert result == transcoded
+        assert not video.exists()
+
+
+def test_ensure_telegram_compatible_video_transcodes_vp9():
+    with tempfile.TemporaryDirectory() as tmp:
+        video = Path(tmp) / "video.mp4"
+        video.write_bytes(b"x")
+        transcoded = Path(tmp) / "video.h264.mp4"
+        transcoded.write_bytes(b"y")
+
+        with patch("app.worker.downloader._transcode_to_h264", return_value=transcoded):
+            result = ensure_telegram_compatible_video(video, {"video": "vp9", "audio": "opus"})
+
+        assert result == transcoded
+
+
+def test_ensure_telegram_compatible_video_keeps_original_on_transcode_failure():
+    with tempfile.TemporaryDirectory() as tmp:
+        video = Path(tmp) / "video.mp4"
+        video.write_bytes(b"x")
+        with patch("app.worker.downloader._transcode_to_h264", return_value=None):
+            result = ensure_telegram_compatible_video(video, {"video": "av1", "audio": "aac"})
+        assert result == video
+        assert video.exists()
 
 
 # ---------------------------------------------------------------------------

@@ -326,6 +326,31 @@ class TestProcessDownloadRequest:
         assert mock_log.call_args[0][0] is fake_file
         assert "request=1" in mock_log.call_args.kwargs["context"]
 
+    def test_risky_codec_gets_transcoded_before_upload(self):
+        fake_file = MagicMock(spec=Path)
+        fake_file.stat.return_value.st_size = 10 * 1024 * 1024
+        transcoded_file = MagicMock(spec=Path)
+        transcoded_file.stat.return_value.st_size = 12 * 1024 * 1024
+
+        with _task_ctx(download_result=(fake_file, {"title": "Vid"})) as (repo, _):
+            with patch("app.worker.tasks.log_media_debug_info", return_value={"video": "av1", "audio": "aac"}), \
+                 patch("app.worker.tasks.ensure_telegram_compatible_video", return_value=transcoded_file) as mock_ensure:
+                process_download_request.apply(args=[1])
+
+        mock_ensure.assert_called_once_with(fake_file, {"video": "av1", "audio": "aac"})
+        transcoded_file.unlink.assert_called()  # uploaded then cleaned up
+
+    def test_audio_quality_skips_telegram_compat_transcode(self):
+        req = _make_req(quality="audio")
+        fake_file = MagicMock(spec=Path)
+        fake_file.stat.return_value.st_size = 5 * 1024 * 1024
+
+        with _task_ctx(req=req, download_result=(fake_file, {})) as (repo, _):
+            with patch("app.worker.tasks.ensure_telegram_compatible_video") as mock_ensure:
+                process_download_request.apply(args=[1])
+
+        mock_ensure.assert_not_called()
+
     def test_user_cookies_passed_to_download(self):
         fake_file = MagicMock(spec=Path)
         fake_file.stat.return_value.st_size = 5 * 1024 * 1024

@@ -22,6 +22,7 @@ from app.worker.downloader import (
     compress_to_size_limit,
     cookie_file_for_url,
     download_video,
+    ensure_telegram_compatible_video,
     is_active_livestream,
     log_media_debug_info,
     probe_video_dimensions,
@@ -342,9 +343,10 @@ def process_download_request(self, request_id: int) -> None:
             )
 
             validate_media_file(file_path, req.quality)
-            log_media_debug_info(
-                file_path, context=f"request={request_id} url={req.normalized_url} quality={req.quality}"
-            )
+            debug_context = f"request={request_id} url={req.normalized_url} quality={req.quality}"
+            codecs = log_media_debug_info(file_path, context=debug_context)
+            if req.quality != "audio":
+                file_path = ensure_telegram_compatible_video(file_path, codecs)
 
             file_size_bytes = file_path.stat().st_size
             size_mb = file_size_bytes / (1024 * 1024)
