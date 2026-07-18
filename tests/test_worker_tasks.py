@@ -316,6 +316,16 @@ class TestProcessDownloadRequest:
             process_download_request.apply(args=[1])
         repo.mark_video_ready.assert_called_once()
 
+    def test_successful_download_logs_media_debug_info(self):
+        fake_file = MagicMock(spec=Path)
+        fake_file.stat.return_value.st_size = 10 * 1024 * 1024
+        with _task_ctx(download_result=(fake_file, {"title": "Vid"})) as (repo, _):
+            with patch("app.worker.tasks.log_media_debug_info") as mock_log:
+                process_download_request.apply(args=[1])
+        mock_log.assert_called_once()
+        assert mock_log.call_args[0][0] is fake_file
+        assert "request=1" in mock_log.call_args.kwargs["context"]
+
     def test_user_cookies_passed_to_download(self):
         fake_file = MagicMock(spec=Path)
         fake_file.stat.return_value.st_size = 5 * 1024 * 1024

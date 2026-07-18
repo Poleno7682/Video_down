@@ -18,6 +18,7 @@ from app.worker.downloader import (
     _is_access_retry_error,
     _probe_duration_seconds,
     _probe_stream_types,
+    _probe_codec_names,
     _select_output_file,
     _select_subtitle_file,
     _streams_are_decodable,
@@ -25,6 +26,7 @@ from app.worker.downloader import (
     cookie_file_for_url,
     download_video,
     is_active_livestream,
+    log_media_debug_info,
     probe_video_dimensions,
     validate_media_file,
 )
@@ -460,6 +462,66 @@ def test_validate_media_file_raises_when_not_decodable():
          patch("app.worker.downloader._streams_are_decodable", return_value=False):
         with pytest.raises(MediaValidationError, match="corrupt"):
             validate_media_file(Path("/tmp/x.mp4"), "720p")
+
+
+# ---------------------------------------------------------------------------
+# _probe_codec_names / log_media_debug_info
+# ---------------------------------------------------------------------------
+
+def test_probe_codec_names_parses_video_and_audio():
+    stdout = (
+        '{"streams": ['
+        '{"codec_type": "video", "codec_name": "h264"}, '
+        '{"codec_type": "audio", "codec_name": "aac"}'
+        ']}'
+    )
+    with patch("app.worker.downloader._run_ffmpeg", return_value=_completed(stdout=stdout)):
+        assert _probe_codec_names(Path("/tmp/x.mp4")) == {"video": "h264", "audio": "aac"}
+
+
+def test_probe_codec_names_empty_on_error():
+    with patch("app.worker.downloader._run_ffmpeg", return_value=_completed(returncode=1, stderr="bad")):
+        assert _probe_codec_names(Path("/tmp/x.mp4")) == {}
+
+
+def test_probe_codec_names_empty_on_timeout():
+    with patch("app.worker.downloader._run_ffmpeg", side_effect=subprocess.TimeoutExpired("ffprobe", 20)):
+        assert _probe_codec_names(Path("/tmp/x.mp4")) == {}
+
+
+def test_log_media_debug_info_returns_codecs(caplog):
+    import logging
+    with patch("app.worker.downloader._probe_codec_names", return_value={"video": "h264", "audio": "aac"}):
+        with caplog.at_level(logging.INFO, logger="app.worker.downloader"):
+            result = log_media_debug_info(Path("/tmp/x.mp4"))
+    assert result == {"video": "h264", "audio": "aac"}
+    assert "vcodec=h264" in caplog.text
+    assert "acodec=aac" in caplog.text
+
+
+def test_log_media_debug_info_warns_on_risky_codec(caplog):
+    import logging
+    with patch("app.worker.downloader._probe_codec_names", return_value={"video": "vp9", "audio": "opus"}):
+        with caplog.at_level(logging.WARNING, logger="app.worker.downloader"):
+            log_media_debug_info(Path("/tmp/x.mp4"), context="request=1")
+    assert "static frame" in caplog.text
+    assert "request=1" in caplog.text
+
+
+def test_log_media_debug_info_no_warning_for_h264(caplog):
+    import logging
+    with patch("app.worker.downloader._probe_codec_names", return_value={"video": "h264", "audio": "aac"}):
+        with caplog.at_level(logging.WARNING, logger="app.worker.downloader"):
+            log_media_debug_info(Path("/tmp/x.mp4"))
+    assert "static frame" not in caplog.text
+
+
+def test_log_media_debug_info_warns_on_av1(caplog):
+    import logging
+    with patch("app.worker.downloader._probe_codec_names", return_value={"video": "av1", "audio": "aac"}):
+        with caplog.at_level(logging.WARNING, logger="app.worker.downloader"):
+            log_media_debug_info(Path("/tmp/x.mp4"))
+    assert "static frame" in caplog.text
 
 
 # ---------------------------------------------------------------------------

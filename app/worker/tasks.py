@@ -23,6 +23,7 @@ from app.worker.downloader import (
     cookie_file_for_url,
     download_video,
     is_active_livestream,
+    log_media_debug_info,
     probe_video_dimensions,
     validate_media_file,
 )
@@ -341,6 +342,9 @@ def process_download_request(self, request_id: int) -> None:
             )
 
             validate_media_file(file_path, req.quality)
+            log_media_debug_info(
+                file_path, context=f"request={request_id} url={req.normalized_url} quality={req.quality}"
+            )
 
             file_size_bytes = file_path.stat().st_size
             size_mb = file_size_bytes / (1024 * 1024)

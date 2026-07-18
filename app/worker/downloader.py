@@ -272,6 +272,74 @@ def _probe_stream_types(file_path: Path) -> set[str]:
     }
 
 
+# Codecs Telegram's own clients are known to mis-render inside an MP4
+# container: ffmpeg decodes them fine (so validate_media_file's decode check
+# passes), but mobile/desktop Telegram apps show only the first frame while
+# audio keeps playing. See app/utils/quality.py for the download-time
+# mitigation (H.264 preferred in every format-selector tier).
+_RISKY_TELEGRAM_VIDEO_CODECS = {"vp9", "av1"}
+
+
+def _probe_codec_names(file_path: Path) -> dict[str, str]:
+    """Return {"video": codec_name, "audio": codec_name} for the given file.
+
+    Unlike _probe_stream_types (which only checks presence/type), this reads
+    the actual codec so we can flag combinations that decode fine locally but
+    are known to break Telegram's own video player (see
+    _RISKY_TELEGRAM_VIDEO_CODECS above).
+    """
+    command = [
+        "ffprobe", "-v", "error",
+        "-show_entries", "stream=codec_type,codec_name",
+        "-of", "json", str(file_path),
+    ]
+    try:
+        result = _run_ffmpeg(command, timeout=_FFPROBE_TIMEOUT)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        logger.warning("ffprobe codec probe failed for %s: %s", file_path, exc)
+        return {}
+    if result.returncode != 0:
+        return {}
+    try:
+        data = json.loads(result.stdout)
+    except json.JSONDecodeError:
+        return {}
+
+    codecs: dict[str, str] = {}
+    for stream in data.get("streams") or []:
+        if not isinstance(stream, dict):
+            continue
+        codec_type = str(stream.get("codec_type") or "").lower()
+        codec_name = str(stream.get("codec_name") or "").lower()
+        if codec_type in ("video", "audio") and codec_type not in codecs:
+            codecs[codec_type] = codec_name
+    return codecs
+
+
+def log_media_debug_info(file_path: Path, *, context: str = "") -> dict[str, str]:
+    """Log the actual codecs of a downloaded/processed file and flag risky ones.
+
+    Call this right after a successful download so a "static image with
+    sound" report can be diagnosed from the logs afterwards: grep for the
+    request/URL and see exactly which vcodec/acodec ended up in the file,
+    instead of guessing after the fact.
+    """
+    codecs = _probe_codec_names(file_path)
+    vcodec = codecs.get("video", "unknown")
+    acodec = codecs.get("audio", "unknown")
+    prefix = f"{context}: " if context else ""
+    logger.info("%sfile=%s vcodec=%s acodec=%s", prefix, file_path.name, vcodec, acodec)
+    if vcodec in _RISKY_TELEGRAM_VIDEO_CODECS:
+        logger.warning(
+            "%s%s ended up with vcodec=%s — Telegram clients are known to render "
+            "this as a static frame with audio still playing, even though ffmpeg "
+            "decodes it fine. The H.264-first format selector could not find an "
+            "H.264 stream for this source.",
+            prefix, file_path.name, vcodec,
+        )
+    return codecs
+
+
 def _streams_are_decodable(file_path: Path) -> bool:
     command = [
         "ffmpeg", "-v", "error", "-xerror", "-i", str(file_path),
