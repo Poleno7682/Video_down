@@ -570,7 +570,8 @@ def test_ensure_telegram_compatible_video_passthrough_for_h264():
     mock_transcode.assert_not_called()
 
 
-def test_ensure_telegram_compatible_video_transcodes_av1():
+def test_ensure_telegram_compatible_video_transcodes_av1(caplog):
+    import logging
     with tempfile.TemporaryDirectory() as tmp:
         video = Path(tmp) / "video.mp4"
         video.write_bytes(b"x")
@@ -578,11 +579,13 @@ def test_ensure_telegram_compatible_video_transcodes_av1():
         transcoded.write_bytes(b"y")
 
         with patch("app.worker.downloader._transcode_to_h264", return_value=transcoded) as mock_transcode:
-            result = ensure_telegram_compatible_video(video, {"video": "av1", "audio": "aac"})
+            with caplog.at_level(logging.INFO, logger="app.worker.downloader"):
+                result = ensure_telegram_compatible_video(video, {"video": "av1", "audio": "aac"})
 
         mock_transcode.assert_called_once_with(video)
         assert result == transcoded
         assert not video.exists()
+        assert "Transcoded" in caplog.text
 
 
 def test_ensure_telegram_compatible_video_transcodes_vp9():
@@ -598,14 +601,17 @@ def test_ensure_telegram_compatible_video_transcodes_vp9():
         assert result == transcoded
 
 
-def test_ensure_telegram_compatible_video_keeps_original_on_transcode_failure():
+def test_ensure_telegram_compatible_video_keeps_original_on_transcode_failure(caplog):
+    import logging
     with tempfile.TemporaryDirectory() as tmp:
         video = Path(tmp) / "video.mp4"
         video.write_bytes(b"x")
         with patch("app.worker.downloader._transcode_to_h264", return_value=None):
-            result = ensure_telegram_compatible_video(video, {"video": "av1", "audio": "aac"})
+            with caplog.at_level(logging.WARNING, logger="app.worker.downloader"):
+                result = ensure_telegram_compatible_video(video, {"video": "av1", "audio": "aac"})
         assert result == video
         assert video.exists()
+        assert "sending the original" in caplog.text
 
 
 # ---------------------------------------------------------------------------

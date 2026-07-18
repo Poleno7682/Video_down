@@ -383,7 +383,12 @@ def ensure_telegram_compatible_video(file_path: Path, codecs: dict[str, str]) ->
         return file_path
     transcoded = _transcode_to_h264(file_path)
     if transcoded is None:
+        logger.warning(
+            "H.264 transcode of %s failed — sending the original vcodec=%s file as-is.",
+            file_path.name, vcodec,
+        )
         return file_path
+    logger.info("Transcoded %s (vcodec=%s) to H.264: %s", file_path.name, vcodec, transcoded.name)
     file_path.unlink(missing_ok=True)
     return transcoded
 
