@@ -392,7 +392,11 @@ def compress_to_size_limit(file_path: Path, max_mb: int, timeout: int = _COMPRES
         command = [
             "ffmpeg", "-y", "-nostats", "-i", str(file_path),
             "-map", "0:v:0", "-map", "0:a?",
-            "-vf", f"scale='min({attempt['width']},iw)':-2,fps={attempt['fps']}",
+            # setsar=1 forces square pixels on the output: some source clips
+            # carry a non-1:1 sample aspect ratio (anamorphic encodes), which
+            # would otherwise leave stale SAR metadata pointing at the
+            # pre-scale pixel grid and make players stretch/squash the frame.
+            "-vf", f"scale='min({attempt['width']},iw)':-2,setsar=1,fps={attempt['fps']}",
             "-c:v", "libx264", "-preset", "veryfast",
             "-b:v", f"{video_kbps}k", "-maxrate", f"{video_kbps}k", "-bufsize", f"{video_kbps * 2}k",
             "-c:a", "aac", "-b:a", f"{audio_kbps}k",

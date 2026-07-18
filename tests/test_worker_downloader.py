@@ -529,6 +529,27 @@ def test_compress_to_size_limit_returns_smallest_successful_attempt():
         assert result.stat().st_size == 20 * 1024 * 1024
 
 
+def test_compress_to_size_limit_forces_setsar_1():
+    """Guards against stale non-1:1 sample aspect ratio metadata stretching
+    the output frame after scaling (anamorphic source clips)."""
+    with tempfile.TemporaryDirectory() as tmp:
+        src = Path(tmp) / "video.mp4"
+        src.write_bytes(b"x" * (100 * 1024 * 1024))
+        captured_commands = []
+
+        def fake_run(command, *, timeout, cwd=None):
+            captured_commands.append(command)
+            Path(command[-1]).write_bytes(b"y" * (10 * 1024 * 1024))
+            return _completed(returncode=0)
+
+        with patch("app.worker.downloader._probe_duration_seconds", return_value=60.0), \
+             patch("app.worker.downloader._run_ffmpeg", side_effect=fake_run):
+            compress_to_size_limit(src, max_mb=30)
+
+        vf_arg = captured_commands[0][captured_commands[0].index("-vf") + 1]
+        assert "setsar=1" in vf_arg
+
+
 def test_compress_to_size_limit_returns_none_when_all_attempts_fail():
     with tempfile.TemporaryDirectory() as tmp:
         src = Path(tmp) / "video.mp4"
