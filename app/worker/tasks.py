@@ -159,17 +159,32 @@ def _try_refresh_google_cookies(repo: _GoogleCookieRepo, user_id: int) -> bool:
 def _handle_task_failure(
     repo: Repository,
     request_id: int,
-    req: DownloadRequest,
+    chat_id: int,
+    status_message_id: int | None,
+    video_id: int | None,
     exc: Exception,
     *,
     cookies_were_used: bool = False,
     cookie_refreshed: bool = False,
 ) -> None:
-    """Record the failure in the DB and send a Telegram notification."""
+    """Record the failure in the DB and send a Telegram notification.
+
+    Takes plain values rather than the DownloadRequest ORM object: by the
+    time this runs the session may have just failed a commit (e.g. a
+    transient DB connection drop), and touching an ORM attribute that isn't
+    already loaded would trigger a lazy-load on a broken session — masking
+    the real error behind a PendingRollbackError and skipping the user
+    notification below entirely.
+    """
     error_msg = f"{type(exc).__name__}: {exc}"
-    repo.update_request_status(request_id, DownloadStatus.failed, error=error_msg, finished=True)
-    if req.video_id:
-        repo.mark_video_failed(req.video_id, error_msg)
+    try:
+        repo.update_request_status(request_id, DownloadStatus.failed, error=error_msg, finished=True)
+        if video_id:
+            repo.mark_video_failed(video_id, error_msg)
+    except Exception:
+        # DB is still unhappy — the user still deserves a Telegram message
+        # below, which needs no DB access at all.
+        logger.exception("Could not persist failure status for request %s", request_id)
 
     if cookie_refreshed:
         message = "🔄 YouTube cookies автоматически обновлены. Отправь ссылку ещё раз."
@@ -181,7 +196,7 @@ def _handle_task_failure(
         message = _STALE_COOKIE_FAILURE if cookies_were_used else _COOKIE_FAILURE
     else:
         message = _GENERIC_FAILURE
-    edit_status(req.chat_id, req.status_message_id, message)
+    edit_status(chat_id, status_message_id, message)
 
 
 def _try_serve_from_cache(
@@ -275,10 +290,24 @@ def process_download_request(self, request_id: int) -> None:
             logger.warning("Request %s not found", request_id)
             return
 
+        # Snapshot the plain values cleanup/failure-handling needs up front.
+        # If a later commit fails (e.g. a transient DB connection drop), the
+        # SQLAlchemy session enters a "pending rollback" state where any
+        # lazy-load of an ORM attribute raises PendingRollbackError — which
+        # would otherwise mask the real error and skip releasing the user's
+        # download slot / notifying them, leaving them locked out silently.
+        user_id = req.user_id
+        chat_id = req.chat_id
+        status_message_id = req.status_message_id
+        video_id = req.video_id
+        url_hash = req.url_hash
+        quality = req.quality
+        normalized_url = req.normalized_url
+
         max_active = get_limit("max_active_downloads_per_user", settings, redis)
         max_duration = get_limit("max_download_duration_seconds", settings, redis)
         if max_active > 0 and not limiter.acquire_user_download_slot(
-            req.user_id, max_active, max_duration
+            user_id, max_active, max_duration
         ):
             repo.update_request_status(
                 request_id,
@@ -286,7 +315,7 @@ def process_download_request(self, request_id: int) -> None:
                 error="Too many active downloads for user",
                 finished=True,
             )
-            edit_status(req.chat_id, req.status_message_id, "⚠️ У тебя уже есть активная загрузка. Попробуй позже.")
+            edit_status(chat_id, status_message_id, "⚠️ У тебя уже есть активная загрузка. Попробуй позже.")
             return
 
         video_lock_acquired = False
@@ -297,8 +326,8 @@ def process_download_request(self, request_id: int) -> None:
                 return
 
             video_lock_acquired = limiter.acquire_video_lock(
-                req.url_hash,
-                req.quality,
+                url_hash,
+                quality,
                 get_limit("max_download_duration_seconds", settings, redis),
             )
 
@@ -310,42 +339,42 @@ def process_download_request(self, request_id: int) -> None:
                     finished=True,
                 )
                 edit_status(
-                    req.chat_id,
-                    req.status_message_id,
+                    chat_id,
+                    status_message_id,
                     "⏳ Такое видео уже обрабатывается. Повтори ссылку чуть позже — будет отправлено из кэша.",
                 )
                 return
 
-            if is_active_livestream(req.normalized_url):
+            if is_active_livestream(normalized_url):
                 repo.update_request_status(
                     request_id,
                     DownloadStatus.failed,
                     error="Active livestream, not a finished recording",
                     finished=True,
                 )
-                edit_status(req.chat_id, req.status_message_id, _LIVESTREAM_FAILURE)
+                edit_status(chat_id, status_message_id, _LIVESTREAM_FAILURE)
                 return
 
             repo.update_request_status(request_id, DownloadStatus.downloading)
-            edit_status(req.chat_id, req.status_message_id, "⬇️ Скачиваю видео...")
+            edit_status(chat_id, status_message_id, "⬇️ Скачиваю видео...")
 
-            user_cookie_path = _materialize_user_cookies(repo, req.user_id, req.normalized_url)
+            user_cookie_path = _materialize_user_cookies(repo, user_id, normalized_url)
             cookies_were_used = user_cookie_path is not None or cookie_file_for_url(
-                req.normalized_url, settings
+                normalized_url, settings
             ) is not None
             file_path, info = download_video(
-                req.normalized_url,
-                req.quality,
+                normalized_url,
+                quality,
                 settings,
-                progress_hook=_build_progress_hook(req.chat_id, req.status_message_id),
+                progress_hook=_build_progress_hook(chat_id, status_message_id),
                 cookie_file=user_cookie_path,
                 embed_subtitles=settings.embed_subtitles,
             )
 
-            validate_media_file(file_path, req.quality)
-            debug_context = f"request={request_id} url={req.normalized_url} quality={req.quality}"
+            validate_media_file(file_path, quality)
+            debug_context = f"request={request_id} url={normalized_url} quality={quality}"
             codecs = log_media_debug_info(file_path, context=debug_context)
-            if req.quality != "audio":
+            if quality != "audio":
                 file_path = ensure_telegram_compatible_video(file_path, codecs)
 
             file_size_bytes = file_path.stat().st_size
@@ -354,8 +383,8 @@ def process_download_request(self, request_id: int) -> None:
             max_mb = get_limit("max_file_mb", settings, redis)
             if max_mb > 0 and size_mb > max_mb:
                 edit_status(
-                    req.chat_id,
-                    req.status_message_id,
+                    chat_id,
+                    status_message_id,
                     f"⚠️ Файл слишком большой ({size_mb:.1f} MB). Пробую сжать под лимит {max_mb} MB...",
                 )
                 compressed_path = compress_to_size_limit(file_path, max_mb)
@@ -373,8 +402,8 @@ def process_download_request(self, request_id: int) -> None:
                     finished=True,
                 )
                 edit_status(
-                    req.chat_id,
-                    req.status_message_id,
+                    chat_id,
+                    status_message_id,
                     f"⚠️ Файл слишком большой: {size_mb:.1f} MB. Лимит: {max_mb} MB.",
                 )
                 file_path.unlink(missing_ok=True)
@@ -384,18 +413,31 @@ def process_download_request(self, request_id: int) -> None:
 
         except Exception as exc:
             logger.exception("Failed request %s", request_id)
-            refresh_key = _google_refresh_key(req.user_id)
-            recently_refreshed = bool(redis.exists(refresh_key))
-            cookie_refreshed = (
-                not recently_refreshed
-                and cookies_were_used
-                and (_is_cookie_error(exc) or _is_youtube_challenge_error(exc))
-                and _try_refresh_google_cookies(repo, req.user_id)
-            )
-            if cookie_refreshed:
-                redis.setex(refresh_key, _GOOGLE_REFRESH_COOLDOWN, "1")
+            try:
+                # Required after a failed flush/commit: SQLAlchemy refuses any
+                # further use of the session (incl. lazy-loading req.*
+                # attributes) until the aborted transaction is rolled back.
+                session.rollback()
+            except Exception:
+                logger.exception("Rollback failed for request %s", request_id)
+
+            refresh_key = _google_refresh_key(user_id)
+            cookie_refreshed = False
+            try:
+                recently_refreshed = bool(redis.exists(refresh_key))
+                cookie_refreshed = (
+                    not recently_refreshed
+                    and cookies_were_used
+                    and (_is_cookie_error(exc) or _is_youtube_challenge_error(exc))
+                    and _try_refresh_google_cookies(repo, user_id)
+                )
+                if cookie_refreshed:
+                    redis.setex(refresh_key, _GOOGLE_REFRESH_COOLDOWN, "1")
+            except Exception:
+                logger.exception("Cookie-refresh check failed for request %s", request_id)
+
             _handle_task_failure(
-                repo, request_id, req, exc,
+                repo, request_id, chat_id, status_message_id, video_id, exc,
                 cookies_were_used=cookies_were_used,
                 cookie_refreshed=cookie_refreshed,
             )
@@ -404,6 +446,9 @@ def process_download_request(self, request_id: int) -> None:
         finally:
             if user_cookie_path is not None:
                 user_cookie_path.unlink(missing_ok=True)
-            limiter.release_user_download_slot(req.user_id)
+            # Redis-only cleanup — must never depend on the DB session, which
+            # may still be unusable if the except block above couldn't
+            # recover it (e.g. the DB is genuinely down, not just blipping).
+            limiter.release_user_download_slot(user_id)
             if video_lock_acquired:
-                limiter.release_video_lock(req.url_hash, req.quality)
+                limiter.release_video_lock(url_hash, quality)

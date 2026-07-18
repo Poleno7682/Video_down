@@ -61,12 +61,10 @@ class TestGetCaption:
 class TestHandleTaskFailure:
     def test_updates_status_and_notifies(self):
         repo = MagicMock()
-        req = MagicMock()
-        req.video_id = 1
         exc = ValueError("test error")
 
         with patch("app.worker.tasks.edit_status") as mock_edit:
-            _handle_task_failure(repo, 42, req, exc)
+            _handle_task_failure(repo, 42, 100, 200, 1, exc)
 
         repo.update_request_status.assert_called_once_with(
             42, DownloadStatus.failed, error="ValueError: test error", finished=True
@@ -76,45 +74,44 @@ class TestHandleTaskFailure:
 
     def test_no_video_id_skips_mark_failed(self):
         repo = MagicMock()
-        req = MagicMock()
-        req.video_id = None
         with patch("app.worker.tasks.edit_status"):
-            _handle_task_failure(repo, 1, req, RuntimeError("oops"))
+            _handle_task_failure(repo, 1, 100, 200, None, RuntimeError("oops"))
         repo.mark_video_failed.assert_not_called()
 
     def test_error_message_format(self):
         repo = MagicMock()
-        req = MagicMock()
-        req.video_id = None
         with patch("app.worker.tasks.edit_status"):
-            _handle_task_failure(repo, 5, req, RuntimeError("bad network"))
+            _handle_task_failure(repo, 5, 100, 200, None, RuntimeError("bad network"))
         assert repo.update_request_status.call_args[1]["error"] == "RuntimeError: bad network"
 
     def test_cookie_error_shows_cookie_message(self):
         repo = MagicMock()
-        req = MagicMock()
-        req.video_id = None
         exc = RuntimeError("ERROR: Sign in to confirm you're not a bot. Use --cookies")
         with patch("app.worker.tasks.edit_status") as mock_edit:
-            _handle_task_failure(repo, 1, req, exc)
+            _handle_task_failure(repo, 1, 100, 200, None, exc)
         assert mock_edit.call_args[0][2] == _COOKIE_FAILURE
 
     def test_stale_cookie_error_when_cookies_were_used(self):
         repo = MagicMock()
-        req = MagicMock()
-        req.video_id = None
         exc = RuntimeError("ERROR: Sign in to confirm you're not a bot. Use --cookies")
         with patch("app.worker.tasks.edit_status") as mock_edit:
-            _handle_task_failure(repo, 1, req, exc, cookies_were_used=True)
+            _handle_task_failure(repo, 1, 100, 200, None, exc, cookies_were_used=True)
         assert mock_edit.call_args[0][2] == _STALE_COOKIE_FAILURE
 
     def test_generic_error_shows_generic_message(self):
         repo = MagicMock()
-        req = MagicMock()
-        req.video_id = None
         with patch("app.worker.tasks.edit_status") as mock_edit:
-            _handle_task_failure(repo, 1, req, RuntimeError("disk full"))
+            _handle_task_failure(repo, 1, 100, 200, None, RuntimeError("disk full"))
         assert mock_edit.call_args[0][2] == _GENERIC_FAILURE
+
+    def test_db_write_failure_still_notifies_user(self):
+        """If persisting the failure itself throws (DB still down), the
+        Telegram notification — which needs no DB access — must still fire."""
+        repo = MagicMock()
+        repo.update_request_status.side_effect = RuntimeError("db still down")
+        with patch("app.worker.tasks.edit_status") as mock_edit:
+            _handle_task_failure(repo, 1, 100, 200, None, RuntimeError("original error"))
+        mock_edit.assert_called_once_with(100, 200, _GENERIC_FAILURE)
 
 
 class TestIsCookieError:
@@ -493,6 +490,60 @@ class TestProcessDownloadRequest:
                 with pytest.raises(RuntimeError):
                     process_download_request.apply(args=[1])
         limiter.release_video_lock.assert_called_once()
+
+    def test_db_commit_failure_during_upload_still_cleans_up(self):
+        """Reproduces a transient DB blip (e.g. Postgres SSL connection drop)
+        during _upload_and_cache's status update. Before the fix, the
+        SQLAlchemy session would be left in "pending rollback" state and any
+        subsequent lazy-load of req.user_id/req.url_hash inside the except/
+        finally blocks raised PendingRollbackError — masking the original
+        error, skipping the user notification, and leaking the download slot
+        and video lock for the full rate-limit window."""
+        req = _make_req()
+        settings = _make_settings()
+        session = _make_session()
+        repo = MagicMock()
+        repo.get_request.return_value = req
+        repo.get_ready_video.return_value = None
+        repo.get_user_cookies.return_value = None
+        db_error = RuntimeError("SSL connection has been closed unexpectedly")
+        # 1st call = DownloadStatus.downloading (succeeds), 2nd call =
+        # DownloadStatus.sending inside _upload_and_cache — this is exactly
+        # where the real incident's traceback failed.
+        repo.update_request_status.side_effect = [None, db_error]
+
+        limiter = MagicMock()
+        limiter.acquire_user_download_slot.return_value = True
+        limiter.acquire_video_lock.return_value = True
+
+        fake_file = MagicMock(spec=Path)
+        fake_file.stat.return_value.st_size = 5 * 1024 * 1024
+
+        redis_mock = MagicMock()
+        redis_mock.get.return_value = None
+        redis_mock.exists.return_value = False
+
+        with patch("app.worker.tasks.get_settings", return_value=settings), \
+             patch("app.worker.tasks.get_redis", return_value=redis_mock), \
+             patch("app.worker.tasks.RateLimiter", return_value=limiter), \
+             patch("app.worker.tasks.get_session", return_value=session), \
+             patch("app.worker.tasks.Repository", return_value=repo), \
+             patch("app.worker.tasks.edit_status") as mock_edit, \
+             patch("app.worker.tasks.is_active_livestream", return_value=False), \
+             patch("app.worker.tasks.validate_media_file"), \
+             patch("app.worker.tasks.log_media_debug_info", return_value={}), \
+             patch("app.worker.tasks.download_video", return_value=(fake_file, {"title": "T"})):
+            with pytest.raises(RuntimeError, match="SSL connection"):
+                process_download_request.apply(args=[1])
+
+        # Session must be rolled back before any further DB access is attempted.
+        session.rollback.assert_called_once()
+        # Cleanup must use the plain values snapshotted up front, not a
+        # lazy-load through the now-recovering session.
+        limiter.release_user_download_slot.assert_called_once_with(req.user_id)
+        limiter.release_video_lock.assert_called_once_with(req.url_hash, req.quality)
+        # The user must still be notified despite the DB failure.
+        mock_edit.assert_called_with(req.chat_id, req.status_message_id, _GENERIC_FAILURE)
 
 
 # ---------------------------------------------------------------------------
