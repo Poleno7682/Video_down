@@ -18,6 +18,7 @@ from app.utils.caption import get_caption
 from app.utils.platforms import detect_platform
 from app.worker.celery_app import celery_app
 from app.worker.downloader import (
+    COMPRESSION_TIMEOUT,
     MediaValidationError,
     compress_to_size_limit,
     cookie_file_for_url,
@@ -50,11 +51,15 @@ _COOKIE_ERROR_MARKERS = (
 )
 
 # YouTube JS-challenge failures often surface as "only images" / missing formats.
+# Each marker is a substring, or a tuple of substrings that must ALL be
+# present (used where a single substring alone would false-positive on
+# unrelated errors, e.g. "requested format is not available" by itself).
 _CHALLENGE_ERROR_MARKERS = (
     "challenge solving failed",
     "only images are available",
     "remote components",
     "ejs:",
+    ("requested format is not available", "youtube"),
 )
 
 _GENERIC_FAILURE = (
@@ -94,21 +99,37 @@ _CORRUPT_MEDIA_FAILURE = (
 # Redis key TTL after a Google OAuth cookie refresh to prevent refresh loops.
 _GOOGLE_REFRESH_COOLDOWN = 300  # seconds
 
+# max_download_duration_seconds only bounds the download itself; after that,
+# _upload_and_cache's pipeline can still run ensure_telegram_compatible_video's
+# H.264 transcode (up to COMPRESSION_TIMEOUT) and, separately, compress_to_size_limit
+# for an oversized file (up to another COMPRESSION_TIMEOUT). Without this buffer
+# the video dedup lock could expire mid-processing and let a duplicate concurrent
+# download of the same video/quality start.
+_VIDEO_LOCK_POST_PROCESSING_BUFFER_SECONDS = 2 * COMPRESSION_TIMEOUT
+
 
 def _google_refresh_key(user_id: int) -> str:
     return f"google_cookie_refresh:{user_id}"
 
 
+def _text_matches_markers(text: str, markers: tuple[str | tuple[str, ...], ...]) -> bool:
+    """A marker matches if it's a substring present in text, or (for a tuple
+    marker) if every substring in it is present."""
+    for marker in markers:
+        if isinstance(marker, tuple):
+            if all(part in text for part in marker):
+                return True
+        elif marker in text:
+            return True
+    return False
+
+
 def _is_cookie_error(exc: Exception) -> bool:
-    text = str(exc).lower()
-    return any(marker in text for marker in _COOKIE_ERROR_MARKERS)
+    return _text_matches_markers(str(exc).lower(), _COOKIE_ERROR_MARKERS)
 
 
 def _is_youtube_challenge_error(exc: Exception) -> bool:
-    text = str(exc).lower()
-    if "requested format is not available" in text and "youtube" in text:
-        return True
-    return any(marker in text for marker in _CHALLENGE_ERROR_MARKERS)
+    return _text_matches_markers(str(exc).lower(), _CHALLENGE_ERROR_MARKERS)
 
 
 class _GoogleCookieRepo(Protocol):
@@ -133,7 +154,10 @@ def _materialize_user_cookies(repo: CookieRepository, user_id: int, url: str) ->
     try:
         with open(fd, "w", encoding="utf-8") as f:
             f.write(cookies_text)
-    except OSError:
+    except Exception:
+        # Broad on purpose: whatever fails after mkstemp() (not just OSError),
+        # the temp file it created must not be left behind — the caller falls
+        # back to the global cookie file when this returns None.
         path.unlink(missing_ok=True)
         return None
     return path
@@ -153,6 +177,7 @@ def _try_refresh_google_cookies(repo: _GoogleCookieRepo, user_id: int) -> bool:
         repo.set_user_cookies(user_id, "youtube", new_cookies)
         return True
     except Exception:
+        logger.exception("Google cookie refresh failed for user %s", user_id)
         return False
 
 
@@ -499,7 +524,8 @@ def process_download_request(self, request_id: int) -> None:
                 return
 
             video_lock_acquired = _acquire_video_lock_or_reject(
-                sender, repo, limiter, request_id, chat_id, status_message_id, url_hash, quality, max_duration
+                sender, repo, limiter, request_id, chat_id, status_message_id, url_hash, quality,
+                max_duration + _VIDEO_LOCK_POST_PROCESSING_BUFFER_SECONDS,
             )
             if not video_lock_acquired:
                 return

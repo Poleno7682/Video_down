@@ -19,8 +19,8 @@ logger = logging.getLogger(__name__)
 
 _FFPROBE_TIMEOUT = 20
 _DECODE_CHECK_SECONDS = 2
-_COMPRESSION_TIMEOUT = 600
-_SUBTITLE_TIMEOUT = 600
+COMPRESSION_TIMEOUT = 600
+SUBTITLE_TIMEOUT = 600
 _SUBTITLE_LANGS = ["ru", "en"]
 _SUBTITLE_EXTENSIONS = {".srt", ".vtt", ".ass"}
 
@@ -223,7 +223,7 @@ def _burn_subtitles(video_path: Path, subtitle_path: Path) -> Path | None:
             output_path.name,
         ]
         try:
-            result = _run_ffmpeg(command, timeout=_SUBTITLE_TIMEOUT, cwd=str(work_dir))
+            result = _run_ffmpeg(command, timeout=SUBTITLE_TIMEOUT, cwd=str(work_dir))
         except (OSError, subprocess.TimeoutExpired) as exc:
             logger.warning("Subtitle burn-in failed for %s: %s", video_path, exc)
             return None
@@ -333,7 +333,7 @@ def log_media_debug_info(file_path: Path, *, context: str = "") -> dict[str, str
     return codecs
 
 
-def _transcode_to_h264(file_path: Path, timeout: int = _COMPRESSION_TIMEOUT) -> Path | None:
+def _transcode_to_h264(file_path: Path, timeout: int = COMPRESSION_TIMEOUT) -> Path | None:
     """Re-encode file_path's video track to H.264/AAC, same resolution/bitrate ballpark.
 
     Used as a last-resort fix when the source only offered a codec Telegram
@@ -472,7 +472,7 @@ def _probe_duration_seconds(file_path: Path) -> float | None:
     return duration if duration > 0 else None
 
 
-def compress_to_size_limit(file_path: Path, max_mb: int, timeout: int = _COMPRESSION_TIMEOUT) -> Path | None:
+def compress_to_size_limit(file_path: Path, max_mb: int, timeout: int = COMPRESSION_TIMEOUT) -> Path | None:
     """Re-encode file_path with decreasing quality until it fits under max_mb.
 
     Tries a few resolution/bitrate presets, keeping the smallest successful
