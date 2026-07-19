@@ -1,6 +1,6 @@
+from app.utils.codecs import HEVC_VCODEC_FILTER as _HEVC_VCODEC_FILTER
+from app.utils.codecs import H264_VCODEC_FILTER as _H264_VCODEC_FILTER
 from app.utils.platforms import FACEBOOK, detect_platform
-
-_H264_VCODEC_FILTER = "[vcodec~='^(avc1|h264)']"
 
 
 def _video_format(max_height: int | None) -> str:
@@ -10,22 +10,22 @@ def _video_format(max_height: int | None) -> str:
     vertical streams have aspect_ratio < 1 (width/height). We try those first,
     then fall back to the usual landscape selectors.
 
-    H.264 is preferred in every tier: when merged into MP4 with -c copy,
-    VP9 (WebM codec) ends up in a non-standard VP9-in-MP4 container that many
-    Telegram clients cannot decode as video, showing only the first keyframe
-    (static image) while audio plays normally. AV1-in-MP4 has similar issues on
-    older clients. Falling back to any codec is still offered so downloads work
-    even when H.264 is unavailable. Sites report the codec name differently —
-    YouTube uses "avc1", TikTok/others use "h264" — so the filter matches both.
+    Codec preference order in every tier is H.264, then HEVC, then any codec
+    (see app.utils.codecs for why H.264 and HEVC are separate tiers rather
+    than merged into one "safe codec" tier, and why VP9/AV1 are avoided at
+    all: merged into MP4 with -c copy, they can end up in a non-standard
+    container that many Telegram clients render as a static frame with only
+    audio playing). Falling back to any codec is still offered so downloads
+    work even when neither H.264 nor HEVC is available.
 
-    The H.264 preference also applies to the already-muxed "best[...]" tiers,
-    not just the bestvideo+bestaudio split ones: sites like TikTok never offer
-    separate video-only/audio-only formats, so bestvideo+bestaudio never
-    matches anything there and every download falls through to "best[...]".
-    Without an explicit codec preference there, yt-dlp's default format sort
-    picks by resolution/HDR long before codec or even audio presence, which
-    can select a higher-resolution but mislabeled video-only format over a
-    lower-resolution H.264 format that actually has audio.
+    The codec preference also applies to the already-muxed "best[...]"
+    tiers, not just the bestvideo+bestaudio split ones: sites like TikTok
+    never offer separate video-only/audio-only formats, so bestvideo+bestaudio
+    never matches anything there and every download falls through to
+    "best[...]". Without an explicit codec preference there, yt-dlp's
+    default format sort picks by resolution/HDR long before codec or even
+    audio presence, which can select a higher-resolution but mislabeled
+    video-only format over a lower-resolution format that actually has audio.
 
     max_height caps the quality-defining SHORT edge of the frame, not the
     literal pixel "height" field — for a portrait clip that's the width, not
@@ -42,20 +42,26 @@ def _video_format(max_height: int | None) -> str:
     portrait = (
         # H.264 portrait — best MP4 compatibility
         f"bestvideo{_H264_VCODEC_FILTER}[aspect_ratio<1]{w_filter}+bestaudio[ext=m4a]/"
+        # HEVC portrait — only reached when no H.264 format exists at all
+        f"bestvideo{_HEVC_VCODEC_FILTER}[aspect_ratio<1]{w_filter}+bestaudio[ext=m4a]/"
         # Any codec portrait (AV1 / VP9 fallback)
         f"bestvideo[aspect_ratio<1]{w_filter}+bestaudio/"
-        # Combined (already-muxed) portrait stream, H.264 preferred —
+        # Combined (already-muxed) portrait stream, H.264 then HEVC preferred —
         # common on TikTok/Instagram, which never split video/audio.
         f"best{_H264_VCODEC_FILTER}[aspect_ratio<1]{w_filter}/"
+        f"best{_HEVC_VCODEC_FILTER}[aspect_ratio<1]{w_filter}/"
         f"best[aspect_ratio<1]{w_filter}"
     )
     landscape = (
         # H.264 landscape
         f"bestvideo{_H264_VCODEC_FILTER}{h_filter}+bestaudio[ext=m4a]/"
+        # HEVC landscape
+        f"bestvideo{_HEVC_VCODEC_FILTER}{h_filter}+bestaudio[ext=m4a]/"
         # Any codec landscape
         f"bestvideo{h_filter}+bestaudio/"
-        # Combined landscape, H.264 preferred
+        # Combined landscape, H.264 then HEVC preferred
         f"best{_H264_VCODEC_FILTER}{h_filter}/"
+        f"best{_HEVC_VCODEC_FILTER}{h_filter}/"
         f"best{h_filter}"
     )
     # Absolute last resort for direct CDN links yt-dlp can't fully probe

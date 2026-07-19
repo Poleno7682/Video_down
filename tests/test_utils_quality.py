@@ -141,6 +141,38 @@ class TestFormatSelectorAgainstRealFormatList:
     def test_picks_h264_format_with_real_audio_over_higher_res_h265(self):
         assert self._resolve("720p") == "h264_540p_2685682-0"
 
+    def _hevc_only_formats(self):
+        # Real Facebook DASH formats: no H.264 exists at all for this video,
+        # only two HEVC tiers at different resolutions/bitrates.
+        return [
+            {
+                "format_id": "bytevc1_540p_299618-0", "vcodec": "h265", "acodec": "aac",
+                "width": 576, "height": 1024, "aspect_ratio": round(576 / 1024, 2),
+                "ext": "mp4", "protocol": "https", "tbr": 299, "url": "https://x/540p",
+            },
+            {
+                "format_id": "bytevc1_720p_662411-0", "vcodec": "h265", "acodec": "aac",
+                "width": 720, "height": 1280, "aspect_ratio": round(720 / 1280, 2),
+                "ext": "mp4", "protocol": "https", "tbr": 662, "url": "https://x/720p",
+            },
+        ]
+
+    def test_picks_best_hevc_when_no_h264_available(self):
+        """Real-world case: a Facebook video only offered HEVC formats. HEVC
+        isn't in RISKY_TELEGRAM_VIDEO_CODECS (unlike vp9/av1), so there's no
+        correctness reason to settle for the lower-resolution/lower-bitrate
+        one just because it's the only codec tier we check first."""
+        from yt_dlp import YoutubeDL
+
+        sel = format_selector("720p")
+        ydl = YoutubeDL({"format": sel, "quiet": True})
+        selector_fn = ydl.build_format_selector(sel)
+        ctx = {"formats": self._hevc_only_formats(), "incomplete_formats": False}
+        chosen = list(selector_fn(ctx))
+        result = chosen[0]
+        fid = result["requested_formats"][0]["format_id"] if "requested_formats" in result else result["format_id"]
+        assert fid == "bytevc1_720p_662411-0"
+
 
 class TestFacebookHdFallback:
     def test_prepends_hd_for_facebook_url(self):

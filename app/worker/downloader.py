@@ -15,6 +15,7 @@ from yt_dlp import YoutubeDL
 from yt_dlp.utils import DownloadError
 
 from app.core.config import Settings
+from app.utils.codecs import RISKY_TELEGRAM_VIDEO_CODECS
 from app.utils.platforms import PLATFORM_COOKIE_SETTING, detect_platform
 from app.utils.quality import format_selector, normalize_quality
 
@@ -346,9 +347,9 @@ def _probe_stream_types(file_path: Path) -> set[str]:
 # Codecs Telegram's own clients are known to mis-render inside an MP4
 # container: ffmpeg decodes them fine (so validate_media_file's decode check
 # passes), but mobile/desktop Telegram apps show only the first frame while
-# audio keeps playing. See app/utils/quality.py for the download-time
-# mitigation (H.264 preferred in every format-selector tier).
-_RISKY_TELEGRAM_VIDEO_CODECS = {"vp9", "av1"}
+# audio keeps playing. Single source of truth shared with app/utils/quality.py,
+# whose format selector prefers codecs NOT in this set (see its docstring).
+_RISKY_TELEGRAM_VIDEO_CODECS = RISKY_TELEGRAM_VIDEO_CODECS
 
 
 def _probe_codec_names(file_path: Path) -> dict[str, str]:
