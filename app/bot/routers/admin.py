@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import asyncio
+import logging
+
 from aiogram import F, Router
 from aiogram.filters import BaseFilter, Command
 from aiogram.types import CallbackQuery, Message
@@ -10,8 +13,11 @@ from app.bot.filters import AdminFilter
 from app.core.config import get_settings
 from app.db.repository import ProxyRepository
 from app.db.session import get_session
-from app.keyboards.admin import admin_keyboard, limits_keyboard
+from app.keyboards.admin import admin_keyboard, limits_keyboard, proxy_scheme_keyboard
+from app.services.proxy_awaiting import clear_proxy_awaiting, get_proxy_awaiting, set_proxy_awaiting
 from app.services.redis_client import get_redis
+from app.utils.proxy_check import ProxyCheckError, check_proxy
+from app.utils.proxy_format import parse_proxy_input
 from app.services.runtime_config import (
     EDITABLE_LIMITS,
     clear_awaiting,
@@ -26,6 +32,7 @@ from app.services.runtime_config import (
 )
 
 router = Router()
+logger = logging.getLogger(__name__)
 
 
 def _parse_telegram_id(raw: str) -> int | None:
@@ -65,7 +72,7 @@ def _admin_panel_text(settings, redis) -> str:
         "  /removeuser <code>&lt;id&gt;</code> — удалить из доверенных\n"
         "  /listusers — список доверенных пользователей\n\n"
         "<b>Прокси для yt-dlp (обход антибот-блокировок):</b>\n"
-        "  /addproxy <code>&lt;socks5h://user:pass@host:port&gt;</code>\n"
+        "  /addproxy — добавить (спросит тип и данные, проверит перед сохранением)\n"
         "  /delproxy <code>&lt;id&gt;</code> — /listproxies — список\n\n"
         "<b>Рассылка:</b> /broadcast или кнопка ниже.\n\n"
         "<i>Кнопки ниже: вкл/выкл бот для всех и запуск рассылки.</i>"
@@ -223,21 +230,33 @@ async def list_trusted_users(message: Message) -> None:
 
 _PROXY_SCHEMES = ("socks5://", "socks5h://", "socks4://", "http://", "https://")
 
+_PROXY_FORMATS_HELP = (
+    "Отправьте прокси в одном из форматов:\n"
+    "• <code>IP:PORT</code>\n"
+    "• <code>IP:PORT@LOGIN:PASSWORD</code>\n"
+    "• <code>IP:PORT:LOGIN:PASSWORD</code>\n"
+    "• <code>IP:PORT;LOGIN:PASSWORD</code>\n"
+    "• или полный URL: <code>socks5h://login:pass@host:port</code>\n\n"
+    "Или /cancel для отмены."
+)
+
 
 @router.message(Command("addproxy"), AdminFilter())
 async def add_proxy(message: Message) -> None:
-    parts = (message.text or "").split(maxsplit=1)
-    url = parts[1].strip() if len(parts) >= 2 else ""
-    if not url or not url.startswith(_PROXY_SCHEMES):
-        await message.answer(
-            "Использование: <code>/addproxy socks5h://user:pass@host:port</code>\n\n"
-            "Поддерживаемые схемы: socks5h, socks5, socks4, http, https."
-        )
-        return
+    await message.answer(
+        "Выберите тип прокси:",
+        reply_markup=proxy_scheme_keyboard(),
+    )
 
-    with get_session() as session:
-        proxy = ProxyRepository(session).add_proxy(url, added_by=message.from_user.id)
-    await message.answer(f"✅ Прокси добавлен (id <code>{proxy.id}</code>): <code>{proxy.url}</code>")
+
+@router.callback_query(F.data.startswith("proxy:scheme:"), AdminFilter(alert_on_deny=True))
+async def proxy_scheme_chosen(callback: CallbackQuery) -> None:
+    await callback.answer()
+    scheme = callback.data.split(":", 2)[2]
+    set_proxy_awaiting(callback.from_user.id, scheme, get_redis())
+    await callback.message.answer(
+        f"Тип: <b>{scheme}</b>\n\n{_PROXY_FORMATS_HELP}"
+    )
 
 
 @router.message(Command("delproxy"), AdminFilter())
@@ -263,7 +282,7 @@ async def list_proxies(message: Message) -> None:
 
     if not proxies:
         await message.answer(
-            "Список прокси пуст.\nДобавьте: <code>/addproxy socks5h://user:pass@host:port</code>"
+            "Список прокси пуст.\nДобавьте: /addproxy"
         )
         return
 
@@ -276,6 +295,58 @@ async def list_proxies(message: Message) -> None:
         f"🌐 <b>Прокси для yt-dlp</b> ({len(proxies)}), в порядке перебора:\n\n"
         + "\n".join(lines)
         + "\n\nУдалить: <code>/delproxy &lt;id&gt;</code>"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Proxy input interceptor — catches the proxy string sent after the admin
+# picked a scheme via proxy_scheme_chosen above. Registered before the
+# generic limit-input interceptor / url_handler for the same reason as that
+# one: raw text must not fall through to "try to download this as a URL".
+# ---------------------------------------------------------------------------
+
+class _ProxyAwaitingFilter(BaseFilter):
+    async def __call__(self, message: Message) -> bool:
+        if not _is_admin(message.from_user.id, get_settings()):
+            return False
+        return bool(get_proxy_awaiting(message.from_user.id, get_redis()))
+
+
+@router.message(_ProxyAwaitingFilter(), F.text)
+async def handle_proxy_input(message: Message) -> None:
+    redis = get_redis()
+    admin_id = message.from_user.id
+    scheme = get_proxy_awaiting(admin_id, redis)
+    if not scheme:
+        return
+
+    text = (message.text or "").strip()
+    if text.lower() in ("/cancel", "отмена"):
+        clear_proxy_awaiting(admin_id, redis)
+        await message.answer("❌ Добавление прокси отменено.")
+        return
+
+    proxy_url = parse_proxy_input(text, scheme)
+    if not proxy_url:
+        await message.answer(f"⚠️ Не удалось распознать формат.\n\n{_PROXY_FORMATS_HELP}")
+        return
+
+    status_msg = await message.answer("🔍 Проверяю прокси на YouTube (Sign in to confirm you're not a bot)...")
+    try:
+        await asyncio.to_thread(check_proxy, proxy_url)
+    except ProxyCheckError as exc:
+        await status_msg.edit_text(f"❌ Прокси не прошёл проверку: {exc}\n\nПопробуйте другой или /cancel.")
+        return
+    except Exception as exc:
+        logger.warning("Unexpected error checking proxy %s: %s", proxy_url, exc)
+        await status_msg.edit_text(f"❌ Не удалось проверить прокси: {exc}\n\nПопробуйте другой или /cancel.")
+        return
+
+    clear_proxy_awaiting(admin_id, redis)
+    with get_session() as session:
+        proxy = ProxyRepository(session).add_proxy(proxy_url, added_by=admin_id)
+    await status_msg.edit_text(
+        f"✅ Прокси проверен и добавлен (id <code>{proxy.id}</code>): <code>{proxy.url}</code>"
     )
 
 

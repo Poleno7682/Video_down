@@ -34,6 +34,16 @@ def limits_keyboard(effective_values: dict[str, int]) -> InlineKeyboardMarkup:
     return builder.as_markup()
 
 
+def proxy_scheme_keyboard() -> InlineKeyboardMarkup:
+    """Asks the admin to pick a scheme before entering the proxy itself —
+    needed because the plain IP:PORT[...] formats don't carry a scheme."""
+    builder = InlineKeyboardBuilder()
+    builder.button(text="🧦 SOCKS5", callback_data="proxy:scheme:socks5h")
+    builder.button(text="🔒 HTTPS", callback_data="proxy:scheme:https")
+    builder.adjust(2)
+    return builder.as_markup()
+
+
 def broadcast_cancel_keyboard() -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     builder.button(text="❌ Отменить рассылку", callback_data="broadcast:cancel")

@@ -1,6 +1,6 @@
 from aiogram.types import InlineKeyboardMarkup
 
-from app.keyboards.admin import admin_keyboard
+from app.keyboards.admin import admin_keyboard, proxy_scheme_keyboard
 
 
 def test_admin_keyboard_returns_markup():
@@ -26,3 +26,15 @@ def test_admin_keyboard_has_broadcast_button():
     kb = admin_keyboard(bot_disabled=False)
     buttons = [btn for row in kb.inline_keyboard for btn in row]
     assert any(b.callback_data == "admin:broadcast" for b in buttons)
+
+
+def test_proxy_scheme_keyboard_returns_markup():
+    assert isinstance(proxy_scheme_keyboard(), InlineKeyboardMarkup)
+
+
+def test_proxy_scheme_keyboard_has_socks5_and_https():
+    kb = proxy_scheme_keyboard()
+    buttons = [btn for row in kb.inline_keyboard for btn in row]
+    callback_data = {b.callback_data for b in buttons}
+    assert "proxy:scheme:socks5h" in callback_data
+    assert "proxy:scheme:https" in callback_data
