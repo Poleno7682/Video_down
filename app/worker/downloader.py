@@ -248,22 +248,26 @@ def _embed_subtitles_if_present(file_path: Path, work_dir: Path) -> Path:
     return burned
 
 
-def _probe_stream_types(file_path: Path) -> set[str]:
-    command = [
-        "ffprobe", "-v", "error", "-show_entries", "stream=codec_type",
-        "-of", "json", str(file_path),
-    ]
+def _ffprobe_json(file_path: Path, extra_args: list[str], *, log_label: str) -> dict | None:
+    """Run ffprobe with -of json plus extra_args; return the parsed dict or None on failure."""
+    command = ["ffprobe", "-v", "error", *extra_args, "-of", "json", str(file_path)]
     try:
         result = _run_ffmpeg(command, timeout=_FFPROBE_TIMEOUT)
     except (OSError, subprocess.TimeoutExpired) as exc:
-        logger.warning("ffprobe failed for %s: %s", file_path, exc)
-        return set()
+        logger.warning("ffprobe %s failed for %s: %s", log_label, file_path, exc)
+        return None
     if result.returncode != 0:
-        logger.warning("ffprobe error for %s: %s", file_path, (result.stderr or "").strip())
-        return set()
+        logger.warning("ffprobe %s error for %s: %s", log_label, file_path, (result.stderr or "").strip())
+        return None
     try:
-        data = json.loads(result.stdout)
+        return json.loads(result.stdout)
     except json.JSONDecodeError:
+        return None
+
+
+def _probe_stream_types(file_path: Path) -> set[str]:
+    data = _ffprobe_json(file_path, ["-show_entries", "stream=codec_type"], log_label="stream-types probe")
+    if data is None:
         return set()
     return {
         str(stream.get("codec_type") or "").lower()
@@ -288,21 +292,10 @@ def _probe_codec_names(file_path: Path) -> dict[str, str]:
     are known to break Telegram's own video player (see
     _RISKY_TELEGRAM_VIDEO_CODECS above).
     """
-    command = [
-        "ffprobe", "-v", "error",
-        "-show_entries", "stream=codec_type,codec_name",
-        "-of", "json", str(file_path),
-    ]
-    try:
-        result = _run_ffmpeg(command, timeout=_FFPROBE_TIMEOUT)
-    except (OSError, subprocess.TimeoutExpired) as exc:
-        logger.warning("ffprobe codec probe failed for %s: %s", file_path, exc)
-        return {}
-    if result.returncode != 0:
-        return {}
-    try:
-        data = json.loads(result.stdout)
-    except json.JSONDecodeError:
+    data = _ffprobe_json(
+        file_path, ["-show_entries", "stream=codec_type,codec_name"], log_label="codec probe"
+    )
+    if data is None:
         return {}
 
     codecs: dict[str, str] = {}
@@ -438,21 +431,12 @@ def probe_video_dimensions(file_path: Path) -> tuple[int | None, int | None, int
     possibly-compressed file rather than yt-dlp's info dict, since Mini
     compression changes the pixel dimensions.
     """
-    command = [
-        "ffprobe", "-v", "error", "-select_streams", "v:0",
-        "-show_entries", "stream=width,height:format=duration",
-        "-of", "json", str(file_path),
-    ]
-    try:
-        result = _run_ffmpeg(command, timeout=_FFPROBE_TIMEOUT)
-    except (OSError, subprocess.TimeoutExpired) as exc:
-        logger.warning("ffprobe dimension probe failed for %s: %s", file_path, exc)
-        return None, None, None
-    if result.returncode != 0:
-        return None, None, None
-    try:
-        data = json.loads(result.stdout)
-    except json.JSONDecodeError:
+    data = _ffprobe_json(
+        file_path,
+        ["-select_streams", "v:0", "-show_entries", "stream=width,height:format=duration"],
+        log_label="dimension probe",
+    )
+    if data is None:
         return None, None, None
 
     width = height = None
