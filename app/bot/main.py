@@ -15,6 +15,7 @@ from alembic import command as alembic_command
 from app.bot.router import router
 from app.core.config import get_settings
 from app.core.logging import setup_logging
+from app.utils.telegram_session import build_bot_session
 
 
 _USER_COMMANDS = [
@@ -138,6 +139,7 @@ def main() -> None:
 
     bot = Bot(
         token=settings.bot_token,
+        session=build_bot_session(settings),
         default=DefaultBotProperties(parse_mode=ParseMode.HTML),
     )
 

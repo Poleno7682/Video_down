@@ -46,8 +46,17 @@ class Settings(BaseSettings):
 
     default_quality: str = Field(default="720p", alias="DEFAULT_QUALITY")
     # Standard Telegram Bot API limit is 50 MB. Set MAX_FILE_MB=2000 only when
-    # using a self-hosted Local Bot API server.
+    # USE_LOCAL_BOT_API=true (see below) — the standard cloud API rejects
+    # anything over 50 MB regardless of this setting.
     max_file_mb: int = Field(default=50, alias="MAX_FILE_MB")
+    # Route Bot API calls through a self-hosted Local Bot API server
+    # (https://core.telegram.org/bots/api#using-a-local-bot-api-server)
+    # instead of api.telegram.org, which raises the upload/download limit
+    # from 50 MB to 2000 MB. Requires TELEGRAM_API_ID/TELEGRAM_API_HASH on
+    # the telegram-bot-api service in docker-compose.yml (from
+    # https://my.telegram.org/apps).
+    use_local_bot_api: bool = Field(default=False, alias="USE_LOCAL_BOT_API")
+    local_bot_api_url: str = Field(default="http://telegram-bot-api:8081", alias="LOCAL_BOT_API_URL")
     download_timeout_seconds: int = Field(default=900, alias="DOWNLOAD_TIMEOUT_SECONDS")
     max_active_downloads_per_user: int = Field(default=1, alias="MAX_ACTIVE_DOWNLOADS_PER_USER")
     max_download_duration_seconds: int = Field(default=1800, alias="MAX_DOWNLOAD_DURATION_SECONDS")

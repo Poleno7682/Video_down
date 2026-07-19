@@ -73,6 +73,25 @@ services:
     networks:
       - internal
 
+  telegram-bot-api:
+    image: aiogram/telegram-bot-api:latest
+    container_name: video_bot_telegram_api
+    restart: unless-stopped
+    # Opt-in: only needed when USE_LOCAL_BOT_API=true in .env (raises the
+    # 50 MB Telegram upload/download limit to 2000 MB). Get TELEGRAM_API_ID
+    # and TELEGRAM_API_HASH from https://my.telegram.org/apps, set them in
+    # .env, then start this service too:
+    #   docker compose --profile local-bot-api up -d
+    profiles: ["local-bot-api"]
+    environment:
+      TELEGRAM_API_ID: ${TELEGRAM_API_ID}
+      TELEGRAM_API_HASH: ${TELEGRAM_API_HASH}
+      TELEGRAM_LOCAL: 1
+    volumes:
+      - telegram_bot_api_data:/var/lib/telegram-bot-api
+    networks:
+      - internal
+
   nginx:
     image: nginx:1.27-alpine
     container_name: video_bot_nginx
@@ -96,6 +115,7 @@ services:
 volumes:
   postgres_data:
   redis_data:
+  telegram_bot_api_data:
 
 networks:
   internal:

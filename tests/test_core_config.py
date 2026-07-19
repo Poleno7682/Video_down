@@ -111,6 +111,34 @@ class TestSettings:
         )
         assert s.max_file_mb == 50
 
+    def test_default_local_bot_api_disabled(self):
+        s = Settings(
+            BOT_TOKEN="1:t",
+            WEBHOOK_BASE_URL="https://x.com",
+            WEBHOOK_SECRET="s",
+            DATABASE_URL="postgresql://x",
+            REDIS_URL="redis://x",
+            CELERY_BROKER_URL="redis://x",
+            CELERY_RESULT_BACKEND="redis://x",
+        )
+        assert s.use_local_bot_api is False
+        assert s.local_bot_api_url == "http://telegram-bot-api:8081"
+
+    def test_local_bot_api_can_be_enabled(self):
+        s = Settings(
+            BOT_TOKEN="1:t",
+            WEBHOOK_BASE_URL="https://x.com",
+            WEBHOOK_SECRET="s",
+            DATABASE_URL="postgresql://x",
+            REDIS_URL="redis://x",
+            CELERY_BROKER_URL="redis://x",
+            CELERY_RESULT_BACKEND="redis://x",
+            USE_LOCAL_BOT_API="true",
+            LOCAL_BOT_API_URL="http://custom:9999",
+        )
+        assert s.use_local_bot_api is True
+        assert s.local_bot_api_url == "http://custom:9999"
+
 
 class TestGetSettings:
     def test_returns_settings_instance(self):

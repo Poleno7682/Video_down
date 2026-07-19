@@ -123,11 +123,24 @@ def test_get_bot_singleton(mocker):
 
 def test_get_bot_uses_explicit_token(mocker):
     mock_bot_cls = mocker.patch("app.worker.telegram_sender.Bot")
-    mock_get_settings = mocker.patch("app.worker.telegram_sender.get_settings")
+    mocker.patch("app.worker.telegram_sender.get_settings")
+    mocker.patch("app.worker.telegram_sender.build_bot_session", return_value=None)
     sender = TelegramSender(token="explicit-token")
     sender._get_bot()
     assert mock_bot_cls.call_args.kwargs["token"] == "explicit-token"
-    mock_get_settings.assert_not_called()
+
+
+def test_get_bot_passes_local_bot_api_session(mocker):
+    mock_bot_cls = mocker.patch("app.worker.telegram_sender.Bot")
+    mocker.patch("app.worker.telegram_sender.get_settings")
+    mock_session = object()
+    mock_build_session = mocker.patch(
+        "app.worker.telegram_sender.build_bot_session", return_value=mock_session
+    )
+    sender = TelegramSender(token="explicit-token")
+    sender._get_bot()
+    mock_build_session.assert_called_once()
+    assert mock_bot_cls.call_args.kwargs["session"] is mock_session
 
 
 # ---------------------------------------------------------------------------

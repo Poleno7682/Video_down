@@ -14,6 +14,7 @@ from aiogram.types import FSInputFile
 
 from app.core.config import get_settings
 from app.db.models import TelegramFileType
+from app.utils.telegram_session import build_bot_session
 
 logger = logging.getLogger(__name__)
 
@@ -87,9 +88,11 @@ class TelegramSender:
     def _get_bot(self) -> Bot:
         with self._bot_lock:
             if self._bot is None:
-                token = self._token or get_settings().bot_token
+                settings = get_settings()
+                token = self._token or settings.bot_token
                 self._bot = Bot(
                     token=token,
+                    session=build_bot_session(settings),
                     default=DefaultBotProperties(parse_mode=ParseMode.HTML),
                 )
         return self._bot
