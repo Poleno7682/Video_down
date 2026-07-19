@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 
-from aiogram import F, Router
+from aiogram import Bot, F, Router
 from aiogram.filters import BaseFilter, Command
 from aiogram.types import CallbackQuery, Message
 
@@ -231,14 +231,19 @@ async def list_trusted_users(message: Message) -> None:
 _PROXY_SCHEMES = ("socks5://", "socks5h://", "socks4://", "http://", "https://")
 
 _PROXY_FORMATS_HELP = (
-    "Отправьте прокси в одном из форматов:\n"
+    "Отправьте <b>один прокси текстом</b> в одном из форматов:\n"
     "• <code>IP:PORT</code>\n"
     "• <code>IP:PORT@LOGIN:PASSWORD</code>\n"
     "• <code>IP:PORT:LOGIN:PASSWORD</code>\n"
     "• <code>IP:PORT;LOGIN:PASSWORD</code>\n"
     "• или полный URL: <code>socks5h://login:pass@host:port</code>\n\n"
+    "Либо пришлите <b>.txt файл</b> со списком — по одному прокси на строку, "
+    "в любом из этих же форматов (можно вперемешку).\n\n"
     "Или /cancel для отмены."
 )
+
+_MAX_PROXY_FILE_BYTES = 512 * 1024
+_MAX_PROXY_LINES_PER_FILE = 30
 
 
 @router.message(Command("addproxy"), AdminFilter())
@@ -312,6 +317,75 @@ class _ProxyAwaitingFilter(BaseFilter):
         return bool(get_proxy_awaiting(message.from_user.id, get_redis()))
 
 
+async def _check_and_add_proxy(raw: str, scheme: str, admin_id: int) -> tuple[str | None, str]:
+    """Parse, probe, and save one proxy line. Returns (added_url_or_None, message)."""
+    proxy_url = parse_proxy_input(raw, scheme)
+    if not proxy_url:
+        return None, "не распознан формат"
+
+    try:
+        await asyncio.to_thread(check_proxy, proxy_url)
+    except ProxyCheckError as exc:
+        return None, str(exc)
+    except Exception as exc:
+        logger.warning("Unexpected error checking proxy %s: %s", proxy_url, exc)
+        return None, f"ошибка проверки: {exc}"
+
+    with get_session() as session:
+        proxy = ProxyRepository(session).add_proxy(proxy_url, added_by=admin_id)
+    return proxy.url, "добавлен"
+
+
+@router.message(_ProxyAwaitingFilter(), F.document)
+async def handle_proxy_file(message: Message, bot: Bot) -> None:
+    redis = get_redis()
+    admin_id = message.from_user.id
+    scheme = get_proxy_awaiting(admin_id, redis)
+    if not scheme:
+        return
+
+    document = message.document
+    if document.file_size and document.file_size > _MAX_PROXY_FILE_BYTES:
+        await message.answer("⚠️ Файл слишком большой (лимит 512 КБ).")
+        return
+
+    try:
+        buffer = await bot.download(document)
+        content = buffer.read().decode("utf-8", errors="replace")
+    except Exception:
+        logger.exception("Failed to download proxy list file from admin %s", admin_id)
+        await message.answer("❌ Не удалось прочитать файл. Попробуйте ещё раз.")
+        return
+
+    lines = [line.strip() for line in content.splitlines() if line.strip() and not line.strip().startswith("#")]
+    if not lines:
+        await message.answer(f"⚠️ Файл пустой.\n\n{_PROXY_FORMATS_HELP}")
+        return
+
+    truncated = len(lines) > _MAX_PROXY_LINES_PER_FILE
+    lines = lines[:_MAX_PROXY_LINES_PER_FILE]
+
+    status_msg = await message.answer(f"🔍 Проверяю {len(lines)} прокси, это может занять время...")
+    added: list[str] = []
+    failed: list[tuple[str, str]] = []
+    for raw in lines:
+        added_url, note = await _check_and_add_proxy(raw, scheme, admin_id)
+        if added_url:
+            added.append(added_url)
+        else:
+            failed.append((raw, note))
+
+    clear_proxy_awaiting(admin_id, redis)
+
+    report = [f"✅ Добавлено: {len(added)}/{len(lines)}"]
+    if failed:
+        report.append("\n❌ Не добавлены:")
+        report += [f"  • <code>{raw}</code> — {reason}" for raw, reason in failed]
+    if truncated:
+        report.append(f"\n⚠️ В файле больше {_MAX_PROXY_LINES_PER_FILE} строк — обработаны только первые {_MAX_PROXY_LINES_PER_FILE}.")
+    await status_msg.edit_text("\n".join(report))
+
+
 @router.message(_ProxyAwaitingFilter(), F.text)
 async def handle_proxy_input(message: Message) -> None:
     redis = get_redis()
@@ -326,28 +400,14 @@ async def handle_proxy_input(message: Message) -> None:
         await message.answer("❌ Добавление прокси отменено.")
         return
 
-    proxy_url = parse_proxy_input(text, scheme)
-    if not proxy_url:
-        await message.answer(f"⚠️ Не удалось распознать формат.\n\n{_PROXY_FORMATS_HELP}")
-        return
-
     status_msg = await message.answer("🔍 Проверяю прокси на YouTube (Sign in to confirm you're not a bot)...")
-    try:
-        await asyncio.to_thread(check_proxy, proxy_url)
-    except ProxyCheckError as exc:
-        await status_msg.edit_text(f"❌ Прокси не прошёл проверку: {exc}\n\nПопробуйте другой или /cancel.")
-        return
-    except Exception as exc:
-        logger.warning("Unexpected error checking proxy %s: %s", proxy_url, exc)
-        await status_msg.edit_text(f"❌ Не удалось проверить прокси: {exc}\n\nПопробуйте другой или /cancel.")
+    added_url, note = await _check_and_add_proxy(text, scheme, admin_id)
+    if not added_url:
+        await status_msg.edit_text(f"❌ Прокси не добавлен: {note}\n\nПопробуйте другой или /cancel.")
         return
 
     clear_proxy_awaiting(admin_id, redis)
-    with get_session() as session:
-        proxy = ProxyRepository(session).add_proxy(proxy_url, added_by=admin_id)
-    await status_msg.edit_text(
-        f"✅ Прокси проверен и добавлен (id <code>{proxy.id}</code>): <code>{proxy.url}</code>"
-    )
+    await status_msg.edit_text(f"✅ Прокси проверен и добавлен: <code>{added_url}</code>")
 
 
 # ---------------------------------------------------------------------------
