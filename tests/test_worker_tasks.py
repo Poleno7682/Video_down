@@ -480,6 +480,39 @@ class TestProcessDownloadRequest:
                     process_download_request.apply(args=[1])
         mock_fail.assert_called_once()
 
+    def test_connection_error_with_retries_left_skips_permanent_failure(self):
+        """A ConnectionError that Celery's autoretry_for is about to retry
+        must not be treated as a terminal failure: no failed/finished status,
+        no user notification — the retry may just fix itself.
+
+        Celery's autoretry wrapper turns the ConnectionError into a Retry
+        once it re-propagates out of our task body — that Retry is exactly
+        the signal that a retry is scheduled.
+        """
+        from celery.exceptions import Retry
+
+        with _task_ctx() as (repo, limiter, sender):
+            with patch("app.worker.tasks.download_video", side_effect=ConnectionError("db blip")), \
+                 patch("app.worker.tasks._handle_task_failure") as mock_fail:
+                with pytest.raises(Retry):
+                    process_download_request.apply(args=[1])
+        mock_fail.assert_not_called()
+        statuses = {c[0][1] for c in repo.update_request_status.call_args_list}
+        assert DownloadStatus.failed not in statuses
+        failure_texts = [c[0][2] for c in sender.edit_status.call_args_list]
+        assert _GENERIC_FAILURE not in failure_texts
+
+    def test_connection_error_after_retries_exhausted_marks_failed(self):
+        """Once autoretry_for's retry budget (max_retries=3) is spent, the
+        same ConnectionError must be treated as terminal like any other
+        failure: status marked failed and the user notified."""
+        with _task_ctx() as (repo, limiter, sender):
+            with patch("app.worker.tasks.download_video", side_effect=ConnectionError("db blip")), \
+                 patch("app.worker.tasks._handle_task_failure") as mock_fail:
+                with pytest.raises(Exception):
+                    process_download_request.apply(args=[1], retries=3)
+        mock_fail.assert_called_once()
+
     def test_download_exception_releases_slot(self):
         req = _make_req()
         with _task_ctx(req=req) as (repo, limiter, _sender):

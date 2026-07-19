@@ -530,26 +530,34 @@ def process_download_request(self, request_id: int) -> None:
             except Exception:
                 logger.exception("Rollback failed for request %s", request_id)
 
-            refresh_key = _google_refresh_key(user_id)
-            cookie_refreshed = False
-            try:
-                recently_refreshed = bool(redis.exists(refresh_key))
-                cookie_refreshed = (
-                    not recently_refreshed
-                    and cookies_were_used
-                    and (_is_cookie_error(exc) or _is_youtube_challenge_error(exc))
-                    and _try_refresh_google_cookies(repo, user_id)
-                )
-                if cookie_refreshed:
-                    redis.setex(refresh_key, _GOOGLE_REFRESH_COOLDOWN, "1")
-            except Exception:
-                logger.exception("Cookie-refresh check failed for request %s", request_id)
+            # autoretry_for=(ConnectionError,) makes Celery transparently retry
+            # this task after it re-raises below. Only treat the request as
+            # permanently failed — and only tell the user — once no more
+            # retries are coming; otherwise a transient blip would mark the
+            # request "failed" and notify the user before the retry that
+            # fixes itself even runs.
+            will_autoretry = isinstance(exc, ConnectionError) and self.request.retries < self.max_retries
+            if not will_autoretry:
+                refresh_key = _google_refresh_key(user_id)
+                cookie_refreshed = False
+                try:
+                    recently_refreshed = bool(redis.exists(refresh_key))
+                    cookie_refreshed = (
+                        not recently_refreshed
+                        and cookies_were_used
+                        and (_is_cookie_error(exc) or _is_youtube_challenge_error(exc))
+                        and _try_refresh_google_cookies(repo, user_id)
+                    )
+                    if cookie_refreshed:
+                        redis.setex(refresh_key, _GOOGLE_REFRESH_COOLDOWN, "1")
+                except Exception:
+                    logger.exception("Cookie-refresh check failed for request %s", request_id)
 
-            _handle_task_failure(
-                sender, repo, request_id, chat_id, status_message_id, video_id, exc,
-                cookies_were_used=cookies_were_used,
-                cookie_refreshed=cookie_refreshed,
-            )
+                _handle_task_failure(
+                    sender, repo, request_id, chat_id, status_message_id, video_id, exc,
+                    cookies_were_used=cookies_were_used,
+                    cookie_refreshed=cookie_refreshed,
+                )
             raise
 
         finally:
