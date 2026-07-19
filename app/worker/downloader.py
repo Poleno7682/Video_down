@@ -2,8 +2,11 @@ from __future__ import annotations
 
 import json
 import logging
+import re
+import select
 import shutil
 import subprocess
+import time
 import uuid
 from pathlib import Path
 from typing import Callable
@@ -200,6 +203,63 @@ def _run_ffmpeg(command: list[str], *, timeout: int, cwd: str | None = None) -> 
     return subprocess.run(command, capture_output=True, text=True, timeout=timeout, cwd=cwd)
 
 
+_FFMPEG_OUT_TIME_MS_RE = re.compile(r"^out_time_ms=(-?\d+)$")
+
+
+def _run_ffmpeg_with_progress(
+    command: list[str],
+    *,
+    timeout: int,
+    total_duration: float,
+    on_progress: Callable[[float], None],
+) -> subprocess.CompletedProcess:
+    """Like _run_ffmpeg, but streams -progress pipe:1 output to call
+    on_progress(percent) as ffmpeg works, instead of blocking silently until
+    the whole command finishes — used for transcodes that can take minutes
+    with no other feedback.
+
+    command's first element must be the ffmpeg executable; -progress/-nostats
+    are inserted right after it. Raises subprocess.TimeoutExpired on timeout,
+    matching subprocess.run's contract, so callers don't need to know this
+    isn't just a thin subprocess.run wrapper.
+    """
+    proc = subprocess.Popen(
+        [command[0], "-progress", "pipe:1", "-nostats", *command[1:]],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    deadline = time.monotonic() + timeout
+    try:
+        assert proc.stdout is not None
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise subprocess.TimeoutExpired(command, timeout)
+            ready, _, _ = select.select([proc.stdout], [], [], remaining)
+            if not ready:
+                continue
+            line = proc.stdout.readline()
+            if line == "":
+                break  # EOF: ffmpeg's progress stream closed, process is exiting
+            match = _FFMPEG_OUT_TIME_MS_RE.match(line.strip())
+            if match:
+                # ffmpeg's "-progress" out_time_ms field is actually
+                # microseconds despite the name — a long-standing, widely
+                # documented naming quirk in ffmpeg itself.
+                out_time_us = int(match.group(1))
+                if out_time_us >= 0 and total_duration > 0:
+                    on_progress(min(100.0, out_time_us / 1_000_000 / total_duration * 100))
+        remaining = max(0.0, deadline - time.monotonic())
+        returncode = proc.wait(timeout=remaining)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.wait()
+        raise
+    stderr_output = proc.stderr.read() if proc.stderr else ""
+    return subprocess.CompletedProcess(command, returncode, stdout="", stderr=stderr_output)
+
+
 def _burn_subtitles(video_path: Path, subtitle_path: Path) -> Path | None:
     """Hard-burn subtitle_path into video_path's picture, returning the new file or None on failure."""
     output_path = video_path.with_name(f"{video_path.stem}.subtitled{video_path.suffix}")
@@ -334,12 +394,20 @@ def log_media_debug_info(file_path: Path, *, context: str = "") -> dict[str, str
     return codecs
 
 
-def _transcode_to_h264(file_path: Path, timeout: int = COMPRESSION_TIMEOUT) -> Path | None:
+def _transcode_to_h264(
+    file_path: Path,
+    timeout: int = COMPRESSION_TIMEOUT,
+    *,
+    on_progress: Callable[[float], None] | None = None,
+) -> Path | None:
     """Re-encode file_path's video track to H.264/AAC, same resolution/bitrate ballpark.
 
     Used as a last-resort fix when the source only offered a codec Telegram
     clients render as a static frame (vp9/av1) — see _RISKY_TELEGRAM_VIDEO_CODECS.
     Returns the transcoded file, or None on failure.
+
+    on_progress, if given, is called with the percent (0-100) complete as
+    ffmpeg works — this can take minutes with no other progress signal.
     """
     output_path = file_path.with_name(f"{file_path.stem}.h264{file_path.suffix}")
     output_path.unlink(missing_ok=True)
@@ -358,8 +426,14 @@ def _transcode_to_h264(file_path: Path, timeout: int = COMPRESSION_TIMEOUT) -> P
         "-movflags", "+faststart",
         str(output_path),
     ]
+    total_duration = _probe_duration_seconds(file_path) if on_progress is not None else None
     try:
-        result = _run_ffmpeg(command, timeout=timeout)
+        if on_progress is not None and total_duration:
+            result = _run_ffmpeg_with_progress(
+                command, timeout=timeout, total_duration=total_duration, on_progress=on_progress
+            )
+        else:
+            result = _run_ffmpeg(command, timeout=timeout)
     except (OSError, subprocess.TimeoutExpired) as exc:
         logger.warning("H.264 transcode failed for %s: %s", file_path, exc)
         return None
@@ -371,7 +445,11 @@ def _transcode_to_h264(file_path: Path, timeout: int = COMPRESSION_TIMEOUT) -> P
 
 
 def ensure_telegram_compatible_video(
-    file_path: Path, codecs: dict[str, str], *, on_transcode_start: Callable[[], None] | None = None
+    file_path: Path,
+    codecs: dict[str, str],
+    *,
+    on_transcode_start: Callable[[], None] | None = None,
+    on_transcode_progress: Callable[[float], None] | None = None,
 ) -> Path:
     """Transcode to H.264 when the downloaded vcodec is known to break Telegram's player.
 
@@ -384,14 +462,15 @@ def ensure_telegram_compatible_video(
     on_transcode_start, if given, fires right before the (potentially several
     minutes long) transcode actually starts — callers use it to let the user
     know why nothing is happening, since this can run silently for a while
-    with no other progress signal.
+    with no other progress signal. on_transcode_progress, if given, is called
+    repeatedly with the percent (0-100) complete while it runs.
     """
     vcodec = codecs.get("video")
     if vcodec not in _RISKY_TELEGRAM_VIDEO_CODECS:
         return file_path
     if on_transcode_start is not None:
         on_transcode_start()
-    transcoded = _transcode_to_h264(file_path)
+    transcoded = _transcode_to_h264(file_path, on_progress=on_transcode_progress)
     if transcoded is None:
         logger.warning(
             "H.264 transcode of %s failed — sending the original vcodec=%s file as-is.",
@@ -591,6 +670,7 @@ def prepare_media_for_telegram(
     embed_subtitles: bool = False,
     debug_context: str = "",
     on_transcode_start: Callable[[], None] | None = None,
+    on_transcode_progress: Callable[[float], None] | None = None,
 ) -> tuple[Path, dict, dict[str, str]]:
     """Facade over the yt-dlp+ffmpeg pipeline: download, validate, and make
     Telegram-compatible in one call.
@@ -600,10 +680,11 @@ def prepare_media_for_telegram(
     to break Telegram's own player. Raises MediaValidationError if the
     downloaded file is unusable. Returns (file_path, info, codecs).
 
-    on_transcode_start is forwarded to ensure_telegram_compatible_video — see
-    its docstring. The gap between the download finishing and the transcode
-    finishing has no other progress signal, so callers should use this to
-    tell the user why nothing seems to be happening.
+    on_transcode_start/on_transcode_progress are forwarded to
+    ensure_telegram_compatible_video — see its docstring. The gap between
+    the download finishing and the transcode finishing has no other
+    progress signal, so callers should use these to tell the user why
+    nothing seems to be happening / how far along it is.
     """
     file_path, info = download_video(
         url,
@@ -616,5 +697,7 @@ def prepare_media_for_telegram(
     validate_media_file(file_path, quality)
     codecs = log_media_debug_info(file_path, context=debug_context)
     if quality != "audio":
-        file_path = ensure_telegram_compatible_video(file_path, codecs, on_transcode_start=on_transcode_start)
+        file_path = ensure_telegram_compatible_video(
+            file_path, codecs, on_transcode_start=on_transcode_start, on_transcode_progress=on_transcode_progress
+        )
     return file_path, info, codecs

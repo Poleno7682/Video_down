@@ -266,6 +266,25 @@ def _build_progress_hook(
     return _hook
 
 
+def _build_transcode_progress_hook(
+    sender: TelegramSender, chat_id: int, status_message_id: int | None
+) -> Callable[[float], None]:
+    """Return an ffmpeg transcode progress hook, throttled to 1 update per 5 s."""
+    last_update = 0.0
+
+    def _hook(percent: float) -> None:
+        nonlocal last_update
+        now = time.time()
+        if now - last_update < 5:
+            return
+        last_update = now
+        sender.edit_status(
+            chat_id, status_message_id, f"🔄 Конвертирую видео для совместимости с Telegram: {percent:.0f}%"
+        )
+
+    return _hook
+
+
 def _check_user_rate_limit(
     sender: TelegramSender,
     repo: Repository,
@@ -386,6 +405,7 @@ def _download_and_prepare_media(
             status_message_id,
             "🔄 Конвертирую видео для совместимости с Telegram — это может занять несколько минут...",
         ),
+        on_transcode_progress=_build_transcode_progress_hook(sender, chat_id, status_message_id),
     )
 
     return file_path, info, user_cookie_path, cookies_were_used

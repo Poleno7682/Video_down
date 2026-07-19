@@ -541,6 +541,75 @@ def test_log_media_debug_info_warns_on_av1(caplog):
 
 
 # ---------------------------------------------------------------------------
+# _run_ffmpeg_with_progress
+# ---------------------------------------------------------------------------
+
+def _write_fake_ffmpeg(tmp_dir: Path, lines: list[str], *, exit_code: int = 0, delay: float = 0.0) -> Path:
+    """A tiny standalone executable standing in for ffmpeg: prints the given
+    -progress-style lines to stdout (ignoring whatever argv it's given —
+    exactly like real ffmpeg would receive -progress/-nostats/etc. inserted
+    after it) and exits. Lets us test the real subprocess/select/timeout
+    plumbing without depending on ffmpeg being installed."""
+    import sys
+
+    script = tmp_dir / "fake_ffmpeg"
+    body_lines = "\n".join(f'print("{line}", flush=True)' for line in lines)
+    script.write_text(
+        f"#!{sys.executable}\n"
+        "import time\n"
+        f"time.sleep({delay})\n"
+        f"{body_lines}\n"
+        f"raise SystemExit({exit_code})\n"
+    )
+    script.chmod(0o755)
+    return script
+
+
+def _run_fake(tmp: str, lines: list[str], *, timeout: float = 5, total_duration: float = 10.0,
+              exit_code: int = 0, delay: float = 0.0):
+    from app.worker.downloader import _run_ffmpeg_with_progress
+
+    script = _write_fake_ffmpeg(Path(tmp), lines, exit_code=exit_code, delay=delay)
+    progress_calls: list[float] = []
+    result = _run_ffmpeg_with_progress(
+        [str(script)],
+        timeout=timeout,
+        total_duration=total_duration,
+        on_progress=progress_calls.append,
+    )
+    return result, progress_calls
+
+
+def test_run_ffmpeg_with_progress_reports_percent():
+    with tempfile.TemporaryDirectory() as tmp:
+        result, calls = _run_fake(
+            tmp,
+            ["out_time_ms=500000", "out_time_ms=5000000", "out_time_ms=10000000"],
+            total_duration=10.0,
+        )
+    assert result.returncode == 0
+    assert calls == pytest.approx([5.0, 50.0, 100.0])
+
+
+def test_run_ffmpeg_with_progress_ignores_negative_out_time():
+    with tempfile.TemporaryDirectory() as tmp:
+        result, calls = _run_fake(tmp, ["out_time_ms=-1", "out_time_ms=1000000"], total_duration=10.0)
+    assert calls == pytest.approx([10.0])
+
+
+def test_run_ffmpeg_with_progress_returns_nonzero_exit_code():
+    with tempfile.TemporaryDirectory() as tmp:
+        result, _ = _run_fake(tmp, ["out_time_ms=1000000"], total_duration=10.0, exit_code=1)
+    assert result.returncode == 1
+
+
+def test_run_ffmpeg_with_progress_raises_on_timeout():
+    with tempfile.TemporaryDirectory() as tmp:
+        with pytest.raises(subprocess.TimeoutExpired):
+            _run_fake(tmp, ["out_time_ms=1000000"], timeout=0.3, delay=2, total_duration=10.0)
+
+
+# ---------------------------------------------------------------------------
 # _transcode_to_h264 / ensure_telegram_compatible_video
 # ---------------------------------------------------------------------------
 
@@ -602,6 +671,50 @@ def test_transcode_to_h264_returns_none_on_timeout():
             assert _transcode_to_h264(src) is None
 
 
+def test_transcode_to_h264_uses_progress_runner_when_on_progress_given():
+    with tempfile.TemporaryDirectory() as tmp:
+        src = Path(tmp) / "video.mp4"
+        src.write_bytes(b"x")
+
+        def fake_run_with_progress(command, *, timeout, total_duration, on_progress):
+            on_progress(42.0)
+            Path(command[-1]).write_bytes(b"transcoded")
+            return _completed(returncode=0)
+
+        hook = MagicMock()
+        with patch("app.worker.downloader._probe_duration_seconds", return_value=12.0), \
+             patch("app.worker.downloader._run_ffmpeg_with_progress", side_effect=fake_run_with_progress) as mock_run, \
+             patch("app.worker.downloader._run_ffmpeg") as mock_run_plain:
+            result = _transcode_to_h264(src, on_progress=hook)
+
+        mock_run.assert_called_once()
+        mock_run_plain.assert_not_called()
+        hook.assert_called_once_with(42.0)
+        assert result is not None
+
+
+def test_transcode_to_h264_falls_back_to_plain_runner_without_duration():
+    """If the source duration can't be probed, on_progress can't be
+    translated into a percentage — fall back to the plain runner rather
+    than dividing by zero/None."""
+    with tempfile.TemporaryDirectory() as tmp:
+        src = Path(tmp) / "video.mp4"
+        src.write_bytes(b"x")
+
+        def fake_run(command, *, timeout, cwd=None):
+            Path(command[-1]).write_bytes(b"transcoded")
+            return _completed(returncode=0)
+
+        with patch("app.worker.downloader._probe_duration_seconds", return_value=None), \
+             patch("app.worker.downloader._run_ffmpeg", side_effect=fake_run) as mock_run_plain, \
+             patch("app.worker.downloader._run_ffmpeg_with_progress") as mock_run_progress:
+            result = _transcode_to_h264(src, on_progress=MagicMock())
+
+        mock_run_plain.assert_called_once()
+        mock_run_progress.assert_not_called()
+        assert result is not None
+
+
 def test_ensure_telegram_compatible_video_passthrough_for_h264():
     video = Path("/tmp/video.mp4")
     with patch("app.worker.downloader._transcode_to_h264") as mock_transcode:
@@ -647,7 +760,7 @@ def test_ensure_telegram_compatible_video_transcodes_av1(caplog):
             with caplog.at_level(logging.INFO, logger="app.worker.downloader"):
                 result = ensure_telegram_compatible_video(video, {"video": "av1", "audio": "aac"})
 
-        mock_transcode.assert_called_once_with(video)
+        mock_transcode.assert_called_once_with(video, on_progress=None)
         assert result == transcoded
         assert not video.exists()
         assert "Transcoded" in caplog.text
@@ -889,7 +1002,9 @@ class TestPrepareMediaForTelegram:
         )
         mock_validate.assert_called_once_with(fake_file, "720p")
         mock_log.assert_called_once_with(fake_file, context="ctx")
-        mock_ensure.assert_called_once_with(fake_file, {"video": "h264"}, on_transcode_start=None)
+        mock_ensure.assert_called_once_with(
+            fake_file, {"video": "h264"}, on_transcode_start=None, on_transcode_progress=None
+        )
         assert file_path is fake_file
         assert info == {"title": "T"}
         assert codecs == {"video": "h264"}

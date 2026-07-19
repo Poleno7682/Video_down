@@ -12,6 +12,7 @@ from app.worker.tasks import (
     _COOKIE_FAILURE,
     _STALE_COOKIE_FAILURE,
     _GENERIC_FAILURE,
+    _build_transcode_progress_hook,
     _is_cookie_error,
     _is_youtube_challenge_error,
     _materialize_user_cookies,
@@ -329,7 +330,9 @@ class TestProcessDownloadRequest:
                  patch("app.worker.downloader.ensure_telegram_compatible_video", return_value=transcoded_file) as mock_ensure:
                 process_download_request.apply(args=[1])
 
-        mock_ensure.assert_called_once_with(fake_file, {"video": "av1", "audio": "aac"}, on_transcode_start=ANY)
+        mock_ensure.assert_called_once_with(
+            fake_file, {"video": "av1", "audio": "aac"}, on_transcode_start=ANY, on_transcode_progress=ANY
+        )
         transcoded_file.unlink.assert_called()  # uploaded then cleaned up
 
     def test_audio_quality_skips_telegram_compat_transcode(self):
@@ -657,3 +660,39 @@ class TestProgressHook:
         sender.edit_status.assert_called_once()
         call_text = sender.edit_status.call_args[0][2]
         assert "25.0%" in call_text
+
+
+# ---------------------------------------------------------------------------
+# _build_transcode_progress_hook
+# ---------------------------------------------------------------------------
+
+class TestTranscodeProgressHook:
+    def _make_hook(self):
+        sender = MagicMock()
+        hook = _build_transcode_progress_hook(sender, chat_id=1, status_message_id=2)
+        return hook, sender
+
+    def test_reports_percent(self):
+        hook, sender = self._make_hook()
+        with patch("app.worker.tasks.time") as mock_time:
+            mock_time.time.return_value = 1000.0
+            hook(42.5)
+        sender.edit_status.assert_called_once()
+        call_text = sender.edit_status.call_args[0][2]
+        assert "42%" in call_text or "43%" in call_text  # {:.0f} rounding
+
+    def test_throttled_when_called_too_soon(self):
+        hook, sender = self._make_hook()
+        with patch("app.worker.tasks.time") as mock_time:
+            mock_time.time.return_value = 1.0  # last_update starts at 0.0, diff=1.0 < 5
+            hook(10.0)
+        sender.edit_status.assert_not_called()
+
+    def test_allows_update_after_throttle_window(self):
+        hook, sender = self._make_hook()
+        with patch("app.worker.tasks.time") as mock_time:
+            mock_time.time.return_value = 10.0
+            hook(1.0)
+            mock_time.time.return_value = 20.0
+            hook(50.0)
+        assert sender.edit_status.call_count == 2
