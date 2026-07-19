@@ -92,7 +92,7 @@ def test_get_loop_singleton_per_instance():
 
 def test_get_loop_recreates_if_closed():
     sender = TelegramSender()
-    loop1 = sender._get_loop()
+    sender._get_loop()
     sender._loop = None  # reset to simulate closed
     loop2 = sender._get_loop()
     assert loop2 is not None

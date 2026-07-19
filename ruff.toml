@@ -1,0 +1,14 @@
+target-version = "py311"
+line-length = 120
+# tests/ has its own pre-existing lint debt (unused imports/locals in mock
+# setup) tracked separately; scope this first pass to app/ so CI starts
+# green and can be widened once that debt is paid down.
+include = ["app/**/*.py"]
+
+[lint]
+# Start with pyflakes (unused imports/names, undefined names, etc.) — the
+# class of issue the SOLID/DRY review found nothing was catching. Widen the
+# selection later once the codebase is clean under a broader rule set.
+select = ["F"]
+
+exclude = ["alembic/versions"]
