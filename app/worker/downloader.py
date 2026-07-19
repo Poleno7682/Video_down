@@ -362,7 +362,9 @@ def _transcode_to_h264(file_path: Path, timeout: int = COMPRESSION_TIMEOUT) -> P
     return output_path
 
 
-def ensure_telegram_compatible_video(file_path: Path, codecs: dict[str, str]) -> Path:
+def ensure_telegram_compatible_video(
+    file_path: Path, codecs: dict[str, str], *, on_transcode_start: Callable[[], None] | None = None
+) -> Path:
     """Transcode to H.264 when the downloaded vcodec is known to break Telegram's player.
 
     codecs is the dict returned by log_media_debug_info()/_probe_codec_names()
@@ -370,10 +372,17 @@ def ensure_telegram_compatible_video(file_path: Path, codecs: dict[str, str]) ->
     original path unchanged when the codec is fine or the transcode fails
     (falling back to sending the risky-but-playable-in-ffmpeg file rather than
     losing the download entirely).
+
+    on_transcode_start, if given, fires right before the (potentially several
+    minutes long) transcode actually starts — callers use it to let the user
+    know why nothing is happening, since this can run silently for a while
+    with no other progress signal.
     """
     vcodec = codecs.get("video")
     if vcodec not in _RISKY_TELEGRAM_VIDEO_CODECS:
         return file_path
+    if on_transcode_start is not None:
+        on_transcode_start()
     transcoded = _transcode_to_h264(file_path)
     if transcoded is None:
         logger.warning(
@@ -573,6 +582,7 @@ def prepare_media_for_telegram(
     cookie_file: Path | None = None,
     embed_subtitles: bool = False,
     debug_context: str = "",
+    on_transcode_start: Callable[[], None] | None = None,
 ) -> tuple[Path, dict, dict[str, str]]:
     """Facade over the yt-dlp+ffmpeg pipeline: download, validate, and make
     Telegram-compatible in one call.
@@ -581,6 +591,11 @@ def prepare_media_for_telegram(
     probe codecs (logged for later debugging) -> transcode away codecs known
     to break Telegram's own player. Raises MediaValidationError if the
     downloaded file is unusable. Returns (file_path, info, codecs).
+
+    on_transcode_start is forwarded to ensure_telegram_compatible_video — see
+    its docstring. The gap between the download finishing and the transcode
+    finishing has no other progress signal, so callers should use this to
+    tell the user why nothing seems to be happening.
     """
     file_path, info = download_video(
         url,
@@ -593,5 +608,5 @@ def prepare_media_for_telegram(
     validate_media_file(file_path, quality)
     codecs = log_media_debug_info(file_path, context=debug_context)
     if quality != "audio":
-        file_path = ensure_telegram_compatible_video(file_path, codecs)
+        file_path = ensure_telegram_compatible_video(file_path, codecs, on_transcode_start=on_transcode_start)
     return file_path, info, codecs

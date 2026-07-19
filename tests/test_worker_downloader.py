@@ -571,6 +571,31 @@ def test_ensure_telegram_compatible_video_passthrough_for_h264():
     mock_transcode.assert_not_called()
 
 
+def test_ensure_telegram_compatible_video_skips_hook_when_no_transcode_needed():
+    video = Path("/tmp/video.mp4")
+    hook = MagicMock()
+    with patch("app.worker.downloader._transcode_to_h264"):
+        ensure_telegram_compatible_video(video, {"video": "h264", "audio": "aac"}, on_transcode_start=hook)
+    hook.assert_not_called()
+
+
+def test_ensure_telegram_compatible_video_calls_hook_before_transcode():
+    """The hook must fire so callers can tell the user a (possibly multi-minute)
+    transcode is starting — otherwise there's no progress signal at all
+    between the download finishing and the transcode finishing."""
+    with tempfile.TemporaryDirectory() as tmp:
+        video = Path(tmp) / "video.mp4"
+        video.write_bytes(b"x")
+        transcoded = Path(tmp) / "video.h264.mp4"
+        transcoded.write_bytes(b"y")
+
+        hook = MagicMock()
+        with patch("app.worker.downloader._transcode_to_h264", return_value=transcoded):
+            ensure_telegram_compatible_video(video, {"video": "av1", "audio": "aac"}, on_transcode_start=hook)
+
+    hook.assert_called_once()
+
+
 def test_ensure_telegram_compatible_video_transcodes_av1(caplog):
     import logging
     with tempfile.TemporaryDirectory() as tmp:
@@ -825,7 +850,7 @@ class TestPrepareMediaForTelegram:
         )
         mock_validate.assert_called_once_with(fake_file, "720p")
         mock_log.assert_called_once_with(fake_file, context="ctx")
-        mock_ensure.assert_called_once_with(fake_file, {"video": "h264"})
+        mock_ensure.assert_called_once_with(fake_file, {"video": "h264"}, on_transcode_start=None)
         assert file_path is fake_file
         assert info == {"title": "T"}
         assert codecs == {"video": "h264"}

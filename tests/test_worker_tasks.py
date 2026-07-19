@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import ANY, MagicMock, patch
 
 import pytest
 
@@ -329,7 +329,7 @@ class TestProcessDownloadRequest:
                  patch("app.worker.downloader.ensure_telegram_compatible_video", return_value=transcoded_file) as mock_ensure:
                 process_download_request.apply(args=[1])
 
-        mock_ensure.assert_called_once_with(fake_file, {"video": "av1", "audio": "aac"})
+        mock_ensure.assert_called_once_with(fake_file, {"video": "av1", "audio": "aac"}, on_transcode_start=ANY)
         transcoded_file.unlink.assert_called()  # uploaded then cleaned up
 
     def test_audio_quality_skips_telegram_compat_transcode(self):

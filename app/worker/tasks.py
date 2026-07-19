@@ -381,6 +381,11 @@ def _download_and_prepare_media(
         cookie_file=user_cookie_path,
         embed_subtitles=settings.embed_subtitles,
         debug_context=f"request={request_id} url={normalized_url} quality={quality}",
+        on_transcode_start=lambda: sender.edit_status(
+            chat_id,
+            status_message_id,
+            "🔄 Конвертирую видео для совместимости с Telegram — это может занять несколько минут...",
+        ),
     )
 
     return file_path, info, user_cookie_path, cookies_were_used
