@@ -23,6 +23,12 @@ logger = logging.getLogger(__name__)
 _FFPROBE_TIMEOUT = 20
 _DECODE_CHECK_SECONDS = 2
 COMPRESSION_TIMEOUT = 600
+# The vp9/av1->H.264 fallback re-encodes the whole video in one pass (unlike
+# compress_to_size_limit's downscaled/lower-bitrate attempts), so long or
+# high-resolution sources can need more than COMPRESSION_TIMEOUT. Safe to be
+# generous here since prepare_media_for_telegram now reports live progress —
+# a longer wait is no longer indistinguishable from a hang.
+TRANSCODE_TIMEOUT = 1800
 SUBTITLE_TIMEOUT = 600
 _SUBTITLE_LANGS = ["ru", "en"]
 _SUBTITLE_EXTENSIONS = {".srt", ".vtt", ".ass"}
@@ -396,7 +402,7 @@ def log_media_debug_info(file_path: Path, *, context: str = "") -> dict[str, str
 
 def _transcode_to_h264(
     file_path: Path,
-    timeout: int = COMPRESSION_TIMEOUT,
+    timeout: int = TRANSCODE_TIMEOUT,
     *,
     on_progress: Callable[[float], None] | None = None,
 ) -> Path | None:
@@ -421,7 +427,11 @@ def _transcode_to_h264(
         # renders as a static image, the exact symptom this function exists
         # to fix. -map 0:v:0 forces the first real video stream instead.
         "-map", "0:v:0", "-map", "0:a?",
-        "-c:v", "libx264", "-preset", "veryfast", "-crf", "20", "-pix_fmt", "yuv420p",
+        # ultrafast over veryfast: this is a one-shot Telegram-compatibility
+        # fallback, not the primary quality path, and encode speed matters
+        # more than bitrate efficiency here — a slow encode risks timing out
+        # on long/high-resolution sources.
+        "-c:v", "libx264", "-preset", "ultrafast", "-crf", "20", "-pix_fmt", "yuv420p",
         "-c:a", "aac", "-b:a", "160k",
         "-movflags", "+faststart",
         str(output_path),

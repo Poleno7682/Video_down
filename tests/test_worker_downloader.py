@@ -629,6 +629,52 @@ def test_transcode_to_h264_success():
         assert result.exists()
 
 
+def test_transcode_to_h264_default_timeout_is_transcode_timeout():
+    """A one-shot whole-video re-encode can need more time than
+    COMPRESSION_TIMEOUT (which compress_to_size_limit uses per downscaled
+    attempt) — must default to the dedicated, longer TRANSCODE_TIMEOUT."""
+    from app.worker.downloader import TRANSCODE_TIMEOUT
+
+    with tempfile.TemporaryDirectory() as tmp:
+        src = Path(tmp) / "video.mp4"
+        src.write_bytes(b"x")
+
+        captured = {}
+
+        def fake_run(command, *, timeout, cwd=None):
+            captured["timeout"] = timeout
+            Path(command[-1]).write_bytes(b"transcoded")
+            return _completed(returncode=0)
+
+        with patch("app.worker.downloader._run_ffmpeg", side_effect=fake_run):
+            _transcode_to_h264(src)
+
+        assert captured["timeout"] == TRANSCODE_TIMEOUT
+
+
+def test_transcode_to_h264_uses_ultrafast_preset():
+    """This is a one-shot Telegram-compatibility fallback, not the primary
+    quality path — encode speed matters more than bitrate efficiency, since
+    a slow preset risks timing out on long/high-resolution sources."""
+    with tempfile.TemporaryDirectory() as tmp:
+        src = Path(tmp) / "video.mp4"
+        src.write_bytes(b"x")
+
+        captured = {}
+
+        def fake_run(command, *, timeout, cwd=None):
+            captured["command"] = command
+            Path(command[-1]).write_bytes(b"transcoded")
+            return _completed(returncode=0)
+
+        with patch("app.worker.downloader._run_ffmpeg", side_effect=fake_run):
+            _transcode_to_h264(src)
+
+        command = captured["command"]
+        preset_idx = command.index("-preset")
+        assert command[preset_idx + 1] == "ultrafast"
+
+
 def test_transcode_to_h264_maps_first_real_video_stream():
     """Without an explicit -map, ffmpeg's automatic stream selection can pick
     an embedded cover-art/thumbnail stream instead of the real video track,

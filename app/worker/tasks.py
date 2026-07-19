@@ -21,6 +21,7 @@ from app.utils.platforms import detect_platform
 from app.worker.celery_app import celery_app
 from app.worker.downloader import (
     COMPRESSION_TIMEOUT,
+    TRANSCODE_TIMEOUT,
     MediaValidationError,
     compress_to_size_limit,
     cookie_file_for_url,
@@ -100,11 +101,11 @@ _GOOGLE_REFRESH_COOLDOWN = 300  # seconds
 
 # max_download_duration_seconds only bounds the download itself; after that,
 # _upload_and_cache's pipeline can still run ensure_telegram_compatible_video's
-# H.264 transcode (up to COMPRESSION_TIMEOUT) and, separately, compress_to_size_limit
+# H.264 transcode (up to TRANSCODE_TIMEOUT) and, separately, compress_to_size_limit
 # for an oversized file (up to another COMPRESSION_TIMEOUT). Without this buffer
 # the video dedup lock could expire mid-processing and let a duplicate concurrent
 # download of the same video/quality start.
-_VIDEO_LOCK_POST_PROCESSING_BUFFER_SECONDS = 2 * COMPRESSION_TIMEOUT
+_VIDEO_LOCK_POST_PROCESSING_BUFFER_SECONDS = TRANSCODE_TIMEOUT + COMPRESSION_TIMEOUT
 
 
 def _google_refresh_key(user_id: int) -> str:
