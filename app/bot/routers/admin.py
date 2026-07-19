@@ -243,7 +243,10 @@ _PROXY_FORMATS_HELP = (
 )
 
 _MAX_PROXY_FILE_BYTES = 512 * 1024
-_MAX_PROXY_LINES_PER_FILE = 30
+_MAX_PROXY_LINES_PER_FILE = 500
+# Proxy checks are I/O-bound (network round-trip to YouTube), so this caps
+# how many run at once rather than serializing 500 checks one after another.
+_PROXY_CHECK_CONCURRENCY = 10
 
 
 @router.message(Command("addproxy"), AdminFilter())
@@ -365,11 +368,21 @@ async def handle_proxy_file(message: Message, bot: Bot) -> None:
     truncated = len(lines) > _MAX_PROXY_LINES_PER_FILE
     lines = lines[:_MAX_PROXY_LINES_PER_FILE]
 
-    status_msg = await message.answer(f"🔍 Проверяю {len(lines)} прокси, это может занять время...")
+    status_msg = await message.answer(
+        f"🔍 Проверяю {len(lines)} прокси (до {_PROXY_CHECK_CONCURRENCY} одновременно)..."
+    )
+    semaphore = asyncio.Semaphore(_PROXY_CHECK_CONCURRENCY)
+
+    async def _bounded_check(raw: str) -> tuple[str, str | None, str]:
+        async with semaphore:
+            added_url, note = await _check_and_add_proxy(raw, scheme, admin_id)
+            return raw, added_url, note
+
+    results = await asyncio.gather(*(_bounded_check(raw) for raw in lines))
+
     added: list[str] = []
     failed: list[tuple[str, str]] = []
-    for raw in lines:
-        added_url, note = await _check_and_add_proxy(raw, scheme, admin_id)
+    for raw, added_url, note in results:
         if added_url:
             added.append(added_url)
         else:
@@ -377,13 +390,16 @@ async def handle_proxy_file(message: Message, bot: Bot) -> None:
 
     clear_proxy_awaiting(admin_id, redis)
 
+    _MAX_FAILED_SHOWN = 30
     report = [f"✅ Добавлено: {len(added)}/{len(lines)}"]
     if failed:
         report.append("\n❌ Не добавлены:")
-        report += [f"  • <code>{raw}</code> — {reason}" for raw, reason in failed]
+        report += [f"  • <code>{raw}</code> — {reason}" for raw, reason in failed[:_MAX_FAILED_SHOWN]]
+        if len(failed) > _MAX_FAILED_SHOWN:
+            report.append(f"  ...и ещё {len(failed) - _MAX_FAILED_SHOWN}")
     if truncated:
         report.append(f"\n⚠️ В файле больше {_MAX_PROXY_LINES_PER_FILE} строк — обработаны только первые {_MAX_PROXY_LINES_PER_FILE}.")
-    await status_msg.edit_text("\n".join(report))
+    await status_msg.edit_text("\n".join(report)[:4000])
 
 
 @router.message(_ProxyAwaitingFilter(), F.text)
