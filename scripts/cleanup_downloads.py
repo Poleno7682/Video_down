@@ -1,9 +1,16 @@
 from __future__ import annotations
 
 import argparse
+import sys
+from pathlib import Path
 
-from app.core.config import get_settings
-from app.services.cleanup import cleanup_stale_downloads
+# Running this file directly (`python scripts/cleanup_downloads.py`) only
+# puts scripts/ on sys.path, not the project root — add it so `app.*`
+# resolves regardless of invocation style or working directory.
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from app.core.config import get_settings  # noqa: E402
+from app.services.cleanup import cleanup_stale_downloads  # noqa: E402
 
 
 def main() -> None:
