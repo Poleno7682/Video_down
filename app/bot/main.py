@@ -33,6 +33,9 @@ _ADMIN_COMMANDS = _USER_COMMANDS + [
     BotCommand(command="adduser",    description="Добавить доверенного пользователя"),
     BotCommand(command="removeuser", description="Удалить пользователя из доверенных"),
     BotCommand(command="listusers",  description="Список доверенных пользователей"),
+    BotCommand(command="addproxy",   description="Добавить SOCKS5-прокси для yt-dlp"),
+    BotCommand(command="delproxy",   description="Удалить прокси"),
+    BotCommand(command="listproxies", description="Список прокси"),
 ]
 
 

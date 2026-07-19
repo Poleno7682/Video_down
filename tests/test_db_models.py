@@ -1,4 +1,4 @@
-from app.db.models import DownloadRequest, DownloadStatus, TelegramFileType, User, Video
+from app.db.models import DownloadRequest, DownloadStatus, Proxy, TelegramFileType, User, Video
 
 
 def test_download_status_values():
@@ -23,6 +23,14 @@ def test_user_instantiation():
     assert u.username == "alice"
     assert u.first_name == "Alice"
     assert u.is_banned is False
+
+
+def test_proxy_instantiation():
+    p = Proxy(id=1, url="socks5h://user:pass@host:1080", failure_count=0, added_by=42)
+    assert p.id == 1
+    assert p.url == "socks5h://user:pass@host:1080"
+    assert p.failure_count == 0
+    assert p.added_by == 42
 
 
 def test_video_instantiation():

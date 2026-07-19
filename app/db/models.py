@@ -119,6 +119,30 @@ class UserGoogleToken(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow, nullable=False)
 
 
+class Proxy(Base):
+    """A SOCKS5(h) proxy yt-dlp can route requests through.
+
+    Managed via Telegram admin commands and shared with the worker through
+    the DB (same pattern as UserCookies) rather than a single static env var,
+    so an admin can add/remove proxies without redeploying. failure_count
+    drives failover ordering: proxies that keep failing sink to the back of
+    the rotation instead of being tried first on every request.
+    """
+
+    __tablename__ = "proxies"
+    __table_args__ = (
+        UniqueConstraint("url", name="uq_proxy_url"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    url: Mapped[str] = mapped_column(Text, nullable=False)
+    failure_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    added_by: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow, nullable=False)
+
+
 class DownloadRequest(Base):
     __tablename__ = "download_requests"
     __table_args__ = (

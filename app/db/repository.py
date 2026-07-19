@@ -6,7 +6,16 @@ from sqlalchemy import func, select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.orm import Session
 
-from app.db.models import DownloadRequest, DownloadStatus, TelegramFileType, User, UserCookies, UserGoogleToken, Video
+from app.db.models import (
+    DownloadRequest,
+    DownloadStatus,
+    Proxy,
+    TelegramFileType,
+    User,
+    UserCookies,
+    UserGoogleToken,
+    Video,
+)
 from app.db.utils import utcnow
 
 # Single source of truth for "request is still in flight" states.
@@ -146,6 +155,58 @@ class GoogleTokenRepository:
         self.session.delete(rec)
         self.session.commit()
         return True
+
+
+class ProxyRepository:
+    """Manages the SOCKS5(h) proxy pool used to route yt-dlp requests."""
+
+    def __init__(self, session: Session) -> None:
+        self.session = session
+
+    def add_proxy(self, url: str, added_by: int | None = None) -> Proxy:
+        stmt = (
+            insert(Proxy)
+            .values(url=url, added_by=added_by)
+            .on_conflict_do_nothing(constraint="uq_proxy_url")
+            .returning(Proxy)
+        )
+        proxy = self.session.execute(stmt).scalar_one_or_none()
+        self.session.commit()
+        if proxy is None:
+            proxy = self.session.execute(select(Proxy).where(Proxy.url == url)).scalar_one()
+        return proxy
+
+    def list_proxies(self) -> list[Proxy]:
+        stmt = select(Proxy).order_by(Proxy.failure_count.asc(), Proxy.id.asc())
+        return list(self.session.execute(stmt).scalars().all())
+
+    def delete_proxy(self, proxy_id: int) -> bool:
+        proxy = self.session.get(Proxy, proxy_id)
+        if not proxy:
+            return False
+        self.session.delete(proxy)
+        self.session.commit()
+        return True
+
+    def get_enabled_proxy_urls(self) -> list[str]:
+        """Proxies to try, least-failed first, so a proxy that keeps breaking
+        sinks to the back of the rotation instead of being tried first every time."""
+        stmt = select(Proxy.url).order_by(Proxy.failure_count.asc(), Proxy.id.asc())
+        return list(self.session.execute(stmt).scalars().all())
+
+    def record_proxy_success(self, url: str) -> None:
+        proxy = self.session.execute(select(Proxy).where(Proxy.url == url)).scalar_one_or_none()
+        if not proxy or proxy.failure_count == 0:
+            return
+        proxy.failure_count = 0
+        self.session.commit()
+
+    def record_proxy_failure(self, url: str) -> None:
+        proxy = self.session.execute(select(Proxy).where(Proxy.url == url)).scalar_one_or_none()
+        if not proxy:
+            return
+        proxy.failure_count += 1
+        self.session.commit()
 
 
 class VideoRepository:
@@ -347,6 +408,7 @@ class Repository:
         self._google_tokens = GoogleTokenRepository(session)
         self._videos = VideoRepository(session)
         self._requests = RequestRepository(session)
+        self._proxies = ProxyRepository(session)
 
     # -- UserRepository ----------------------------------------------------
     def upsert_user(self, user_id: int, username: str | None, first_name: str | None) -> User:
@@ -386,6 +448,25 @@ class Repository:
 
     def delete_google_token(self, user_id: int) -> bool:
         return self._google_tokens.delete_google_token(user_id)
+
+    # -- ProxyRepository ----------------------------------------------------
+    def add_proxy(self, url: str, added_by: int | None = None) -> Proxy:
+        return self._proxies.add_proxy(url, added_by)
+
+    def list_proxies(self) -> list[Proxy]:
+        return self._proxies.list_proxies()
+
+    def delete_proxy(self, proxy_id: int) -> bool:
+        return self._proxies.delete_proxy(proxy_id)
+
+    def get_enabled_proxy_urls(self) -> list[str]:
+        return self._proxies.get_enabled_proxy_urls()
+
+    def record_proxy_success(self, url: str) -> None:
+        self._proxies.record_proxy_success(url)
+
+    def record_proxy_failure(self, url: str) -> None:
+        self._proxies.record_proxy_failure(url)
 
     # -- VideoRepository -------------------------------------------------
     def get_ready_video(self, url_hash: str, quality: str) -> Video | None:

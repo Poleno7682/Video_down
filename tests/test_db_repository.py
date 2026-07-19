@@ -5,10 +5,11 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from app.db.models import DownloadRequest, DownloadStatus, TelegramFileType, User, UserCookies, Video
+from app.db.models import DownloadRequest, DownloadStatus, Proxy, TelegramFileType, User, UserCookies, Video
 from app.db.repository import (
     ACTIVE_STATUSES,
     CookieRepository,
+    ProxyRepository,
     Repository,
     RequestRepository,
     UserRepository,
@@ -148,6 +149,81 @@ class TestCookieRepository:
     def test_list_user_platforms(self):
         self.session.execute.return_value.scalars.return_value.all.return_value = ["youtube", "tiktok"]
         assert self.repo.list_user_platforms(1) == ["youtube", "tiktok"]
+
+
+# ---------------------------------------------------------------------------
+# ProxyRepository
+# ---------------------------------------------------------------------------
+
+class TestProxyRepository:
+    def setup_method(self):
+        self.session = _make_session()
+        self.repo = ProxyRepository(self.session)
+
+    def test_add_proxy_new(self):
+        proxy = Proxy(id=1, url="socks5h://a:1080", failure_count=0)
+        self.session.execute.return_value.scalar_one_or_none.return_value = proxy
+        result = self.repo.add_proxy("socks5h://a:1080", added_by=42)
+        assert result is proxy
+        self.session.commit.assert_called_once()
+
+    def test_add_proxy_duplicate_returns_existing(self):
+        existing = Proxy(id=1, url="socks5h://a:1080", failure_count=2)
+        # First execute() (the insert ON CONFLICT DO NOTHING) finds nothing new...
+        insert_result = MagicMock()
+        insert_result.scalar_one_or_none.return_value = None
+        # ...second execute() (the SELECT fallback) returns the existing row.
+        select_result = MagicMock()
+        select_result.scalar_one.return_value = existing
+        self.session.execute.side_effect = [insert_result, select_result]
+        result = self.repo.add_proxy("socks5h://a:1080")
+        assert result is existing
+
+    def test_list_proxies(self):
+        proxies = [Proxy(id=1, url="a"), Proxy(id=2, url="b")]
+        self.session.execute.return_value.scalars.return_value.all.return_value = proxies
+        assert self.repo.list_proxies() == proxies
+
+    def test_delete_proxy_found(self):
+        proxy = Proxy(id=1, url="a")
+        self.session.get.return_value = proxy
+        assert self.repo.delete_proxy(1) is True
+        self.session.delete.assert_called_once_with(proxy)
+        self.session.commit.assert_called_once()
+
+    def test_delete_proxy_not_found(self):
+        self.session.get.return_value = None
+        assert self.repo.delete_proxy(1) is False
+        self.session.delete.assert_not_called()
+
+    def test_get_enabled_proxy_urls(self):
+        self.session.execute.return_value.scalars.return_value.all.return_value = ["a", "b"]
+        assert self.repo.get_enabled_proxy_urls() == ["a", "b"]
+
+    def test_record_proxy_success_resets_failure_count(self):
+        proxy = Proxy(id=1, url="a", failure_count=3)
+        self.session.execute.return_value.scalar_one_or_none.return_value = proxy
+        self.repo.record_proxy_success("a")
+        assert proxy.failure_count == 0
+        self.session.commit.assert_called_once()
+
+    def test_record_proxy_success_noop_when_already_zero(self):
+        proxy = Proxy(id=1, url="a", failure_count=0)
+        self.session.execute.return_value.scalar_one_or_none.return_value = proxy
+        self.repo.record_proxy_success("a")
+        self.session.commit.assert_not_called()
+
+    def test_record_proxy_failure_increments(self):
+        proxy = Proxy(id=1, url="a", failure_count=1)
+        self.session.execute.return_value.scalar_one_or_none.return_value = proxy
+        self.repo.record_proxy_failure("a")
+        assert proxy.failure_count == 2
+        self.session.commit.assert_called_once()
+
+    def test_record_proxy_failure_unknown_url_noop(self):
+        self.session.execute.return_value.scalar_one_or_none.return_value = None
+        self.repo.record_proxy_failure("unknown")
+        self.session.commit.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
@@ -338,6 +414,8 @@ class TestRepositoryFacade:
         assert hasattr(repo, "upsert_user")
         assert hasattr(repo, "get_ready_video")
         assert hasattr(repo, "create_request")
+        assert hasattr(repo, "add_proxy")
+        assert hasattr(repo, "get_enabled_proxy_urls")
 
     def test_repository_shares_session(self):
         session = _make_session()

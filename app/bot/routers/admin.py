@@ -8,6 +8,8 @@ from app.bot.access import _is_admin, _KEY_BOT_DISABLED, _KEY_TRUSTED_USERS
 from app.bot.utils import safe_edit_text
 from app.bot.filters import AdminFilter
 from app.core.config import get_settings
+from app.db.repository import ProxyRepository
+from app.db.session import get_session
 from app.keyboards.admin import admin_keyboard, limits_keyboard
 from app.services.redis_client import get_redis
 from app.services.runtime_config import (
@@ -62,6 +64,9 @@ def _admin_panel_text(settings, redis) -> str:
         "  /adduser <code>&lt;id&gt;</code> — добавить доверенного\n"
         "  /removeuser <code>&lt;id&gt;</code> — удалить из доверенных\n"
         "  /listusers — список доверенных пользователей\n\n"
+        "<b>Прокси для yt-dlp (обход антибот-блокировок):</b>\n"
+        "  /addproxy <code>&lt;socks5h://user:pass@host:port&gt;</code>\n"
+        "  /delproxy <code>&lt;id&gt;</code> — /listproxies — список\n\n"
         "<b>Рассылка:</b> /broadcast или кнопка ниже.\n\n"
         "<i>Кнопки ниже: вкл/выкл бот для всех и запуск рассылки.</i>"
     )
@@ -208,6 +213,70 @@ async def list_trusted_users(message: Message) -> None:
 
     lines = "\n".join(f"• <code>{uid}</code>" for uid in sorted(members, key=int))
     await message.answer(f"👥 <b>Доверенные пользователи</b> ({len(members)}):\n\n{lines}")
+
+
+# ---------------------------------------------------------------------------
+# Proxy pool (SOCKS5/SOCKS5h) — routes yt-dlp around anti-bot IP blocks.
+# The worker tries proxies in order (least-failed first), falling over to the
+# next one on failure — see app.worker.tasks._resolve_proxies.
+# ---------------------------------------------------------------------------
+
+_PROXY_SCHEMES = ("socks5://", "socks5h://", "socks4://", "http://", "https://")
+
+
+@router.message(Command("addproxy"), AdminFilter())
+async def add_proxy(message: Message) -> None:
+    parts = (message.text or "").split(maxsplit=1)
+    url = parts[1].strip() if len(parts) >= 2 else ""
+    if not url or not url.startswith(_PROXY_SCHEMES):
+        await message.answer(
+            "Использование: <code>/addproxy socks5h://user:pass@host:port</code>\n\n"
+            "Поддерживаемые схемы: socks5h, socks5, socks4, http, https."
+        )
+        return
+
+    with get_session() as session:
+        proxy = ProxyRepository(session).add_proxy(url, added_by=message.from_user.id)
+    await message.answer(f"✅ Прокси добавлен (id <code>{proxy.id}</code>): <code>{proxy.url}</code>")
+
+
+@router.message(Command("delproxy"), AdminFilter())
+async def delete_proxy(message: Message) -> None:
+    parts = (message.text or "").split(maxsplit=1)
+    raw = parts[1].strip() if len(parts) >= 2 else ""
+    if not raw.isdigit():
+        await message.answer("Использование: <code>/delproxy &lt;id&gt;</code>\nСписок id: /listproxies")
+        return
+
+    with get_session() as session:
+        removed = ProxyRepository(session).delete_proxy(int(raw))
+    if removed:
+        await message.answer(f"✅ Прокси <code>{raw}</code> удалён.")
+    else:
+        await message.answer(f"⚠️ Прокси с id <code>{raw}</code> не найден.")
+
+
+@router.message(Command("listproxies"), AdminFilter())
+async def list_proxies(message: Message) -> None:
+    with get_session() as session:
+        proxies = ProxyRepository(session).list_proxies()
+
+    if not proxies:
+        await message.answer(
+            "Список прокси пуст.\nДобавьте: <code>/addproxy socks5h://user:pass@host:port</code>"
+        )
+        return
+
+    lines = [
+        f"• <code>{p.id}</code> — <code>{p.url}</code>"
+        + (f" ⚠️ сбоев подряд: {p.failure_count}" if p.failure_count else " ✅")
+        for p in proxies
+    ]
+    await message.answer(
+        f"🌐 <b>Прокси для yt-dlp</b> ({len(proxies)}), в порядке перебора:\n\n"
+        + "\n".join(lines)
+        + "\n\nУдалить: <code>/delproxy &lt;id&gt;</code>"
+    )
 
 
 # ---------------------------------------------------------------------------

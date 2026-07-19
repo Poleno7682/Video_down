@@ -17,6 +17,8 @@ from app.worker.tasks import (
     _is_youtube_challenge_error,
     _materialize_user_cookies,
     _handle_task_failure,
+    _record_proxy_result,
+    _resolve_proxies,
     process_download_request,
 )
 
@@ -151,6 +153,45 @@ class TestCleanupStaleDownloadsTask:
         assert result == 3
 
 
+class TestResolveProxies:
+    def test_uses_db_pool_when_present(self):
+        repo = MagicMock()
+        repo.get_enabled_proxy_urls.return_value = ["socks5h://a:1080", "socks5h://b:1080"]
+        settings = _make_settings(ytdlp_proxy="socks5h://env:1080")
+        assert _resolve_proxies(repo, settings) == ["socks5h://a:1080", "socks5h://b:1080"]
+
+    def test_falls_back_to_env_proxy_when_db_empty(self):
+        repo = MagicMock()
+        repo.get_enabled_proxy_urls.return_value = []
+        settings = _make_settings(ytdlp_proxy="socks5h://env:1080")
+        assert _resolve_proxies(repo, settings) == ["socks5h://env:1080"]
+
+    def test_empty_when_neither_configured(self):
+        repo = MagicMock()
+        repo.get_enabled_proxy_urls.return_value = []
+        settings = _make_settings(ytdlp_proxy="")
+        assert _resolve_proxies(repo, settings) == []
+
+
+class TestRecordProxyResult:
+    def test_records_success(self):
+        repo = MagicMock()
+        _record_proxy_result(repo)("socks5h://a:1080", True)
+        repo.record_proxy_success.assert_called_once_with("socks5h://a:1080")
+        repo.record_proxy_failure.assert_not_called()
+
+    def test_records_failure(self):
+        repo = MagicMock()
+        _record_proxy_result(repo)("socks5h://a:1080", False)
+        repo.record_proxy_failure.assert_called_once_with("socks5h://a:1080")
+
+    def test_ignores_direct_attempt(self):
+        repo = MagicMock()
+        _record_proxy_result(repo)(None, False)
+        repo.record_proxy_success.assert_not_called()
+        repo.record_proxy_failure.assert_not_called()
+
+
 class TestMaterializeUserCookies:
     def test_unknown_platform_returns_none(self):
         repo = MagicMock()
@@ -198,6 +239,7 @@ def _make_settings(**kwargs):
     s.max_download_duration_seconds = 1800
     s.max_file_mb = 50
     s.delete_local_file_after_telegram_cache = True
+    s.ytdlp_proxy = ""
     for k, v in kwargs.items():
         setattr(s, k, v)
     return s
@@ -225,6 +267,7 @@ def _task_ctx(req=None, settings=None, ready_video=None,
     repo.get_ready_video.return_value = ready_video
 
     repo.get_user_cookies.return_value = None
+    repo.get_enabled_proxy_urls.return_value = []
 
     limiter = MagicMock()
     limiter.acquire_user_download_slot.return_value = slot_acquired
@@ -364,7 +407,7 @@ class TestProcessDownloadRequest:
         fake_file.stat.return_value.st_size = 5 * 1024 * 1024
         captured = {}
 
-        def capture(url, quality, settings, progress_hook=None, cookie_file=None, embed_subtitles=False):
+        def capture(url, quality, settings, progress_hook=None, cookie_file=None, embed_subtitles=False, **kwargs):
             captured["cookie_file"] = cookie_file
             return fake_file, {}
 
@@ -591,6 +634,7 @@ class TestProcessDownloadRequest:
         repo.get_request.return_value = req
         repo.get_ready_video.return_value = None
         repo.get_user_cookies.return_value = None
+        repo.get_enabled_proxy_urls.return_value = []
         db_error = RuntimeError("SSL connection has been closed unexpectedly")
         # 1st call = DownloadStatus.downloading (succeeds), 2nd call =
         # DownloadStatus.sending inside _upload_and_cache — this is exactly
@@ -641,7 +685,7 @@ class TestProgressHook:
         """Run the task once with a download_video mock that captures progress_hook."""
         captured = {}
 
-        def capture(url, quality, settings, progress_hook=None, cookie_file=None, embed_subtitles=False):
+        def capture(url, quality, settings, progress_hook=None, cookie_file=None, embed_subtitles=False, **kwargs):
             if progress_hook:
                 captured["hook"] = progress_hook
             f = MagicMock(spec=Path)

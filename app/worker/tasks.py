@@ -347,6 +347,27 @@ def _acquire_video_lock_or_reject(
     return False
 
 
+def _resolve_proxies(repo: Repository, settings: Settings) -> list[str]:
+    """Proxies to try, least-failed first. Falls back to YTDLP_PROXY when the
+    admin-managed pool (DB) is empty, so an env-only setup keeps working."""
+    db_proxies = repo.get_enabled_proxy_urls()
+    if db_proxies:
+        return db_proxies
+    return [settings.ytdlp_proxy] if settings.ytdlp_proxy else []
+
+
+def _record_proxy_result(repo: Repository) -> Callable[[str | None, bool], None]:
+    def _record(proxy: str | None, success: bool) -> None:
+        if not proxy:
+            return
+        if success:
+            repo.record_proxy_success(proxy)
+        else:
+            repo.record_proxy_failure(proxy)
+
+    return _record
+
+
 def _reject_active_livestream(
     sender: TelegramSender,
     repo: Repository,
@@ -355,12 +376,14 @@ def _reject_active_livestream(
     status_message_id: int | None,
     normalized_url: str,
     settings: Settings,
+    proxies: list[str],
+    on_proxy_result: Callable[[str | None, bool], None],
 ) -> bool:
     """Reject the request if the URL points at an ongoing livestream.
 
     Returns True when the request may proceed.
     """
-    if not is_active_livestream(normalized_url, settings.ytdlp_proxy or None):
+    if not is_active_livestream(normalized_url, proxies, on_proxy_result):
         return True
     repo.update_request_status(
         request_id,
@@ -382,6 +405,8 @@ def _download_and_prepare_media(
     normalized_url: str,
     quality: str,
     settings: Settings,
+    proxies: list[str],
+    on_proxy_result: Callable[[str | None, bool], None],
 ) -> tuple[Path, dict | None, Path | None, bool]:
     """Download the video, validate it, and make it Telegram-compatible.
 
@@ -409,6 +434,8 @@ def _download_and_prepare_media(
             "🔄 Конвертирую видео для совместимости с Telegram — это может занять несколько минут...",
         ),
         on_transcode_progress=_build_transcode_progress_hook(sender, chat_id, status_message_id),
+        proxies=proxies,
+        on_proxy_result=on_proxy_result,
     )
 
     return file_path, info, user_cookie_path, cookies_were_used
@@ -538,6 +565,9 @@ def process_download_request(self, request_id: int) -> None:
     quality = req.quality
     normalized_url = req.normalized_url
 
+    proxies = _resolve_proxies(repo, settings)
+    on_proxy_result = _record_proxy_result(repo)
+
     max_duration = get_limit("max_download_duration_seconds", settings, redis)
     if not _check_user_rate_limit(
         sender, repo, limiter, settings, redis, request_id, user_id, chat_id, status_message_id, max_duration
@@ -565,12 +595,14 @@ def process_download_request(self, request_id: int) -> None:
             return
 
         if not _reject_active_livestream(
-            sender, repo, request_id, chat_id, status_message_id, normalized_url, settings
+            sender, repo, request_id, chat_id, status_message_id, normalized_url, settings,
+            proxies, on_proxy_result,
         ):
             return
 
         file_path, info, user_cookie_path, cookies_were_used = _download_and_prepare_media(
-            sender, repo, request_id, user_id, chat_id, status_message_id, normalized_url, quality, settings
+            sender, repo, request_id, user_id, chat_id, status_message_id, normalized_url, quality, settings,
+            proxies, on_proxy_result,
         )
         current_media_path = file_path
 

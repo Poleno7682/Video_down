@@ -171,30 +171,46 @@ def _extract_with_retry(url: str, opts: dict) -> dict:
             return ydl.extract_info(url, download=True) or {}
 
 
-def is_active_livestream(url: str, proxy: str | None = None) -> bool:
+def is_active_livestream(
+    url: str,
+    proxies: list[str] | None = None,
+    on_proxy_result: Callable[[str | None, bool], None] | None = None,
+) -> bool:
     """Pre-check whether the URL points to an unfinished live stream.
 
     Downloading an active stream either runs forever or produces a partial
     file, so we reject it before starting the real download.
+
+    proxies, if given, is tried in order until one of them completes the
+    check successfully (used to route around anti-bot IP blocks the same way
+    the real download does) — a failed proxy just moves on to the next one
+    rather than failing the whole pre-check.
     """
-    opts = {
-        "quiet": True,
-        "no_warnings": True,
-        "skip_download": True,
-        "noplaylist": True,
-        "logger": _YtdlpLogger(),
-    }
-    if proxy:
-        opts["proxy"] = proxy
-    try:
-        with YoutubeDL(opts) as ydl:
-            info = ydl.extract_info(url, download=False)
-    except Exception as exc:
-        logger.warning("Livestream pre-check failed for %s: %s", url, exc)
-        return False
-    if not isinstance(info, dict):
-        return False
-    return info.get("is_live") is True or str(info.get("live_status") or "").lower() == "is_live"
+    proxy_list: list[str | None] = list(proxies) if proxies else [None]
+    for proxy in proxy_list:
+        opts = {
+            "quiet": True,
+            "no_warnings": True,
+            "skip_download": True,
+            "noplaylist": True,
+            "logger": _YtdlpLogger(),
+        }
+        if proxy:
+            opts["proxy"] = proxy
+        try:
+            with YoutubeDL(opts) as ydl:
+                info = ydl.extract_info(url, download=False)
+        except Exception as exc:
+            logger.warning("Livestream pre-check via proxy=%s failed for %s: %s", proxy or "direct", url, exc)
+            if on_proxy_result:
+                on_proxy_result(proxy, False)
+            continue
+        if on_proxy_result:
+            on_proxy_result(proxy, True)
+        if not isinstance(info, dict):
+            return False
+        return info.get("is_live") is True or str(info.get("live_status") or "").lower() == "is_live"
+    return False
 
 
 def _select_output_file(work_dir: Path, before: set[Path]) -> Path:
@@ -655,6 +671,8 @@ def download_video(
     progress_hook: Callable[[dict], None] | None = None,
     cookie_file: Path | None = None,
     embed_subtitles: bool = False,
+    proxies: list[str] | None = None,
+    on_proxy_result: Callable[[str | None, bool], None] | None = None,
 ) -> tuple[Path, dict]:
     quality = normalize_quality(quality, settings.default_quality)
     # Each download gets its own subdirectory so concurrent workers cannot
@@ -665,9 +683,32 @@ def download_video(
         # Per-user cookies (cookie_file) take priority over the global shared file.
         if cookie_file is None:
             cookie_file = cookie_file_for_url(url, settings)
-        opts = _build_ydl_opts(url, quality, work_dir, progress_hook, cookie_file, embed_subtitles, settings.ytdlp_proxy or None)
 
-        info = _extract_with_retry(url, opts)
+        # proxies is tried in order — a proxy that's blocked/down for this
+        # request just falls through to the next one instead of failing the
+        # whole download, since which datacenter IP range gets flagged by a
+        # given site can vary proxy to proxy.
+        proxy_list: list[str | None] = list(proxies) if proxies else [None]
+        info: dict | None = None
+        last_exc: Exception | None = None
+        for idx, proxy in enumerate(proxy_list):
+            opts = _build_ydl_opts(url, quality, work_dir, progress_hook, cookie_file, embed_subtitles, proxy)
+            try:
+                info = _extract_with_retry(url, opts)
+            except Exception as exc:
+                last_exc = exc
+                if on_proxy_result:
+                    on_proxy_result(proxy, False)
+                logger.warning(
+                    "Download attempt %d/%d via proxy=%s failed for %s: %s",
+                    idx + 1, len(proxy_list), proxy or "direct", url, exc,
+                )
+                continue
+            if on_proxy_result:
+                on_proxy_result(proxy, True)
+            break
+        else:
+            raise last_exc
 
         file_path = _select_output_file(work_dir, set())
         if embed_subtitles and quality != "audio":
@@ -692,6 +733,8 @@ def prepare_media_for_telegram(
     debug_context: str = "",
     on_transcode_start: Callable[[], None] | None = None,
     on_transcode_progress: Callable[[float], None] | None = None,
+    proxies: list[str] | None = None,
+    on_proxy_result: Callable[[str | None, bool], None] | None = None,
 ) -> tuple[Path, dict, dict[str, str]]:
     """Facade over the yt-dlp+ffmpeg pipeline: download, validate, and make
     Telegram-compatible in one call.
@@ -714,6 +757,8 @@ def prepare_media_for_telegram(
         progress_hook=progress_hook,
         cookie_file=cookie_file,
         embed_subtitles=embed_subtitles,
+        proxies=proxies,
+        on_proxy_result=on_proxy_result,
     )
     try:
         validate_media_file(file_path, quality)
