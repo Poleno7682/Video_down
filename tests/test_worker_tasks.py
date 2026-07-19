@@ -189,13 +189,6 @@ def _make_settings(**kwargs):
     return s
 
 
-def _make_session():
-    session = MagicMock()
-    session.__enter__ = MagicMock(return_value=session)
-    session.__exit__ = MagicMock(return_value=False)
-    return session
-
-
 def _make_sender():
     sender = MagicMock()
     sender.send_file.return_value = ("fid", "uid", TelegramFileType.video)
@@ -213,7 +206,6 @@ def _task_ctx(req=None, settings=None, ready_video=None,
     if sender is None:
         sender = _make_sender()
 
-    session = _make_session()
     repo = MagicMock()
     repo.get_request.return_value = req
     repo.get_ready_video.return_value = ready_video
@@ -234,8 +226,7 @@ def _task_ctx(req=None, settings=None, ready_video=None,
     with patch("app.worker.tasks.get_settings", return_value=settings), \
          patch("app.worker.tasks.get_redis", return_value=redis_mock), \
          patch("app.worker.tasks.RateLimiter", return_value=limiter), \
-         patch("app.worker.tasks.get_session", return_value=session), \
-         patch("app.worker.tasks.Repository", return_value=repo), \
+         patch("app.worker.tasks.ScopedRepository", return_value=repo), \
          patch("app.worker.tasks.get_default_sender", return_value=sender), \
          patch("app.worker.tasks.is_active_livestream", return_value=False), \
          patch("app.worker.downloader.validate_media_file"), \
@@ -513,6 +504,23 @@ class TestProcessDownloadRequest:
                     process_download_request.apply(args=[1], retries=3)
         mock_fail.assert_called_once()
 
+    def test_operational_error_with_retries_left_skips_permanent_failure(self):
+        """sqlalchemy.exc.OperationalError (e.g. a Postgres SSL connection
+        drop, which is NOT a subclass of the builtin ConnectionError) must
+        also be auto-retried rather than treated as terminal — this is the
+        exact exception type a real production incident raised."""
+        from celery.exceptions import Retry
+        from sqlalchemy.exc import OperationalError
+
+        with _task_ctx() as (repo, limiter, sender):
+            with patch(
+                "app.worker.downloader.download_video",
+                side_effect=OperationalError("SSL connection has been closed unexpectedly", None, None),
+            ), patch("app.worker.tasks._handle_task_failure") as mock_fail:
+                with pytest.raises(Retry):
+                    process_download_request.apply(args=[1])
+        mock_fail.assert_not_called()
+
     def test_download_exception_releases_slot(self):
         req = _make_req()
         with _task_ctx(req=req) as (repo, limiter, _sender):
@@ -530,15 +538,11 @@ class TestProcessDownloadRequest:
 
     def test_db_commit_failure_during_upload_still_cleans_up(self):
         """Reproduces a transient DB blip (e.g. Postgres SSL connection drop)
-        during _upload_and_cache's status update. Before the fix, the
-        SQLAlchemy session would be left in "pending rollback" state and any
-        subsequent lazy-load of req.user_id/req.url_hash inside the except/
-        finally blocks raised PendingRollbackError — masking the original
-        error, skipping the user notification, and leaking the download slot
-        and video lock for the full rate-limit window."""
+        during _upload_and_cache's status update. Cleanup must use the plain
+        values snapshotted up front (not a lazy-load through req), and the
+        user must still be notified despite the DB failure."""
         req = _make_req()
         settings = _make_settings()
-        session = _make_session()
         repo = MagicMock()
         repo.get_request.return_value = req
         repo.get_ready_video.return_value = None
@@ -565,8 +569,7 @@ class TestProcessDownloadRequest:
         with patch("app.worker.tasks.get_settings", return_value=settings), \
              patch("app.worker.tasks.get_redis", return_value=redis_mock), \
              patch("app.worker.tasks.RateLimiter", return_value=limiter), \
-             patch("app.worker.tasks.get_session", return_value=session), \
-             patch("app.worker.tasks.Repository", return_value=repo), \
+             patch("app.worker.tasks.ScopedRepository", return_value=repo), \
              patch("app.worker.tasks.get_default_sender", return_value=sender), \
              patch("app.worker.tasks.is_active_livestream", return_value=False), \
              patch("app.worker.downloader.validate_media_file"), \
@@ -575,10 +578,8 @@ class TestProcessDownloadRequest:
             with pytest.raises(RuntimeError, match="SSL connection"):
                 process_download_request.apply(args=[1])
 
-        # Session must be rolled back before any further DB access is attempted.
-        session.rollback.assert_called_once()
         # Cleanup must use the plain values snapshotted up front, not a
-        # lazy-load through the now-recovering session.
+        # lazy-load through req.
         limiter.release_user_download_slot.assert_called_once_with(req.user_id)
         limiter.release_video_lock.assert_called_once_with(req.url_hash, req.quality)
         # The user must still be notified despite the DB failure.

@@ -6,10 +6,12 @@ import time
 from pathlib import Path
 from typing import Callable, Protocol
 
+from sqlalchemy.exc import OperationalError
+
 from app.core.config import Settings, get_settings
 from app.db.models import DownloadRequest, DownloadStatus, UserGoogleToken
 from app.db.repository import CookieRepository, Repository
-from app.db.session import get_session
+from app.db.session import ScopedRepository
 from app.services.google_oauth import generate_youtube_cookies, refresh_access_token
 from app.services.rate_limiter import RateLimiter
 from app.services.redis_client import get_redis
@@ -473,117 +475,113 @@ def _upload_and_cache(
         file_path.unlink(missing_ok=True)
 
 
-@celery_app.task(bind=True, autoretry_for=(ConnectionError,), retry_backoff=True, retry_kwargs={"max_retries": 3})
+_AUTORETRY_EXCEPTIONS = (ConnectionError, OperationalError)
+
+
+@celery_app.task(bind=True, autoretry_for=_AUTORETRY_EXCEPTIONS, retry_backoff=True, retry_kwargs={"max_retries": 3})
 def process_download_request(self, request_id: int) -> None:
     settings = get_settings()
     redis = get_redis()
     limiter = RateLimiter(redis)
     sender = get_default_sender()
 
-    with get_session() as session:
-        repo = Repository(session)
-        req = repo.get_request(request_id)
+    # ScopedRepository opens a fresh, short-lived DB session per call instead
+    # of one held open for the task's whole duration. Download + ffmpeg
+    # transcode/compress can take several minutes with no DB activity at
+    # all; holding a single session open across that gap risks its
+    # connection going idle long enough for Postgres or the network to close
+    # it, which only surfaces as an OperationalError on the next query deep
+    # in the task. A fresh session per call re-triggers pool_pre_ping every
+    # time, so a dead pooled connection gets transparently replaced instead.
+    repo = ScopedRepository()
+    req = repo.get_request(request_id)
 
-        if not req:
-            logger.warning("Request %s not found", request_id)
+    if not req:
+        logger.warning("Request %s not found", request_id)
+        return
+
+    # Snapshot the plain values cleanup/failure-handling needs up front so
+    # they're available even if a later DB call fails.
+    user_id = req.user_id
+    chat_id = req.chat_id
+    status_message_id = req.status_message_id
+    video_id = req.video_id
+    url_hash = req.url_hash
+    quality = req.quality
+    normalized_url = req.normalized_url
+
+    max_duration = get_limit("max_download_duration_seconds", settings, redis)
+    if not _check_user_rate_limit(
+        sender, repo, limiter, settings, redis, request_id, user_id, chat_id, status_message_id, max_duration
+    ):
+        return
+
+    video_lock_acquired = False
+    user_cookie_path: Path | None = None
+    cookies_were_used = False
+    try:
+        if _try_serve_from_cache(sender, repo, req, request_id, settings):
             return
 
-        # Snapshot the plain values cleanup/failure-handling needs up front.
-        # If a later commit fails (e.g. a transient DB connection drop), the
-        # SQLAlchemy session enters a "pending rollback" state where any
-        # lazy-load of an ORM attribute raises PendingRollbackError — which
-        # would otherwise mask the real error and skip releasing the user's
-        # download slot / notifying them, leaving them locked out silently.
-        user_id = req.user_id
-        chat_id = req.chat_id
-        status_message_id = req.status_message_id
-        video_id = req.video_id
-        url_hash = req.url_hash
-        quality = req.quality
-        normalized_url = req.normalized_url
-
-        max_duration = get_limit("max_download_duration_seconds", settings, redis)
-        if not _check_user_rate_limit(
-            sender, repo, limiter, settings, redis, request_id, user_id, chat_id, status_message_id, max_duration
-        ):
+        video_lock_acquired = _acquire_video_lock_or_reject(
+            sender, repo, limiter, request_id, chat_id, status_message_id, url_hash, quality,
+            max_duration + _VIDEO_LOCK_POST_PROCESSING_BUFFER_SECONDS,
+        )
+        if not video_lock_acquired:
             return
 
-        video_lock_acquired = False
-        user_cookie_path: Path | None = None
-        cookies_were_used = False
-        try:
-            if _try_serve_from_cache(sender, repo, req, request_id, settings):
-                return
+        if not _reject_active_livestream(sender, repo, request_id, chat_id, status_message_id, normalized_url):
+            return
 
-            video_lock_acquired = _acquire_video_lock_or_reject(
-                sender, repo, limiter, request_id, chat_id, status_message_id, url_hash, quality,
-                max_duration + _VIDEO_LOCK_POST_PROCESSING_BUFFER_SECONDS,
-            )
-            if not video_lock_acquired:
-                return
+        file_path, info, user_cookie_path, cookies_were_used = _download_and_prepare_media(
+            sender, repo, request_id, user_id, chat_id, status_message_id, normalized_url, quality, settings
+        )
 
-            if not _reject_active_livestream(sender, repo, request_id, chat_id, status_message_id, normalized_url):
-                return
+        sized = _enforce_size_limit(
+            sender, repo, request_id, chat_id, status_message_id, file_path, settings, redis
+        )
+        if sized is None:
+            return
+        file_path, file_size_bytes = sized
 
-            file_path, info, user_cookie_path, cookies_were_used = _download_and_prepare_media(
-                sender, repo, request_id, user_id, chat_id, status_message_id, normalized_url, quality, settings
-            )
+        _upload_and_cache(sender, repo, req, request_id, file_path, info, file_size_bytes, settings)
 
-            sized = _enforce_size_limit(
-                sender, repo, request_id, chat_id, status_message_id, file_path, settings, redis
-            )
-            if sized is None:
-                return
-            file_path, file_size_bytes = sized
+    except Exception as exc:
+        logger.exception("Failed request %s", request_id)
 
-            _upload_and_cache(sender, repo, req, request_id, file_path, info, file_size_bytes, settings)
-
-        except Exception as exc:
-            logger.exception("Failed request %s", request_id)
+        # autoretry_for makes Celery transparently retry this task after it
+        # re-raises below. Only treat the request as permanently failed —
+        # and only tell the user — once no more retries are coming;
+        # otherwise a transient blip would mark the request "failed" and
+        # notify the user before the retry that fixes itself even runs.
+        will_autoretry = isinstance(exc, _AUTORETRY_EXCEPTIONS) and self.request.retries < self.max_retries
+        if not will_autoretry:
+            refresh_key = _google_refresh_key(user_id)
+            cookie_refreshed = False
             try:
-                # Required after a failed flush/commit: SQLAlchemy refuses any
-                # further use of the session (incl. lazy-loading req.*
-                # attributes) until the aborted transaction is rolled back.
-                session.rollback()
-            except Exception:
-                logger.exception("Rollback failed for request %s", request_id)
-
-            # autoretry_for=(ConnectionError,) makes Celery transparently retry
-            # this task after it re-raises below. Only treat the request as
-            # permanently failed — and only tell the user — once no more
-            # retries are coming; otherwise a transient blip would mark the
-            # request "failed" and notify the user before the retry that
-            # fixes itself even runs.
-            will_autoretry = isinstance(exc, ConnectionError) and self.request.retries < self.max_retries
-            if not will_autoretry:
-                refresh_key = _google_refresh_key(user_id)
-                cookie_refreshed = False
-                try:
-                    recently_refreshed = bool(redis.exists(refresh_key))
-                    cookie_refreshed = (
-                        not recently_refreshed
-                        and cookies_were_used
-                        and (_is_cookie_error(exc) or _is_youtube_challenge_error(exc))
-                        and _try_refresh_google_cookies(repo, user_id)
-                    )
-                    if cookie_refreshed:
-                        redis.setex(refresh_key, _GOOGLE_REFRESH_COOLDOWN, "1")
-                except Exception:
-                    logger.exception("Cookie-refresh check failed for request %s", request_id)
-
-                _handle_task_failure(
-                    sender, repo, request_id, chat_id, status_message_id, video_id, exc,
-                    cookies_were_used=cookies_were_used,
-                    cookie_refreshed=cookie_refreshed,
+                recently_refreshed = bool(redis.exists(refresh_key))
+                cookie_refreshed = (
+                    not recently_refreshed
+                    and cookies_were_used
+                    and (_is_cookie_error(exc) or _is_youtube_challenge_error(exc))
+                    and _try_refresh_google_cookies(repo, user_id)
                 )
-            raise
+                if cookie_refreshed:
+                    redis.setex(refresh_key, _GOOGLE_REFRESH_COOLDOWN, "1")
+            except Exception:
+                logger.exception("Cookie-refresh check failed for request %s", request_id)
 
-        finally:
-            if user_cookie_path is not None:
-                user_cookie_path.unlink(missing_ok=True)
-            # Redis-only cleanup — must never depend on the DB session, which
-            # may still be unusable if the except block above couldn't
-            # recover it (e.g. the DB is genuinely down, not just blipping).
-            limiter.release_user_download_slot(user_id)
-            if video_lock_acquired:
-                limiter.release_video_lock(url_hash, quality)
+            _handle_task_failure(
+                sender, repo, request_id, chat_id, status_message_id, video_id, exc,
+                cookies_were_used=cookies_were_used,
+                cookie_refreshed=cookie_refreshed,
+            )
+        raise
+
+    finally:
+        if user_cookie_path is not None:
+            user_cookie_path.unlink(missing_ok=True)
+        # Redis-only cleanup — must never depend on the DB.
+        limiter.release_user_download_slot(user_id)
+        if video_lock_acquired:
+            limiter.release_video_lock(url_hash, quality)
