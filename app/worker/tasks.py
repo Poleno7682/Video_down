@@ -30,7 +30,7 @@ from app.worker.downloader import (
 )
 from aiogram.exceptions import TelegramEntityTooLarge
 
-from app.worker.telegram_sender import delete_status, edit_status, send_cached, send_file
+from app.worker.telegram_sender import TelegramSender, get_default_sender
 
 logger = logging.getLogger(__name__)
 
@@ -157,6 +157,7 @@ def _try_refresh_google_cookies(repo: _GoogleCookieRepo, user_id: int) -> bool:
 
 
 def _handle_task_failure(
+    sender: TelegramSender,
     repo: Repository,
     request_id: int,
     chat_id: int,
@@ -196,10 +197,11 @@ def _handle_task_failure(
         message = _STALE_COOKIE_FAILURE if cookies_were_used else _COOKIE_FAILURE
     else:
         message = _GENERIC_FAILURE
-    edit_status(chat_id, status_message_id, message)
+    sender.edit_status(chat_id, status_message_id, message)
 
 
 def _try_serve_from_cache(
+    sender: TelegramSender,
     repo: Repository,
     req: DownloadRequest,
     request_id: int,
@@ -210,14 +212,16 @@ def _try_serve_from_cache(
     if not (ready_video and ready_video.telegram_file_id and ready_video.telegram_file_type):
         return False
     repo.update_request_status(request_id, DownloadStatus.sending)
-    edit_status(req.chat_id, req.status_message_id, "⚡ Нашёл готовый Telegram file_id. Отправляю...")
-    send_cached(req.chat_id, ready_video.telegram_file_id, ready_video.telegram_file_type, get_caption(settings))
+    sender.edit_status(req.chat_id, req.status_message_id, "⚡ Нашёл готовый Telegram file_id. Отправляю...")
+    sender.send_cached(req.chat_id, ready_video.telegram_file_id, ready_video.telegram_file_type, get_caption(settings))
     repo.update_request_status(request_id, DownloadStatus.done, finished=True)
-    edit_status(req.chat_id, req.status_message_id, "✅ Отправлено из кэша.")
+    sender.edit_status(req.chat_id, req.status_message_id, "✅ Отправлено из кэша.")
     return True
 
 
-def _build_progress_hook(chat_id: int, status_message_id: int | None) -> Callable[[dict], None]:
+def _build_progress_hook(
+    sender: TelegramSender, chat_id: int, status_message_id: int | None
+) -> Callable[[dict], None]:
     """Return a yt-dlp progress hook that throttles Telegram status updates to 1 per 5 s."""
     last_update = 0.0
 
@@ -233,12 +237,13 @@ def _build_progress_hook(chat_id: int, status_message_id: int | None) -> Callabl
         downloaded = data.get("downloaded_bytes")
         if total and downloaded:
             percent = min(100, downloaded / total * 100)
-            edit_status(chat_id, status_message_id, f"⬇️ Скачано {percent:.1f}%")
+            sender.edit_status(chat_id, status_message_id, f"⬇️ Скачано {percent:.1f}%")
 
     return _hook
 
 
 def _check_user_rate_limit(
+    sender: TelegramSender,
     repo: Repository,
     limiter: RateLimiter,
     settings: Settings,
@@ -262,11 +267,12 @@ def _check_user_rate_limit(
         error="Too many active downloads for user",
         finished=True,
     )
-    edit_status(chat_id, status_message_id, "⚠️ У тебя уже есть активная загрузка. Попробуй позже.")
+    sender.edit_status(chat_id, status_message_id, "⚠️ У тебя уже есть активная загрузка. Попробуй позже.")
     return False
 
 
 def _acquire_video_lock_or_reject(
+    sender: TelegramSender,
     repo: Repository,
     limiter: RateLimiter,
     request_id: int,
@@ -288,7 +294,7 @@ def _acquire_video_lock_or_reject(
         error="Same video is already being processed",
         finished=True,
     )
-    edit_status(
+    sender.edit_status(
         chat_id,
         status_message_id,
         "⏳ Такое видео уже обрабатывается. Повтори ссылку чуть позже — будет отправлено из кэша.",
@@ -297,6 +303,7 @@ def _acquire_video_lock_or_reject(
 
 
 def _reject_active_livestream(
+    sender: TelegramSender,
     repo: Repository,
     request_id: int,
     chat_id: int,
@@ -315,11 +322,12 @@ def _reject_active_livestream(
         error="Active livestream, not a finished recording",
         finished=True,
     )
-    edit_status(chat_id, status_message_id, _LIVESTREAM_FAILURE)
+    sender.edit_status(chat_id, status_message_id, _LIVESTREAM_FAILURE)
     return False
 
 
 def _download_and_prepare_media(
+    sender: TelegramSender,
     repo: Repository,
     request_id: int,
     user_id: int,
@@ -335,7 +343,7 @@ def _download_and_prepare_media(
     caller owns cleanup of user_cookie_path.
     """
     repo.update_request_status(request_id, DownloadStatus.downloading)
-    edit_status(chat_id, status_message_id, "⬇️ Скачиваю видео...")
+    sender.edit_status(chat_id, status_message_id, "⬇️ Скачиваю видео...")
 
     user_cookie_path = _materialize_user_cookies(repo, user_id, normalized_url)
     cookies_were_used = user_cookie_path is not None or cookie_file_for_url(
@@ -345,7 +353,7 @@ def _download_and_prepare_media(
         normalized_url,
         quality,
         settings,
-        progress_hook=_build_progress_hook(chat_id, status_message_id),
+        progress_hook=_build_progress_hook(sender, chat_id, status_message_id),
         cookie_file=user_cookie_path,
         embed_subtitles=settings.embed_subtitles,
     )
@@ -360,6 +368,7 @@ def _download_and_prepare_media(
 
 
 def _enforce_size_limit(
+    sender: TelegramSender,
     repo: Repository,
     request_id: int,
     chat_id: int,
@@ -378,7 +387,7 @@ def _enforce_size_limit(
 
     max_mb = get_limit("max_file_mb", settings, redis)
     if max_mb > 0 and size_mb > max_mb:
-        edit_status(
+        sender.edit_status(
             chat_id,
             status_message_id,
             f"⚠️ Файл слишком большой ({size_mb:.1f} MB). Пробую сжать под лимит {max_mb} MB...",
@@ -397,7 +406,7 @@ def _enforce_size_limit(
             error=f"File too large: {size_mb:.1f} MB",
             finished=True,
         )
-        edit_status(
+        sender.edit_status(
             chat_id,
             status_message_id,
             f"⚠️ Файл слишком большой: {size_mb:.1f} MB. Лимит: {max_mb} MB.",
@@ -409,6 +418,7 @@ def _enforce_size_limit(
 
 
 def _upload_and_cache(
+    sender: TelegramSender,
     repo: Repository,
     req: DownloadRequest,
     request_id: int,
@@ -420,11 +430,11 @@ def _upload_and_cache(
     """Send the downloaded file to Telegram, persist the file_id, and clean up."""
     size_mb = file_size_bytes / (1024 * 1024)
     repo.update_request_status(request_id, DownloadStatus.sending)
-    edit_status(req.chat_id, req.status_message_id, f"✅ Скачано {size_mb:.1f} MB. Отправляю...")
+    sender.edit_status(req.chat_id, req.status_message_id, f"✅ Скачано {size_mb:.1f} MB. Отправляю...")
 
     title = info.get("title") if isinstance(info, dict) else None
     width, height, duration = probe_video_dimensions(file_path)
-    file_id, file_unique_id, file_type = send_file(
+    file_id, file_unique_id, file_type = sender.send_file(
         req.chat_id, file_path, get_caption(settings), width=width, height=height, duration=duration
     )
 
@@ -440,7 +450,7 @@ def _upload_and_cache(
         )
 
     repo.update_request_status(request_id, DownloadStatus.done, finished=True)
-    delete_status(req.chat_id, req.status_message_id)
+    sender.delete_status(req.chat_id, req.status_message_id)
 
     if settings.delete_local_file_after_telegram_cache:
         file_path.unlink(missing_ok=True)
@@ -451,6 +461,7 @@ def process_download_request(self, request_id: int) -> None:
     settings = get_settings()
     redis = get_redis()
     limiter = RateLimiter(redis)
+    sender = get_default_sender()
 
     with get_session() as session:
         repo = Repository(session)
@@ -476,7 +487,7 @@ def process_download_request(self, request_id: int) -> None:
 
         max_duration = get_limit("max_download_duration_seconds", settings, redis)
         if not _check_user_rate_limit(
-            repo, limiter, settings, redis, request_id, user_id, chat_id, status_message_id, max_duration
+            sender, repo, limiter, settings, redis, request_id, user_id, chat_id, status_message_id, max_duration
         ):
             return
 
@@ -484,30 +495,30 @@ def process_download_request(self, request_id: int) -> None:
         user_cookie_path: Path | None = None
         cookies_were_used = False
         try:
-            if _try_serve_from_cache(repo, req, request_id, settings):
+            if _try_serve_from_cache(sender, repo, req, request_id, settings):
                 return
 
             video_lock_acquired = _acquire_video_lock_or_reject(
-                repo, limiter, request_id, chat_id, status_message_id, url_hash, quality, max_duration
+                sender, repo, limiter, request_id, chat_id, status_message_id, url_hash, quality, max_duration
             )
             if not video_lock_acquired:
                 return
 
-            if not _reject_active_livestream(repo, request_id, chat_id, status_message_id, normalized_url):
+            if not _reject_active_livestream(sender, repo, request_id, chat_id, status_message_id, normalized_url):
                 return
 
             file_path, info, user_cookie_path, cookies_were_used = _download_and_prepare_media(
-                repo, request_id, user_id, chat_id, status_message_id, normalized_url, quality, settings
+                sender, repo, request_id, user_id, chat_id, status_message_id, normalized_url, quality, settings
             )
 
             sized = _enforce_size_limit(
-                repo, request_id, chat_id, status_message_id, file_path, settings, redis
+                sender, repo, request_id, chat_id, status_message_id, file_path, settings, redis
             )
             if sized is None:
                 return
             file_path, file_size_bytes = sized
 
-            _upload_and_cache(repo, req, request_id, file_path, info, file_size_bytes, settings)
+            _upload_and_cache(sender, repo, req, request_id, file_path, info, file_size_bytes, settings)
 
         except Exception as exc:
             logger.exception("Failed request %s", request_id)
@@ -535,7 +546,7 @@ def process_download_request(self, request_id: int) -> None:
                 logger.exception("Cookie-refresh check failed for request %s", request_id)
 
             _handle_task_failure(
-                repo, request_id, chat_id, status_message_id, video_id, exc,
+                sender, repo, request_id, chat_id, status_message_id, video_id, exc,
                 cookies_were_used=cookies_were_used,
                 cookie_refreshed=cookie_refreshed,
             )

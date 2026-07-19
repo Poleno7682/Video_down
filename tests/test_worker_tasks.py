@@ -61,57 +61,57 @@ class TestGetCaption:
 class TestHandleTaskFailure:
     def test_updates_status_and_notifies(self):
         repo = MagicMock()
+        sender = MagicMock()
         exc = ValueError("test error")
 
-        with patch("app.worker.tasks.edit_status") as mock_edit:
-            _handle_task_failure(repo, 42, 100, 200, 1, exc)
+        _handle_task_failure(sender, repo, 42, 100, 200, 1, exc)
 
         repo.update_request_status.assert_called_once_with(
             42, DownloadStatus.failed, error="ValueError: test error", finished=True
         )
         repo.mark_video_failed.assert_called_once_with(1, "ValueError: test error")
-        mock_edit.assert_called_once()
+        sender.edit_status.assert_called_once()
 
     def test_no_video_id_skips_mark_failed(self):
         repo = MagicMock()
-        with patch("app.worker.tasks.edit_status"):
-            _handle_task_failure(repo, 1, 100, 200, None, RuntimeError("oops"))
+        sender = MagicMock()
+        _handle_task_failure(sender, repo, 1, 100, 200, None, RuntimeError("oops"))
         repo.mark_video_failed.assert_not_called()
 
     def test_error_message_format(self):
         repo = MagicMock()
-        with patch("app.worker.tasks.edit_status"):
-            _handle_task_failure(repo, 5, 100, 200, None, RuntimeError("bad network"))
+        sender = MagicMock()
+        _handle_task_failure(sender, repo, 5, 100, 200, None, RuntimeError("bad network"))
         assert repo.update_request_status.call_args[1]["error"] == "RuntimeError: bad network"
 
     def test_cookie_error_shows_cookie_message(self):
         repo = MagicMock()
+        sender = MagicMock()
         exc = RuntimeError("ERROR: Sign in to confirm you're not a bot. Use --cookies")
-        with patch("app.worker.tasks.edit_status") as mock_edit:
-            _handle_task_failure(repo, 1, 100, 200, None, exc)
-        assert mock_edit.call_args[0][2] == _COOKIE_FAILURE
+        _handle_task_failure(sender, repo, 1, 100, 200, None, exc)
+        assert sender.edit_status.call_args[0][2] == _COOKIE_FAILURE
 
     def test_stale_cookie_error_when_cookies_were_used(self):
         repo = MagicMock()
+        sender = MagicMock()
         exc = RuntimeError("ERROR: Sign in to confirm you're not a bot. Use --cookies")
-        with patch("app.worker.tasks.edit_status") as mock_edit:
-            _handle_task_failure(repo, 1, 100, 200, None, exc, cookies_were_used=True)
-        assert mock_edit.call_args[0][2] == _STALE_COOKIE_FAILURE
+        _handle_task_failure(sender, repo, 1, 100, 200, None, exc, cookies_were_used=True)
+        assert sender.edit_status.call_args[0][2] == _STALE_COOKIE_FAILURE
 
     def test_generic_error_shows_generic_message(self):
         repo = MagicMock()
-        with patch("app.worker.tasks.edit_status") as mock_edit:
-            _handle_task_failure(repo, 1, 100, 200, None, RuntimeError("disk full"))
-        assert mock_edit.call_args[0][2] == _GENERIC_FAILURE
+        sender = MagicMock()
+        _handle_task_failure(sender, repo, 1, 100, 200, None, RuntimeError("disk full"))
+        assert sender.edit_status.call_args[0][2] == _GENERIC_FAILURE
 
     def test_db_write_failure_still_notifies_user(self):
         """If persisting the failure itself throws (DB still down), the
         Telegram notification — which needs no DB access — must still fire."""
         repo = MagicMock()
+        sender = MagicMock()
         repo.update_request_status.side_effect = RuntimeError("db still down")
-        with patch("app.worker.tasks.edit_status") as mock_edit:
-            _handle_task_failure(repo, 1, 100, 200, None, RuntimeError("original error"))
-        mock_edit.assert_called_once_with(100, 200, _GENERIC_FAILURE)
+        _handle_task_failure(sender, repo, 1, 100, 200, None, RuntimeError("original error"))
+        sender.edit_status.assert_called_once_with(100, 200, _GENERIC_FAILURE)
 
 
 class TestIsCookieError:
@@ -196,14 +196,22 @@ def _make_session():
     return session
 
 
+def _make_sender():
+    sender = MagicMock()
+    sender.send_file.return_value = ("fid", "uid", TelegramFileType.video)
+    return sender
+
+
 @contextmanager
 def _task_ctx(req=None, settings=None, ready_video=None,
-              slot_acquired=True, lock_acquired=True, download_result=None):
-    """Patch all task externals and yield (repo, limiter)."""
+              slot_acquired=True, lock_acquired=True, download_result=None, sender=None):
+    """Patch all task externals and yield (repo, limiter, sender)."""
     if settings is None:
         settings = _make_settings()
     if req is None:
         req = _make_req()
+    if sender is None:
+        sender = _make_sender()
 
     session = _make_session()
     repo = MagicMock()
@@ -228,14 +236,11 @@ def _task_ctx(req=None, settings=None, ready_video=None,
          patch("app.worker.tasks.RateLimiter", return_value=limiter), \
          patch("app.worker.tasks.get_session", return_value=session), \
          patch("app.worker.tasks.Repository", return_value=repo), \
-         patch("app.worker.tasks.edit_status"), \
-         patch("app.worker.tasks.delete_status"), \
-         patch("app.worker.tasks.send_cached"), \
-         patch("app.worker.tasks.send_file", return_value=("fid", "uid", TelegramFileType.video)), \
+         patch("app.worker.tasks.get_default_sender", return_value=sender), \
          patch("app.worker.tasks.is_active_livestream", return_value=False), \
          patch("app.worker.tasks.validate_media_file"), \
          patch("app.worker.tasks.download_video", return_value=dl_result):
-        yield repo, limiter
+        yield repo, limiter, sender
 
 
 # ---------------------------------------------------------------------------
@@ -245,13 +250,13 @@ def _task_ctx(req=None, settings=None, ready_video=None,
 class TestProcessDownloadRequest:
 
     def test_request_not_found(self):
-        with _task_ctx() as (repo, _):
+        with _task_ctx() as (repo, _, _sender):
             repo.get_request.return_value = None
             process_download_request.apply(args=[999])
         repo.update_request_status.assert_not_called()
 
     def test_slot_not_acquired_sets_rate_limited(self):
-        with _task_ctx(slot_acquired=False) as (repo, _):
+        with _task_ctx(slot_acquired=False) as (repo, _, _sender):
             process_download_request.apply(args=[1])
         repo.update_request_status.assert_called_once_with(
             1, DownloadStatus.rate_limited,
@@ -259,12 +264,12 @@ class TestProcessDownloadRequest:
         )
 
     def test_slot_not_acquired_skips_lock(self):
-        with _task_ctx(slot_acquired=False) as (repo, limiter):
+        with _task_ctx(slot_acquired=False) as (repo, limiter, _sender):
             process_download_request.apply(args=[1])
         limiter.acquire_video_lock.assert_not_called()
 
     def test_slot_not_acquired_no_lock_release(self):
-        with _task_ctx(slot_acquired=False) as (repo, limiter):
+        with _task_ctx(slot_acquired=False) as (repo, limiter, _sender):
             process_download_request.apply(args=[1])
         limiter.release_video_lock.assert_not_called()
 
@@ -272,7 +277,7 @@ class TestProcessDownloadRequest:
         ready = MagicMock()
         ready.telegram_file_id = "fid"
         ready.telegram_file_type = TelegramFileType.video
-        with _task_ctx(ready_video=ready) as (repo, limiter):
+        with _task_ctx(ready_video=ready) as (repo, limiter, _sender):
             process_download_request.apply(args=[1])
         limiter.acquire_video_lock.assert_not_called()
 
@@ -280,7 +285,7 @@ class TestProcessDownloadRequest:
         ready = MagicMock()
         ready.telegram_file_id = "fid"
         ready.telegram_file_type = TelegramFileType.video
-        with _task_ctx(ready_video=ready) as (repo, _):
+        with _task_ctx(ready_video=ready) as (repo, _, _sender):
             process_download_request.apply(args=[1])
         statuses = [c[0][1] for c in repo.update_request_status.call_args_list]
         assert DownloadStatus.done in statuses
@@ -289,34 +294,33 @@ class TestProcessDownloadRequest:
         ready = MagicMock()
         ready.telegram_file_id = "fid"
         ready.telegram_file_type = TelegramFileType.video
-        with _task_ctx(ready_video=ready) as (repo, limiter):
-            with patch("app.worker.tasks.send_cached") as mock_cached:
-                process_download_request.apply(args=[1])
-        mock_cached.assert_called_once()
+        with _task_ctx(ready_video=ready) as (repo, limiter, sender):
+            process_download_request.apply(args=[1])
+        sender.send_cached.assert_called_once()
 
     def test_video_lock_not_acquired_sets_rate_limited(self):
-        with _task_ctx(lock_acquired=False) as (repo, _):
+        with _task_ctx(lock_acquired=False) as (repo, _, _sender):
             process_download_request.apply(args=[1])
         statuses = {c[0][1] for c in repo.update_request_status.call_args_list}
         assert DownloadStatus.rate_limited in statuses
 
     def test_video_lock_not_acquired_releases_slot(self):
         req = _make_req()
-        with _task_ctx(req=req, lock_acquired=False) as (repo, limiter):
+        with _task_ctx(req=req, lock_acquired=False) as (repo, limiter, _sender):
             process_download_request.apply(args=[1])
         limiter.release_user_download_slot.assert_called_with(req.user_id)
 
     def test_successful_download_marks_video_ready(self):
         fake_file = MagicMock(spec=Path)
         fake_file.stat.return_value.st_size = 10 * 1024 * 1024
-        with _task_ctx(download_result=(fake_file, {"title": "Vid"})) as (repo, _):
+        with _task_ctx(download_result=(fake_file, {"title": "Vid"})) as (repo, _, _sender):
             process_download_request.apply(args=[1])
         repo.mark_video_ready.assert_called_once()
 
     def test_successful_download_logs_media_debug_info(self):
         fake_file = MagicMock(spec=Path)
         fake_file.stat.return_value.st_size = 10 * 1024 * 1024
-        with _task_ctx(download_result=(fake_file, {"title": "Vid"})) as (repo, _):
+        with _task_ctx(download_result=(fake_file, {"title": "Vid"})) as (repo, _, _sender):
             with patch("app.worker.tasks.log_media_debug_info") as mock_log:
                 process_download_request.apply(args=[1])
         mock_log.assert_called_once()
@@ -329,7 +333,7 @@ class TestProcessDownloadRequest:
         transcoded_file = MagicMock(spec=Path)
         transcoded_file.stat.return_value.st_size = 12 * 1024 * 1024
 
-        with _task_ctx(download_result=(fake_file, {"title": "Vid"})) as (repo, _):
+        with _task_ctx(download_result=(fake_file, {"title": "Vid"})) as (repo, _, _sender):
             with patch("app.worker.tasks.log_media_debug_info", return_value={"video": "av1", "audio": "aac"}), \
                  patch("app.worker.tasks.ensure_telegram_compatible_video", return_value=transcoded_file) as mock_ensure:
                 process_download_request.apply(args=[1])
@@ -342,7 +346,7 @@ class TestProcessDownloadRequest:
         fake_file = MagicMock(spec=Path)
         fake_file.stat.return_value.st_size = 5 * 1024 * 1024
 
-        with _task_ctx(req=req, download_result=(fake_file, {})) as (repo, _):
+        with _task_ctx(req=req, download_result=(fake_file, {})) as (repo, _, _sender):
             with patch("app.worker.tasks.ensure_telegram_compatible_video") as mock_ensure:
                 process_download_request.apply(args=[1])
 
@@ -357,7 +361,7 @@ class TestProcessDownloadRequest:
             captured["cookie_file"] = cookie_file
             return fake_file, {}
 
-        with _task_ctx() as (repo, _):
+        with _task_ctx() as (repo, _, _sender):
             repo.get_user_cookies.return_value = "# Netscape HTTP Cookie File\n"
             with patch("app.worker.tasks.download_video", side_effect=capture):
                 process_download_request.apply(args=[1])
@@ -369,7 +373,7 @@ class TestProcessDownloadRequest:
     def test_successful_download_marks_done(self):
         fake_file = MagicMock(spec=Path)
         fake_file.stat.return_value.st_size = 5 * 1024 * 1024
-        with _task_ctx(download_result=(fake_file, {})) as (repo, _):
+        with _task_ctx(download_result=(fake_file, {})) as (repo, _, _sender):
             process_download_request.apply(args=[1])
         statuses = [c[0][1] for c in repo.update_request_status.call_args_list]
         assert DownloadStatus.done in statuses
@@ -378,7 +382,7 @@ class TestProcessDownloadRequest:
         fake_file = MagicMock(spec=Path)
         fake_file.stat.return_value.st_size = 5 * 1024 * 1024
         settings = _make_settings(delete_local_file_after_telegram_cache=True)
-        with _task_ctx(settings=settings, download_result=(fake_file, {})) as (repo, _):
+        with _task_ctx(settings=settings, download_result=(fake_file, {})) as (repo, _, _sender):
             process_download_request.apply(args=[1])
         fake_file.unlink.assert_called_once_with(missing_ok=True)
 
@@ -386,7 +390,7 @@ class TestProcessDownloadRequest:
         fake_file = MagicMock(spec=Path)
         fake_file.stat.return_value.st_size = 5 * 1024 * 1024
         settings = _make_settings(delete_local_file_after_telegram_cache=False)
-        with _task_ctx(settings=settings, download_result=(fake_file, {})) as (repo, _):
+        with _task_ctx(settings=settings, download_result=(fake_file, {})) as (repo, _, _sender):
             process_download_request.apply(args=[1])
         fake_file.unlink.assert_not_called()
 
@@ -394,14 +398,14 @@ class TestProcessDownloadRequest:
         req = _make_req(video_id=None)
         fake_file = MagicMock(spec=Path)
         fake_file.stat.return_value.st_size = 3 * 1024 * 1024
-        with _task_ctx(req=req, download_result=(fake_file, {})) as (repo, _):
+        with _task_ctx(req=req, download_result=(fake_file, {})) as (repo, _, _sender):
             process_download_request.apply(args=[1])
         repo.mark_video_ready.assert_not_called()
 
     def test_file_too_large_sets_too_large_status(self):
         big_file = MagicMock(spec=Path)
         big_file.stat.return_value.st_size = 100 * 1024 * 1024
-        with _task_ctx(download_result=(big_file, {})) as (repo, _):
+        with _task_ctx(download_result=(big_file, {})) as (repo, _, _sender):
             process_download_request.apply(args=[1])
         statuses = {c[0][1] for c in repo.update_request_status.call_args_list}
         assert DownloadStatus.too_large in statuses
@@ -409,19 +413,19 @@ class TestProcessDownloadRequest:
     def test_file_too_large_deletes_file(self):
         big_file = MagicMock(spec=Path)
         big_file.stat.return_value.st_size = 200 * 1024 * 1024
-        with _task_ctx(download_result=(big_file, {})) as (repo, _):
+        with _task_ctx(download_result=(big_file, {})) as (repo, _, _sender):
             process_download_request.apply(args=[1])
         big_file.unlink.assert_called_once_with(missing_ok=True)
 
     def test_file_too_large_skips_mark_ready(self):
         big_file = MagicMock(spec=Path)
         big_file.stat.return_value.st_size = 200 * 1024 * 1024
-        with _task_ctx(download_result=(big_file, {})) as (repo, _):
+        with _task_ctx(download_result=(big_file, {})) as (repo, _, _sender):
             process_download_request.apply(args=[1])
         repo.mark_video_ready.assert_not_called()
 
     def test_active_livestream_rejected_before_download(self):
-        with _task_ctx() as (repo, _):
+        with _task_ctx() as (repo, _, _sender):
             with patch("app.worker.tasks.is_active_livestream", return_value=True) as mock_live, \
                  patch("app.worker.tasks.download_video") as mock_download:
                 process_download_request.apply(args=[1])
@@ -433,7 +437,7 @@ class TestProcessDownloadRequest:
     def test_corrupt_media_marks_failed(self):
         from app.worker.downloader import MediaValidationError
 
-        with _task_ctx() as (repo, _):
+        with _task_ctx() as (repo, _, _sender):
             with patch("app.worker.tasks.validate_media_file", side_effect=MediaValidationError("bad")):
                 with pytest.raises(MediaValidationError):
                     process_download_request.apply(args=[1])
@@ -446,7 +450,7 @@ class TestProcessDownloadRequest:
         small_file = MagicMock(spec=Path)
         small_file.stat.return_value.st_size = 10 * 1024 * 1024
 
-        with _task_ctx(download_result=(big_file, {})) as (repo, _):
+        with _task_ctx(download_result=(big_file, {})) as (repo, _, _sender):
             with patch("app.worker.tasks.compress_to_size_limit", return_value=small_file) as mock_compress:
                 process_download_request.apply(args=[1])
 
@@ -460,7 +464,7 @@ class TestProcessDownloadRequest:
         big_file = MagicMock(spec=Path)
         big_file.stat.return_value.st_size = 100 * 1024 * 1024
 
-        with _task_ctx(download_result=(big_file, {})) as (repo, _):
+        with _task_ctx(download_result=(big_file, {})) as (repo, _, _sender):
             with patch("app.worker.tasks.compress_to_size_limit", return_value=None) as mock_compress:
                 process_download_request.apply(args=[1])
 
@@ -469,7 +473,7 @@ class TestProcessDownloadRequest:
         assert DownloadStatus.too_large in statuses
 
     def test_download_exception_calls_handle_failure(self):
-        with _task_ctx() as (repo, limiter):
+        with _task_ctx() as (repo, limiter, _sender):
             with patch("app.worker.tasks.download_video", side_effect=RuntimeError("yt-dlp fail")), \
                  patch("app.worker.tasks._handle_task_failure") as mock_fail:
                 with pytest.raises(RuntimeError, match="yt-dlp fail"):
@@ -478,14 +482,14 @@ class TestProcessDownloadRequest:
 
     def test_download_exception_releases_slot(self):
         req = _make_req()
-        with _task_ctx(req=req) as (repo, limiter):
+        with _task_ctx(req=req) as (repo, limiter, _sender):
             with patch("app.worker.tasks.download_video", side_effect=RuntimeError("fail")):
                 with pytest.raises(RuntimeError):
                     process_download_request.apply(args=[1])
         limiter.release_user_download_slot.assert_called_with(req.user_id)
 
     def test_download_exception_releases_video_lock(self):
-        with _task_ctx(lock_acquired=True) as (repo, limiter):
+        with _task_ctx(lock_acquired=True) as (repo, limiter, _sender):
             with patch("app.worker.tasks.download_video", side_effect=RuntimeError("fail")):
                 with pytest.raises(RuntimeError):
                     process_download_request.apply(args=[1])
@@ -523,12 +527,14 @@ class TestProcessDownloadRequest:
         redis_mock.get.return_value = None
         redis_mock.exists.return_value = False
 
+        sender = _make_sender()
+
         with patch("app.worker.tasks.get_settings", return_value=settings), \
              patch("app.worker.tasks.get_redis", return_value=redis_mock), \
              patch("app.worker.tasks.RateLimiter", return_value=limiter), \
              patch("app.worker.tasks.get_session", return_value=session), \
              patch("app.worker.tasks.Repository", return_value=repo), \
-             patch("app.worker.tasks.edit_status") as mock_edit, \
+             patch("app.worker.tasks.get_default_sender", return_value=sender), \
              patch("app.worker.tasks.is_active_livestream", return_value=False), \
              patch("app.worker.tasks.validate_media_file"), \
              patch("app.worker.tasks.log_media_debug_info", return_value={}), \
@@ -543,7 +549,7 @@ class TestProcessDownloadRequest:
         limiter.release_user_download_slot.assert_called_once_with(req.user_id)
         limiter.release_video_lock.assert_called_once_with(req.url_hash, req.quality)
         # The user must still be notified despite the DB failure.
-        mock_edit.assert_called_with(req.chat_id, req.status_message_id, _GENERIC_FAILURE)
+        sender.edit_status.assert_called_with(req.chat_id, req.status_message_id, _GENERIC_FAILURE)
 
 
 # ---------------------------------------------------------------------------
@@ -564,56 +570,56 @@ class TestProgressHook:
             f.stat.return_value.st_size = 5 * 1024 * 1024
             return f, {}
 
-        with _task_ctx() as (repo, _):
-            with patch("app.worker.tasks.download_video", side_effect=capture), \
-                 patch("app.worker.tasks.send_file", return_value=("fid", "uid", TelegramFileType.video)):
+        sender = _make_sender()
+        with _task_ctx(sender=sender) as (repo, _, _sender):
+            with patch("app.worker.tasks.download_video", side_effect=capture):
                 process_download_request.apply(args=[1])
 
-        return captured["hook"]
+        return captured["hook"], sender
 
     def test_hook_reports_download_progress(self):
-        hook = self._capture_hook()
-        with patch("app.worker.tasks.time") as mock_time, \
-             patch("app.worker.tasks.edit_status") as mock_edit:
+        hook, sender = self._capture_hook()
+        sender.edit_status.reset_mock()
+        with patch("app.worker.tasks.time") as mock_time:
             mock_time.time.return_value = 1000.0  # well past the 5-second throttle
             hook({"status": "downloading", "total_bytes": 200, "downloaded_bytes": 100})
-        mock_edit.assert_called_once()
-        call_text = mock_edit.call_args[0][2]
+        sender.edit_status.assert_called_once()
+        call_text = sender.edit_status.call_args[0][2]
         assert "50.0%" in call_text
 
     def test_hook_skips_non_downloading_status(self):
-        hook = self._capture_hook()
-        with patch("app.worker.tasks.time") as mock_time, \
-             patch("app.worker.tasks.edit_status") as mock_edit:
+        hook, sender = self._capture_hook()
+        sender.edit_status.reset_mock()
+        with patch("app.worker.tasks.time") as mock_time:
             mock_time.time.return_value = 1000.0
             hook({"status": "finished"})
-        mock_edit.assert_not_called()
+        sender.edit_status.assert_not_called()
 
     def test_hook_throttled_when_called_too_soon(self):
-        hook = self._capture_hook()
-        with patch("app.worker.tasks.time") as mock_time, \
-             patch("app.worker.tasks.edit_status") as mock_edit:
+        hook, sender = self._capture_hook()
+        sender.edit_status.reset_mock()
+        with patch("app.worker.tasks.time") as mock_time:
             # Simulate time just 1 second after the last update (< 5)
             mock_time.time.return_value = 1.0  # last_progress_update is 0.0, diff=1.0 < 5
             hook({"status": "downloading", "total_bytes": 100, "downloaded_bytes": 50})
-        mock_edit.assert_not_called()
+        sender.edit_status.assert_not_called()
 
     def test_hook_skips_when_no_total_bytes(self):
-        hook = self._capture_hook()
-        with patch("app.worker.tasks.time") as mock_time, \
-             patch("app.worker.tasks.edit_status") as mock_edit:
+        hook, sender = self._capture_hook()
+        sender.edit_status.reset_mock()
+        with patch("app.worker.tasks.time") as mock_time:
             mock_time.time.return_value = 1000.0
             hook({"status": "downloading", "total_bytes": None, "total_bytes_estimate": None,
                   "downloaded_bytes": 50})
-        mock_edit.assert_not_called()
+        sender.edit_status.assert_not_called()
 
     def test_hook_uses_total_bytes_estimate(self):
-        hook = self._capture_hook()
-        with patch("app.worker.tasks.time") as mock_time, \
-             patch("app.worker.tasks.edit_status") as mock_edit:
+        hook, sender = self._capture_hook()
+        sender.edit_status.reset_mock()
+        with patch("app.worker.tasks.time") as mock_time:
             mock_time.time.return_value = 1000.0
             hook({"status": "downloading", "total_bytes": None,
                   "total_bytes_estimate": 400, "downloaded_bytes": 100})
-        mock_edit.assert_called_once()
-        call_text = mock_edit.call_args[0][2]
+        sender.edit_status.assert_called_once()
+        call_text = sender.edit_status.call_args[0][2]
         assert "25.0%" in call_text
