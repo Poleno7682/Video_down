@@ -144,9 +144,12 @@ def test_cookie_file_unknown_domain():
 # _build_ydl_opts
 # ---------------------------------------------------------------------------
 
+_TEST_URL = "https://youtube.com/watch?v=x"
+
+
 def test_build_ydl_opts_basic():
     work_dir = Path("/tmp")
-    opts = _build_ydl_opts("720p", work_dir, None, None)
+    opts = _build_ydl_opts(_TEST_URL, "720p", work_dir, None, None)
     assert "outtmpl" in opts
     assert opts["noplaylist"] is True
     assert opts["progress_hooks"] == []
@@ -157,31 +160,41 @@ def test_build_ydl_opts_basic():
 
 
 def test_build_ydl_opts_audio_postprocessor():
-    opts = _build_ydl_opts("audio", Path("/tmp"), None, None)
+    opts = _build_ydl_opts(_TEST_URL, "audio", Path("/tmp"), None, None)
     assert any(p["key"] == "FFmpegExtractAudio" for p in opts["postprocessors"])
     assert opts["merge_output_format"] == "m4a"
 
 
 def test_build_ydl_opts_video_merge_format():
-    opts = _build_ydl_opts("720p", Path("/tmp"), None, None)
+    opts = _build_ydl_opts(_TEST_URL, "720p", Path("/tmp"), None, None)
     assert opts["merge_output_format"] == "mp4"
 
 
 def test_build_ydl_opts_with_cookie_file():
     cookie = Path("/cookies/fb.txt")
-    opts = _build_ydl_opts("720p", Path("/tmp"), None, cookie)
+    opts = _build_ydl_opts(_TEST_URL, "720p", Path("/tmp"), None, cookie)
     assert opts["cookiefile"] == str(cookie)
 
 
 def test_build_ydl_opts_with_progress_hook():
     hook = MagicMock()
-    opts = _build_ydl_opts("720p", Path("/tmp"), hook, None)
+    opts = _build_ydl_opts(_TEST_URL, "720p", Path("/tmp"), hook, None)
     assert opts["progress_hooks"] == [hook]
 
 
 def test_build_ydl_opts_has_logger():
-    opts = _build_ydl_opts("720p", Path("/tmp"), None, None)
+    opts = _build_ydl_opts(_TEST_URL, "720p", Path("/tmp"), None, None)
     assert isinstance(opts["logger"], _YtdlpLogger)
+
+
+def test_build_ydl_opts_uses_facebook_hd_fallback():
+    opts = _build_ydl_opts("https://www.facebook.com/share/r/abc/", "720p", Path("/tmp"), None, None)
+    assert opts["format"].startswith("hd/")
+
+
+def test_build_ydl_opts_no_hd_fallback_for_non_facebook():
+    opts = _build_ydl_opts(_TEST_URL, "720p", Path("/tmp"), None, None)
+    assert not opts["format"].startswith("hd/")
 
 
 # ---------------------------------------------------------------------------

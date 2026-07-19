@@ -140,3 +140,28 @@ class TestFormatSelectorAgainstRealFormatList:
 
     def test_picks_h264_format_with_real_audio_over_higher_res_h265(self):
         assert self._resolve("720p") == "h264_540p_2685682-0"
+
+
+class TestFacebookHdFallback:
+    def test_prepends_hd_for_facebook_url(self):
+        fmt = format_selector("720p", "https://www.facebook.com/share/r/abc123/")
+        assert fmt.startswith("hd/")
+        # Everything after "hd/" must be the normal chain, unmodified.
+        assert fmt[len("hd/"):] == format_selector("720p")
+
+    def test_prepends_hd_for_fb_watch_url(self):
+        fmt = format_selector("720p", "https://fb.watch/abc123/")
+        assert fmt.startswith("hd/")
+
+    def test_no_hd_fallback_without_url(self):
+        assert not format_selector("720p").startswith("hd/")
+
+    def test_no_hd_fallback_for_other_platforms(self):
+        fmt = format_selector("720p", "https://www.youtube.com/watch?v=x")
+        assert not fmt.startswith("hd/")
+
+    def test_no_hd_fallback_for_audio_quality(self):
+        """hd is a muxed video+audio format — irrelevant/wrong for an
+        audio-only request."""
+        fmt = format_selector("audio", "https://www.facebook.com/share/r/abc123/")
+        assert not fmt.startswith("hd/")

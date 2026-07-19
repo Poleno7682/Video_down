@@ -86,6 +86,7 @@ def cookie_file_for_url(url: str, settings: Settings) -> Path | None:
 
 
 def _build_ydl_opts(
+    url: str,
     quality: str,
     work_dir: Path,
     progress_hook: Callable[[dict], None] | None,
@@ -102,7 +103,7 @@ def _build_ydl_opts(
         "retries": 3,
         "fragment_retries": 5,
         "socket_timeout": 30,
-        "format": format_selector(quality),
+        "format": format_selector(quality, url),
         "merge_output_format": "mp4" if quality != "audio" else "m4a",
         "progress_hooks": [progress_hook] if progress_hook else [],
         "postprocessors": [],
@@ -564,7 +565,7 @@ def download_video(
         # Per-user cookies (cookie_file) take priority over the global shared file.
         if cookie_file is None:
             cookie_file = cookie_file_for_url(url, settings)
-        opts = _build_ydl_opts(quality, work_dir, progress_hook, cookie_file, embed_subtitles)
+        opts = _build_ydl_opts(url, quality, work_dir, progress_hook, cookie_file, embed_subtitles)
 
         info = _extract_with_retry(url, opts)
 

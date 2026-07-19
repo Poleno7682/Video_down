@@ -1,3 +1,5 @@
+from app.utils.platforms import FACEBOOK, detect_platform
+
 _H264_VCODEC_FILTER = "[vcodec~='^(avc1|h264)']"
 
 
@@ -80,5 +82,17 @@ def normalize_quality(value: str | None, default: str = "720p") -> str:
     return value if value in QUALITY_FORMATS else default
 
 
-def format_selector(quality: str) -> str:
-    return QUALITY_FORMATS[normalize_quality(quality)]
+def format_selector(quality: str, url: str | None = None) -> str:
+    quality = normalize_quality(quality)
+    base = QUALITY_FORMATS[quality]
+    if quality != "audio" and url and detect_platform(url) == FACEBOOK:
+        # Facebook's legacy progressive "hd" format is typically a single,
+        # already-muxed H.264+AAC file — cleaner and more reliable than its
+        # DASH formats, which are often video-only AV1 needing our own
+        # codec detection + transcode fallback (and yt-dlp can't report
+        # "hd"'s own codec/resolution ahead of time, so it can't be targeted
+        # through the filter-based selectors above). As a literal format-id
+        # fallback this is harmless everywhere else: yt-dlp simply skips it
+        # when the id doesn't exist and falls through to the normal chain.
+        return f"hd/{base}"
+    return base
