@@ -49,6 +49,14 @@ services:
       - ./downloads:/app/downloads
       - ./cookies:/app/cookies:ro
       - ./logs:/app/logs
+      # Only used when USE_LOCAL_BOT_API=true (see the telegram-bot-api
+      # service below). aiogram's Local Bot API mode downloads files
+      # (cookies.txt, proxy list .txt uploads, etc.) by reading the path
+      # Telegram returns directly off disk instead of over HTTP — that
+      # path only exists inside this shared volume, which the local API
+      # server writes to. Without this mount here too, any file upload
+      # fails with FileNotFoundError even though the bot itself works fine.
+      - telegram_bot_api_data:/var/lib/telegram-bot-api
     networks:
       - internal
 
