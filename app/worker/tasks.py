@@ -238,6 +238,176 @@ def _build_progress_hook(chat_id: int, status_message_id: int | None) -> Callabl
     return _hook
 
 
+def _check_user_rate_limit(
+    repo: Repository,
+    limiter: RateLimiter,
+    settings: Settings,
+    redis,
+    request_id: int,
+    user_id: int,
+    chat_id: int,
+    status_message_id: int | None,
+    max_duration: int,
+) -> bool:
+    """Reject the request if the user already has too many active downloads.
+
+    Returns True when the request may proceed.
+    """
+    max_active = get_limit("max_active_downloads_per_user", settings, redis)
+    if max_active <= 0 or limiter.acquire_user_download_slot(user_id, max_active, max_duration):
+        return True
+    repo.update_request_status(
+        request_id,
+        DownloadStatus.rate_limited,
+        error="Too many active downloads for user",
+        finished=True,
+    )
+    edit_status(chat_id, status_message_id, "⚠️ У тебя уже есть активная загрузка. Попробуй позже.")
+    return False
+
+
+def _acquire_video_lock_or_reject(
+    repo: Repository,
+    limiter: RateLimiter,
+    request_id: int,
+    chat_id: int,
+    status_message_id: int | None,
+    url_hash: str,
+    quality: str,
+    max_duration: int,
+) -> bool:
+    """Reject the request if the same video/quality is already being processed.
+
+    Returns True when the lock was acquired and the request may proceed.
+    """
+    if limiter.acquire_video_lock(url_hash, quality, max_duration):
+        return True
+    repo.update_request_status(
+        request_id,
+        DownloadStatus.rate_limited,
+        error="Same video is already being processed",
+        finished=True,
+    )
+    edit_status(
+        chat_id,
+        status_message_id,
+        "⏳ Такое видео уже обрабатывается. Повтори ссылку чуть позже — будет отправлено из кэша.",
+    )
+    return False
+
+
+def _reject_active_livestream(
+    repo: Repository,
+    request_id: int,
+    chat_id: int,
+    status_message_id: int | None,
+    normalized_url: str,
+) -> bool:
+    """Reject the request if the URL points at an ongoing livestream.
+
+    Returns True when the request may proceed.
+    """
+    if not is_active_livestream(normalized_url):
+        return True
+    repo.update_request_status(
+        request_id,
+        DownloadStatus.failed,
+        error="Active livestream, not a finished recording",
+        finished=True,
+    )
+    edit_status(chat_id, status_message_id, _LIVESTREAM_FAILURE)
+    return False
+
+
+def _download_and_prepare_media(
+    repo: Repository,
+    request_id: int,
+    user_id: int,
+    chat_id: int,
+    status_message_id: int | None,
+    normalized_url: str,
+    quality: str,
+    settings: Settings,
+) -> tuple[Path, dict | None, Path | None, bool]:
+    """Download the video, validate it, and make it Telegram-compatible.
+
+    Returns (file_path, info, user_cookie_path, cookies_were_used). The
+    caller owns cleanup of user_cookie_path.
+    """
+    repo.update_request_status(request_id, DownloadStatus.downloading)
+    edit_status(chat_id, status_message_id, "⬇️ Скачиваю видео...")
+
+    user_cookie_path = _materialize_user_cookies(repo, user_id, normalized_url)
+    cookies_were_used = user_cookie_path is not None or cookie_file_for_url(
+        normalized_url, settings
+    ) is not None
+    file_path, info = download_video(
+        normalized_url,
+        quality,
+        settings,
+        progress_hook=_build_progress_hook(chat_id, status_message_id),
+        cookie_file=user_cookie_path,
+        embed_subtitles=settings.embed_subtitles,
+    )
+
+    validate_media_file(file_path, quality)
+    debug_context = f"request={request_id} url={normalized_url} quality={quality}"
+    codecs = log_media_debug_info(file_path, context=debug_context)
+    if quality != "audio":
+        file_path = ensure_telegram_compatible_video(file_path, codecs)
+
+    return file_path, info, user_cookie_path, cookies_were_used
+
+
+def _enforce_size_limit(
+    repo: Repository,
+    request_id: int,
+    chat_id: int,
+    status_message_id: int | None,
+    file_path: Path,
+    settings: Settings,
+    redis,
+) -> tuple[Path, int] | None:
+    """Compress the file if it exceeds the configured limit; reject if still too large.
+
+    Returns (file_path, file_size_bytes) to continue with, or None when the
+    request was rejected (status/message already sent, file already cleaned up).
+    """
+    file_size_bytes = file_path.stat().st_size
+    size_mb = file_size_bytes / (1024 * 1024)
+
+    max_mb = get_limit("max_file_mb", settings, redis)
+    if max_mb > 0 and size_mb > max_mb:
+        edit_status(
+            chat_id,
+            status_message_id,
+            f"⚠️ Файл слишком большой ({size_mb:.1f} MB). Пробую сжать под лимит {max_mb} MB...",
+        )
+        compressed_path = compress_to_size_limit(file_path, max_mb)
+        if compressed_path is not None:
+            file_path.unlink(missing_ok=True)
+            file_path = compressed_path
+            file_size_bytes = file_path.stat().st_size
+            size_mb = file_size_bytes / (1024 * 1024)
+
+    if max_mb > 0 and size_mb > max_mb:
+        repo.update_request_status(
+            request_id,
+            DownloadStatus.too_large,
+            error=f"File too large: {size_mb:.1f} MB",
+            finished=True,
+        )
+        edit_status(
+            chat_id,
+            status_message_id,
+            f"⚠️ Файл слишком большой: {size_mb:.1f} MB. Лимит: {max_mb} MB.",
+        )
+        file_path.unlink(missing_ok=True)
+        return None
+
+    return file_path, file_size_bytes
+
+
 def _upload_and_cache(
     repo: Repository,
     req: DownloadRequest,
@@ -304,18 +474,10 @@ def process_download_request(self, request_id: int) -> None:
         quality = req.quality
         normalized_url = req.normalized_url
 
-        max_active = get_limit("max_active_downloads_per_user", settings, redis)
         max_duration = get_limit("max_download_duration_seconds", settings, redis)
-        if max_active > 0 and not limiter.acquire_user_download_slot(
-            user_id, max_active, max_duration
+        if not _check_user_rate_limit(
+            repo, limiter, settings, redis, request_id, user_id, chat_id, status_message_id, max_duration
         ):
-            repo.update_request_status(
-                request_id,
-                DownloadStatus.rate_limited,
-                error="Too many active downloads for user",
-                finished=True,
-            )
-            edit_status(chat_id, status_message_id, "⚠️ У тебя уже есть активная загрузка. Попробуй позже.")
             return
 
         video_lock_acquired = False
@@ -325,89 +487,25 @@ def process_download_request(self, request_id: int) -> None:
             if _try_serve_from_cache(repo, req, request_id, settings):
                 return
 
-            video_lock_acquired = limiter.acquire_video_lock(
-                url_hash,
-                quality,
-                get_limit("max_download_duration_seconds", settings, redis),
+            video_lock_acquired = _acquire_video_lock_or_reject(
+                repo, limiter, request_id, chat_id, status_message_id, url_hash, quality, max_duration
             )
-
             if not video_lock_acquired:
-                repo.update_request_status(
-                    request_id,
-                    DownloadStatus.rate_limited,
-                    error="Same video is already being processed",
-                    finished=True,
-                )
-                edit_status(
-                    chat_id,
-                    status_message_id,
-                    "⏳ Такое видео уже обрабатывается. Повтори ссылку чуть позже — будет отправлено из кэша.",
-                )
                 return
 
-            if is_active_livestream(normalized_url):
-                repo.update_request_status(
-                    request_id,
-                    DownloadStatus.failed,
-                    error="Active livestream, not a finished recording",
-                    finished=True,
-                )
-                edit_status(chat_id, status_message_id, _LIVESTREAM_FAILURE)
+            if not _reject_active_livestream(repo, request_id, chat_id, status_message_id, normalized_url):
                 return
 
-            repo.update_request_status(request_id, DownloadStatus.downloading)
-            edit_status(chat_id, status_message_id, "⬇️ Скачиваю видео...")
-
-            user_cookie_path = _materialize_user_cookies(repo, user_id, normalized_url)
-            cookies_were_used = user_cookie_path is not None or cookie_file_for_url(
-                normalized_url, settings
-            ) is not None
-            file_path, info = download_video(
-                normalized_url,
-                quality,
-                settings,
-                progress_hook=_build_progress_hook(chat_id, status_message_id),
-                cookie_file=user_cookie_path,
-                embed_subtitles=settings.embed_subtitles,
+            file_path, info, user_cookie_path, cookies_were_used = _download_and_prepare_media(
+                repo, request_id, user_id, chat_id, status_message_id, normalized_url, quality, settings
             )
 
-            validate_media_file(file_path, quality)
-            debug_context = f"request={request_id} url={normalized_url} quality={quality}"
-            codecs = log_media_debug_info(file_path, context=debug_context)
-            if quality != "audio":
-                file_path = ensure_telegram_compatible_video(file_path, codecs)
-
-            file_size_bytes = file_path.stat().st_size
-            size_mb = file_size_bytes / (1024 * 1024)
-
-            max_mb = get_limit("max_file_mb", settings, redis)
-            if max_mb > 0 and size_mb > max_mb:
-                edit_status(
-                    chat_id,
-                    status_message_id,
-                    f"⚠️ Файл слишком большой ({size_mb:.1f} MB). Пробую сжать под лимит {max_mb} MB...",
-                )
-                compressed_path = compress_to_size_limit(file_path, max_mb)
-                if compressed_path is not None:
-                    file_path.unlink(missing_ok=True)
-                    file_path = compressed_path
-                    file_size_bytes = file_path.stat().st_size
-                    size_mb = file_size_bytes / (1024 * 1024)
-
-            if max_mb > 0 and size_mb > max_mb:
-                repo.update_request_status(
-                    request_id,
-                    DownloadStatus.too_large,
-                    error=f"File too large: {size_mb:.1f} MB",
-                    finished=True,
-                )
-                edit_status(
-                    chat_id,
-                    status_message_id,
-                    f"⚠️ Файл слишком большой: {size_mb:.1f} MB. Лимит: {max_mb} MB.",
-                )
-                file_path.unlink(missing_ok=True)
+            sized = _enforce_size_limit(
+                repo, request_id, chat_id, status_message_id, file_path, settings, redis
+            )
+            if sized is None:
                 return
+            file_path, file_size_bytes = sized
 
             _upload_and_cache(repo, req, request_id, file_path, info, file_size_bytes, settings)
 
