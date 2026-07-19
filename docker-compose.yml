@@ -57,7 +57,10 @@ services:
     container_name: video_bot_worker
     restart: unless-stopped
     env_file: .env
-    command: celery -A app.worker.celery_app:celery_app worker --loglevel=INFO --concurrency=1 --prefetch-multiplier=1 --max-tasks-per-child=20 -Q downloads,celery
+    # -B embeds Celery Beat in this same worker process to run the periodic
+    # stale-downloads cleanup (app.worker.celery_app's beat_schedule) — no
+    # separate scheduler container needed for a single-worker deployment.
+    command: celery -A app.worker.celery_app:celery_app worker -B --loglevel=INFO --concurrency=1 --prefetch-multiplier=1 --max-tasks-per-child=20 -Q downloads,celery
     depends_on:
       postgres:
         condition: service_healthy

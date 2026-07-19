@@ -1075,3 +1075,29 @@ class TestPrepareMediaForTelegram:
              patch("app.worker.downloader.validate_media_file", side_effect=MediaValidationError("bad")):
             with pytest.raises(MediaValidationError):
                 prepare_media_for_telegram("https://youtube.com/watch?v=x", "720p", settings)
+
+    def test_cleans_up_downloaded_file_on_failure(self):
+        """download_video() succeeded, so a file exists on disk — if anything
+        downstream (validation, codec probing, transcode) fails, the caller
+        never learns the path to clean it up itself, so this must delete it
+        before re-raising instead of leaking it."""
+        fake_file = MagicMock(spec=Path)
+        settings = MagicMock()
+
+        with patch("app.worker.downloader.download_video", return_value=(fake_file, {})), \
+             patch("app.worker.downloader.validate_media_file", side_effect=MediaValidationError("bad")):
+            with pytest.raises(MediaValidationError):
+                prepare_media_for_telegram("https://youtube.com/watch?v=x", "720p", settings)
+
+        fake_file.unlink.assert_called_once_with(missing_ok=True)
+
+    def test_does_not_delete_file_on_success(self):
+        fake_file = MagicMock(spec=Path)
+        settings = MagicMock()
+
+        with patch("app.worker.downloader.download_video", return_value=(fake_file, {})), \
+             patch("app.worker.downloader.validate_media_file"), \
+             patch("app.worker.downloader.log_media_debug_info", return_value={"video": "h264"}):
+            prepare_media_for_telegram("https://youtube.com/watch?v=x", "720p", settings)
+
+        fake_file.unlink.assert_not_called()

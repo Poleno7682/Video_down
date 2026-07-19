@@ -63,6 +63,10 @@ class Settings(BaseSettings):
 
     cache_ttl_hours: int = Field(default=168, alias="CACHE_TTL_HOURS")
     delete_local_file_after_telegram_cache: bool = Field(default=True, alias="DELETE_LOCAL_FILE_AFTER_TELEGRAM_CACHE")
+    # Safety-net sweep of downloads/active/ for anything the per-request
+    # cleanup missed (a worker OOM-killed mid-task, a code path that doesn't
+    # clean up on failure, etc.) — see app/services/cleanup.py.
+    stale_file_max_age_hours: float = Field(default=24, alias="STALE_FILE_MAX_AGE_HOURS")
 
     # Admin broadcast mode auto-expires after this many seconds of inactivity.
     # Each broadcast message resets the timer (implemented via Redis key TTL).

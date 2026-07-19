@@ -138,6 +138,19 @@ class TestIsYoutubeChallengeError:
         assert _is_youtube_challenge_error(RuntimeError("Network unreachable")) is False
 
 
+class TestCleanupStaleDownloadsTask:
+    def test_delegates_to_cleanup_service_with_current_settings(self):
+        from app.worker.tasks import cleanup_stale_downloads
+
+        settings = MagicMock()
+        with patch("app.worker.tasks.get_settings", return_value=settings), \
+             patch("app.worker.tasks._cleanup_stale_downloads", return_value=3) as mock_cleanup:
+            result = cleanup_stale_downloads.apply().get()
+
+        mock_cleanup.assert_called_once_with(settings)
+        assert result == 3
+
+
 class TestMaterializeUserCookies:
     def test_unknown_platform_returns_none(self):
         repo = MagicMock()
@@ -538,6 +551,34 @@ class TestProcessDownloadRequest:
                 with pytest.raises(RuntimeError):
                     process_download_request.apply(args=[1])
         limiter.release_video_lock.assert_called_once()
+
+    def test_upload_failure_still_deletes_downloaded_file(self):
+        """If the send-to-Telegram step itself fails after a successful
+        download, the file must not be left on disk forever — nothing else
+        ever learns its path to clean it up (unlike the success path, where
+        _upload_and_cache deletes it per DELETE_LOCAL_FILE_AFTER_TELEGRAM_CACHE)."""
+        fake_file = MagicMock(spec=Path)
+        fake_file.stat.return_value.st_size = 5 * 1024 * 1024
+        settings = _make_settings(delete_local_file_after_telegram_cache=False)
+
+        with _task_ctx(settings=settings, download_result=(fake_file, {})) as (repo, _, sender):
+            sender.send_file.side_effect = RuntimeError("telegram upload failed")
+            with pytest.raises(RuntimeError, match="telegram upload failed"):
+                process_download_request.apply(args=[1])
+
+        fake_file.unlink.assert_called_once_with(missing_ok=True)
+
+    def test_successful_upload_does_not_double_delete(self):
+        """current_media_path tracking must not fight with
+        _upload_and_cache's own per-setting cleanup on the success path."""
+        fake_file = MagicMock(spec=Path)
+        fake_file.stat.return_value.st_size = 5 * 1024 * 1024
+        settings = _make_settings(delete_local_file_after_telegram_cache=True)
+
+        with _task_ctx(settings=settings, download_result=(fake_file, {})) as (repo, _, _sender):
+            process_download_request.apply(args=[1])
+
+        fake_file.unlink.assert_called_once_with(missing_ok=True)
 
     def test_db_commit_failure_during_upload_still_cleans_up(self):
         """Reproduces a transient DB blip (e.g. Postgres SSL connection drop)

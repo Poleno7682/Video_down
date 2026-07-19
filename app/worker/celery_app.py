@@ -31,6 +31,13 @@ celery_app.conf.update(
     task_routes={
         "app.worker.tasks.process_download_request": {"queue": "downloads"},
     },
+
+    beat_schedule={
+        "cleanup-stale-downloads": {
+            "task": "app.worker.tasks.cleanup_stale_downloads",
+            "schedule": 3600.0,  # hourly
+        },
+    },
 )
 
 

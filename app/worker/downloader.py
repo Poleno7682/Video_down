@@ -704,10 +704,18 @@ def prepare_media_for_telegram(
         cookie_file=cookie_file,
         embed_subtitles=embed_subtitles,
     )
-    validate_media_file(file_path, quality)
-    codecs = log_media_debug_info(file_path, context=debug_context)
-    if quality != "audio":
-        file_path = ensure_telegram_compatible_video(
-            file_path, codecs, on_transcode_start=on_transcode_start, on_transcode_progress=on_transcode_progress
-        )
+    try:
+        validate_media_file(file_path, quality)
+        codecs = log_media_debug_info(file_path, context=debug_context)
+        if quality != "audio":
+            file_path = ensure_telegram_compatible_video(
+                file_path, codecs, on_transcode_start=on_transcode_start, on_transcode_progress=on_transcode_progress
+            )
+    except Exception:
+        # download_video() succeeded, so a file is on disk. Anything failing
+        # from here on (a corrupt/unusable download, an unexpected transcode
+        # error) must not leave it behind — the caller never learns its path
+        # to clean it up itself once this raises.
+        file_path.unlink(missing_ok=True)
+        raise
     return file_path, info, codecs

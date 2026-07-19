@@ -12,6 +12,7 @@ from app.core.config import Settings, get_settings
 from app.db.models import DownloadRequest, DownloadStatus, UserGoogleToken
 from app.db.repository import CookieRepository, Repository
 from app.db.session import ScopedRepository
+from app.services.cleanup import cleanup_stale_downloads as _cleanup_stale_downloads
 from app.services.google_oauth import generate_youtube_cookies, refresh_access_token
 from app.services.rate_limiter import RateLimiter
 from app.services.redis_client import get_redis
@@ -545,6 +546,12 @@ def process_download_request(self, request_id: int) -> None:
     video_lock_acquired = False
     user_cookie_path: Path | None = None
     cookies_were_used = False
+    # Tracks whichever file on disk this request is currently responsible
+    # for, so it can be removed in `finally` if anything fails after it's
+    # downloaded — _upload_and_cache already handles cleanup on the success
+    # path (per DELETE_LOCAL_FILE_AFTER_TELEGRAM_CACHE), so this is set back
+    # to None right after that call succeeds.
+    current_media_path: Path | None = None
     try:
         if _try_serve_from_cache(sender, repo, req, request_id, settings):
             return
@@ -562,15 +569,19 @@ def process_download_request(self, request_id: int) -> None:
         file_path, info, user_cookie_path, cookies_were_used = _download_and_prepare_media(
             sender, repo, request_id, user_id, chat_id, status_message_id, normalized_url, quality, settings
         )
+        current_media_path = file_path
 
         sized = _enforce_size_limit(
             sender, repo, request_id, chat_id, status_message_id, file_path, settings, redis
         )
         if sized is None:
+            current_media_path = None  # _enforce_size_limit already cleaned it up
             return
         file_path, file_size_bytes = sized
+        current_media_path = file_path
 
         _upload_and_cache(sender, repo, req, request_id, file_path, info, file_size_bytes, settings)
+        current_media_path = None  # _upload_and_cache already handled cleanup
 
     except Exception as exc:
         logger.exception("Failed request %s", request_id)
@@ -607,7 +618,15 @@ def process_download_request(self, request_id: int) -> None:
     finally:
         if user_cookie_path is not None:
             user_cookie_path.unlink(missing_ok=True)
+        if current_media_path is not None:
+            current_media_path.unlink(missing_ok=True)
         # Redis-only cleanup — must never depend on the DB.
         limiter.release_user_download_slot(user_id)
         if video_lock_acquired:
             limiter.release_video_lock(url_hash, quality)
+
+
+@celery_app.task
+def cleanup_stale_downloads() -> int:
+    """Periodic safety-net sweep of downloads/active/ — see app.services.cleanup."""
+    return _cleanup_stale_downloads(get_settings())
