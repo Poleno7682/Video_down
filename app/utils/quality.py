@@ -24,18 +24,28 @@ def _video_format(max_height: int | None) -> str:
     picks by resolution/HDR long before codec or even audio presence, which
     can select a higher-resolution but mislabeled video-only format over a
     lower-resolution H.264 format that actually has audio.
+
+    max_height caps the quality-defining SHORT edge of the frame, not the
+    literal pixel "height" field — for a portrait clip that's the width, not
+    the height (a 720p portrait TikTok/Shorts clip is ~720x1280, i.e. height
+    1280 > 720). Filtering portrait streams with height<=720 would exclude
+    every real format of such a clip and fall through the whole selector
+    chain to the codec/resolution-agnostic last-resort tier, which is how a
+    higher-resolution but audio-less format could get picked over a
+    lower-resolution one that actually has audio.
     """
     h_filter = f"[height<={max_height}]" if max_height is not None else ""
+    w_filter = f"[width<={max_height}]" if max_height is not None else ""
 
     portrait = (
         # H.264 portrait — best MP4 compatibility
-        f"bestvideo{_H264_VCODEC_FILTER}[aspect_ratio<1]{h_filter}+bestaudio[ext=m4a]/"
+        f"bestvideo{_H264_VCODEC_FILTER}[aspect_ratio<1]{w_filter}+bestaudio[ext=m4a]/"
         # Any codec portrait (AV1 / VP9 fallback)
-        f"bestvideo[aspect_ratio<1]{h_filter}+bestaudio/"
+        f"bestvideo[aspect_ratio<1]{w_filter}+bestaudio/"
         # Combined (already-muxed) portrait stream, H.264 preferred —
         # common on TikTok/Instagram, which never split video/audio.
-        f"best{_H264_VCODEC_FILTER}[aspect_ratio<1]{h_filter}/"
-        f"best[aspect_ratio<1]{h_filter}"
+        f"best{_H264_VCODEC_FILTER}[aspect_ratio<1]{w_filter}/"
+        f"best[aspect_ratio<1]{w_filter}"
     )
     landscape = (
         # H.264 landscape
