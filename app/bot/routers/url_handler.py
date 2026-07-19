@@ -21,15 +21,18 @@ from app.worker.tasks import process_download_request
 router = Router()
 logger = logging.getLogger(__name__)
 
+# Table-driven dispatch (mirrors telegram_sender._TYPE_SPECS): add a new
+# TelegramFileType by extending this dict rather than another if/elif branch.
+_ANSWER_METHOD_BY_FILE_TYPE = {
+    "video": "answer_video",
+    "audio": "answer_audio",
+}
+
 
 async def send_cached_file(message: Message, file_id: str, file_type: str) -> None:
     caption = get_caption(get_settings())
-    if file_type == "video":
-        await message.answer_video(file_id, caption=caption)
-    elif file_type == "audio":
-        await message.answer_audio(file_id, caption=caption)
-    else:
-        await message.answer_document(file_id, caption=caption)
+    method_name = _ANSWER_METHOD_BY_FILE_TYPE.get(file_type, "answer_document")
+    await getattr(message, method_name)(file_id, caption=caption)
 
 
 # Must be the last router included — these are the most generic handlers

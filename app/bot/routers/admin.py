@@ -26,6 +26,21 @@ from app.services.runtime_config import (
 router = Router()
 
 
+def _parse_telegram_id(raw: str) -> int | None:
+    """Parse a single Telegram user ID argument (e.g. from /adduser 123456789)."""
+    raw = raw.strip()
+    if not raw.lstrip("-").isdigit():
+        return None
+    return int(raw)
+
+
+async def _reply_usage(message: Message, command: str, example_id: int) -> None:
+    await message.answer(
+        f"Использование: /{command} <code>&lt;telegram_id&gt;</code>\n"
+        f"Пример: <code>/{command} {example_id}</code>"
+    )
+
+
 def _admin_panel_text(settings, redis) -> str:
     is_disabled = bool(redis.exists(_KEY_BOT_DISABLED))
     trusted_count = redis.scard(_KEY_TRUSTED_USERS)
@@ -160,14 +175,11 @@ async def toggle_bot_access(callback: CallbackQuery) -> None:
 @router.message(Command("adduser"), AdminFilter())
 async def add_trusted_user(message: Message) -> None:
     parts = (message.text or "").split(maxsplit=1)
-    if len(parts) < 2 or not parts[1].strip().lstrip("-").isdigit():
-        await message.answer(
-            "Использование: /adduser <code>&lt;telegram_id&gt;</code>\n"
-            "Пример: <code>/adduser 123456789</code>"
-        )
+    uid = _parse_telegram_id(parts[1]) if len(parts) >= 2 else None
+    if uid is None:
+        await _reply_usage(message, "adduser", 123456789)
         return
 
-    uid = int(parts[1].strip())
     get_redis().sadd(_KEY_TRUSTED_USERS, str(uid))
     await message.answer(f"✅ Пользователь <code>{uid}</code> добавлен в доверенные.")
 
@@ -175,14 +187,11 @@ async def add_trusted_user(message: Message) -> None:
 @router.message(Command("removeuser"), AdminFilter())
 async def remove_trusted_user(message: Message) -> None:
     parts = (message.text or "").split(maxsplit=1)
-    if len(parts) < 2 or not parts[1].strip().lstrip("-").isdigit():
-        await message.answer(
-            "Использование: /removeuser <code>&lt;telegram_id&gt;</code>\n"
-            "Пример: <code>/removeuser 123456789</code>"
-        )
+    uid = _parse_telegram_id(parts[1]) if len(parts) >= 2 else None
+    if uid is None:
+        await _reply_usage(message, "removeuser", 123456789)
         return
 
-    uid = int(parts[1].strip())
     removed = get_redis().srem(_KEY_TRUSTED_USERS, str(uid))
     if removed:
         await message.answer(f"✅ Пользователь <code>{uid}</code> удалён из доверенных.")
