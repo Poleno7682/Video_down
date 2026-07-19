@@ -51,9 +51,33 @@ class TestFormatSelector:
 
     def test_h264_preferred_before_any_codec(self):
         fmt = format_selector("720p")
-        # H.264 (avc1) variant must come before the codec-agnostic variant
-        assert "vcodec^=avc1" in fmt
-        assert fmt.index("vcodec^=avc1") < fmt.index("bestvideo[aspect_ratio<1][height<=720]+bestaudio/")
+        # H.264 variant must come before the codec-agnostic variant
+        assert "vcodec~='^(avc1|h264)'" in fmt
+        assert fmt.index("vcodec~='^(avc1|h264)'") < fmt.index("bestvideo[aspect_ratio<1][height<=720]+bestaudio/")
+
+    def test_h264_filter_matches_both_avc1_and_h264_naming(self):
+        """YouTube reports vcodec as 'avc1', TikTok/others as 'h264' — the
+        selector must engage its H.264 preference on both."""
+        import re
+
+        from app.utils.quality import _H264_VCODEC_FILTER
+
+        match = re.search(r"vcodec~='(.+?)'", _H264_VCODEC_FILTER)
+        assert match is not None
+        pattern = re.compile(match.group(1))
+        assert pattern.match("avc1.640028")
+        assert pattern.match("h264")
+        assert not pattern.match("vp9")
+        assert not pattern.match("av1")
+
+    def test_h264_preferred_in_combined_best_tier_too(self):
+        """Sites like TikTok never split video/audio, so bestvideo+bestaudio
+        never matches there — every download falls through to best[...].
+        That tier must also prefer H.264 over letting yt-dlp's default sort
+        (resolution/HDR first) pick an arbitrary, possibly audio-less codec."""
+        fmt = format_selector("720p")
+        assert "best[vcodec~='^(avc1|h264)']" in fmt
+        assert fmt.index("best[vcodec~='^(avc1|h264)']") < fmt.index("best[aspect_ratio<1][height<=720]")
 
     def test_no_forced_mp4_video_stream(self):
         fmt = format_selector("720p")
