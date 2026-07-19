@@ -57,6 +57,12 @@ class Settings(BaseSettings):
     # https://my.telegram.org/apps).
     use_local_bot_api: bool = Field(default=False, alias="USE_LOCAL_BOT_API")
     local_bot_api_url: str = Field(default="http://telegram-bot-api:8081", alias="LOCAL_BOT_API_URL")
+    # Routes all yt-dlp requests (download + livestream pre-check) through a
+    # proxy, e.g. socks5h://user:pass@host:1080 — most commonly to dodge
+    # anti-bot blocks tied to a VPS's datacenter IP range (YouTube's "Sign in
+    # to confirm you're not a bot"). Empty = no proxy, yt-dlp connects
+    # directly. socks5h (vs. socks5) resolves DNS through the proxy too.
+    ytdlp_proxy: str = Field(default="", alias="YTDLP_PROXY")
     download_timeout_seconds: int = Field(default=900, alias="DOWNLOAD_TIMEOUT_SECONDS")
     max_active_downloads_per_user: int = Field(default=1, alias="MAX_ACTIVE_DOWNLOADS_PER_USER")
     max_download_duration_seconds: int = Field(default=1800, alias="MAX_DOWNLOAD_DURATION_SECONDS")

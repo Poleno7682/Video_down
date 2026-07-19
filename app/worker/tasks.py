@@ -354,12 +354,13 @@ def _reject_active_livestream(
     chat_id: int,
     status_message_id: int | None,
     normalized_url: str,
+    settings: Settings,
 ) -> bool:
     """Reject the request if the URL points at an ongoing livestream.
 
     Returns True when the request may proceed.
     """
-    if not is_active_livestream(normalized_url):
+    if not is_active_livestream(normalized_url, settings.ytdlp_proxy or None):
         return True
     repo.update_request_status(
         request_id,
@@ -563,7 +564,9 @@ def process_download_request(self, request_id: int) -> None:
         if not video_lock_acquired:
             return
 
-        if not _reject_active_livestream(sender, repo, request_id, chat_id, status_message_id, normalized_url):
+        if not _reject_active_livestream(
+            sender, repo, request_id, chat_id, status_message_id, normalized_url, settings
+        ):
             return
 
         file_path, info, user_cookie_path, cookies_were_used = _download_and_prepare_media(

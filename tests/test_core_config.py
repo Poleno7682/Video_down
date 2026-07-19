@@ -139,6 +139,31 @@ class TestSettings:
         assert s.use_local_bot_api is True
         assert s.local_bot_api_url == "http://custom:9999"
 
+    def test_default_ytdlp_proxy_empty(self):
+        s = Settings(
+            BOT_TOKEN="1:t",
+            WEBHOOK_BASE_URL="https://x.com",
+            WEBHOOK_SECRET="s",
+            DATABASE_URL="postgresql://x",
+            REDIS_URL="redis://x",
+            CELERY_BROKER_URL="redis://x",
+            CELERY_RESULT_BACKEND="redis://x",
+        )
+        assert s.ytdlp_proxy == ""
+
+    def test_ytdlp_proxy_can_be_set(self):
+        s = Settings(
+            BOT_TOKEN="1:t",
+            WEBHOOK_BASE_URL="https://x.com",
+            WEBHOOK_SECRET="s",
+            DATABASE_URL="postgresql://x",
+            REDIS_URL="redis://x",
+            CELERY_BROKER_URL="redis://x",
+            CELERY_RESULT_BACKEND="redis://x",
+            YTDLP_PROXY="socks5h://user:pass@host:1080",
+        )
+        assert s.ytdlp_proxy == "socks5h://user:pass@host:1080"
+
 
 class TestGetSettings:
     def test_returns_settings_instance(self):

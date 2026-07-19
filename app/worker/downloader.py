@@ -102,6 +102,7 @@ def _build_ydl_opts(
     progress_hook: Callable[[dict], None] | None,
     cookie_file: Path | None,
     embed_subtitles: bool = False,
+    proxy: str | None = None,
 ) -> dict:
     """Build the yt-dlp options dict. SRP: isolated so it can be tested independently."""
     opts: dict = {
@@ -139,6 +140,13 @@ def _build_ydl_opts(
         opts["subtitleslangs"] = _SUBTITLE_LANGS
         opts["subtitlesformat"] = "vtt/srt/best"
         opts["postprocessors"].append({"key": "FFmpegSubtitlesConvertor", "format": "srt"})
+    if proxy:
+        # e.g. socks5h://user:pass@host:port — routes yt-dlp's requests
+        # through a proxy, most commonly to dodge YouTube/etc. anti-bot
+        # blocks tied to a VPS's datacenter IP range ("Sign in to confirm
+        # you're not a bot"). socks5h (vs. socks5) resolves DNS through the
+        # proxy too, so the origin site never sees the VPS's own IP at all.
+        opts["proxy"] = proxy
     return opts
 
 
@@ -163,7 +171,7 @@ def _extract_with_retry(url: str, opts: dict) -> dict:
             return ydl.extract_info(url, download=True) or {}
 
 
-def is_active_livestream(url: str) -> bool:
+def is_active_livestream(url: str, proxy: str | None = None) -> bool:
     """Pre-check whether the URL points to an unfinished live stream.
 
     Downloading an active stream either runs forever or produces a partial
@@ -176,6 +184,8 @@ def is_active_livestream(url: str) -> bool:
         "noplaylist": True,
         "logger": _YtdlpLogger(),
     }
+    if proxy:
+        opts["proxy"] = proxy
     try:
         with YoutubeDL(opts) as ydl:
             info = ydl.extract_info(url, download=False)
@@ -655,7 +665,7 @@ def download_video(
         # Per-user cookies (cookie_file) take priority over the global shared file.
         if cookie_file is None:
             cookie_file = cookie_file_for_url(url, settings)
-        opts = _build_ydl_opts(url, quality, work_dir, progress_hook, cookie_file, embed_subtitles)
+        opts = _build_ydl_opts(url, quality, work_dir, progress_hook, cookie_file, embed_subtitles, settings.ytdlp_proxy or None)
 
         info = _extract_with_retry(url, opts)
 

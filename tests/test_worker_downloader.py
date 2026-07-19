@@ -197,6 +197,21 @@ def test_build_ydl_opts_no_hd_fallback_for_non_facebook():
     assert not opts["format"].startswith("hd/")
 
 
+def test_build_ydl_opts_sets_proxy_when_given():
+    opts = _build_ydl_opts(_TEST_URL, "720p", Path("/tmp"), None, None, proxy="socks5h://host:1080")
+    assert opts["proxy"] == "socks5h://host:1080"
+
+
+def test_build_ydl_opts_omits_proxy_when_not_given():
+    opts = _build_ydl_opts(_TEST_URL, "720p", Path("/tmp"), None, None)
+    assert "proxy" not in opts
+
+
+def test_build_ydl_opts_omits_proxy_when_empty_string():
+    opts = _build_ydl_opts(_TEST_URL, "720p", Path("/tmp"), None, None, proxy="")
+    assert "proxy" not in opts
+
+
 # ---------------------------------------------------------------------------
 # _select_output_file
 # ---------------------------------------------------------------------------
@@ -276,6 +291,38 @@ def test_download_video_success():
         expected = Path(tmp) / "active" / "video.mp4"
         assert path == expected
         assert info["title"] == "Test Video"
+
+
+def test_download_video_passes_settings_proxy_to_ydl_opts():
+    with tempfile.TemporaryDirectory() as tmp:
+        settings = MagicMock()
+        settings.download_dir = Path(tmp)
+        settings.default_quality = "720p"
+        settings.use_cookies = False
+        settings.ytdlp_proxy = "socks5h://host:1080"
+
+        fixed_hex = "aabbccdd11223344aabbccdd11223344"
+        work_subdir = Path(tmp) / "active" / fixed_hex
+
+        def fake_extract_info(url, download):
+            work_subdir.mkdir(parents=True, exist_ok=True)
+            (work_subdir / "video.mp4").write_bytes(b"x" * 100)
+            return {"title": "Test Video"}
+
+        mock_ydl = MagicMock()
+        mock_ydl.__enter__ = MagicMock(return_value=mock_ydl)
+        mock_ydl.__exit__ = MagicMock(return_value=False)
+        mock_ydl.extract_info.side_effect = fake_extract_info
+
+        mock_uuid = MagicMock()
+        mock_uuid.hex = fixed_hex
+
+        with patch("app.worker.downloader.uuid.uuid4", return_value=mock_uuid), \
+             patch("app.worker.downloader.YoutubeDL", return_value=mock_ydl) as mock_ydl_cls:
+            download_video("https://youtube.com/watch?v=x", "720p", settings)
+
+        opts_used = mock_ydl_cls.call_args[0][0]
+        assert opts_used["proxy"] == "socks5h://host:1080"
 
 
 def test_download_video_empty_info():
@@ -375,6 +422,28 @@ def test_is_active_livestream_true():
     mock_ydl.extract_info.return_value = {"is_live": True}
     with patch("app.worker.downloader.YoutubeDL", return_value=mock_ydl):
         assert is_active_livestream("https://x.test/live") is True
+
+
+def test_is_active_livestream_passes_proxy_to_ydl_opts():
+    mock_ydl = MagicMock()
+    mock_ydl.__enter__ = MagicMock(return_value=mock_ydl)
+    mock_ydl.__exit__ = MagicMock(return_value=False)
+    mock_ydl.extract_info.return_value = {"is_live": False}
+    with patch("app.worker.downloader.YoutubeDL", return_value=mock_ydl) as mock_ydl_cls:
+        is_active_livestream("https://x.test/live", proxy="socks5h://host:1080")
+    opts_used = mock_ydl_cls.call_args[0][0]
+    assert opts_used["proxy"] == "socks5h://host:1080"
+
+
+def test_is_active_livestream_omits_proxy_when_not_given():
+    mock_ydl = MagicMock()
+    mock_ydl.__enter__ = MagicMock(return_value=mock_ydl)
+    mock_ydl.__exit__ = MagicMock(return_value=False)
+    mock_ydl.extract_info.return_value = {"is_live": False}
+    with patch("app.worker.downloader.YoutubeDL", return_value=mock_ydl) as mock_ydl_cls:
+        is_active_livestream("https://x.test/live")
+    opts_used = mock_ydl_cls.call_args[0][0]
+    assert "proxy" not in opts_used
 
 
 def test_is_active_livestream_via_live_status():
