@@ -29,6 +29,7 @@ from app.worker.downloader import (
     ensure_telegram_compatible_video,
     is_active_livestream,
     log_media_debug_info,
+    prepare_media_for_telegram,
     probe_video_dimensions,
     validate_media_file,
 )
@@ -799,3 +800,53 @@ def test_embed_subtitles_if_present_burns_and_replaces():
         assert result == burned
         assert not video.exists()
         assert not sub.exists()
+
+
+# ---------------------------------------------------------------------------
+# prepare_media_for_telegram (facade)
+# ---------------------------------------------------------------------------
+
+class TestPrepareMediaForTelegram:
+    def test_happy_path_calls_pipeline_in_order(self):
+        fake_file = MagicMock(spec=Path)
+        settings = MagicMock()
+
+        with patch("app.worker.downloader.download_video", return_value=(fake_file, {"title": "T"})) as mock_dl, \
+             patch("app.worker.downloader.validate_media_file") as mock_validate, \
+             patch("app.worker.downloader.log_media_debug_info", return_value={"video": "h264"}) as mock_log, \
+             patch("app.worker.downloader.ensure_telegram_compatible_video", return_value=fake_file) as mock_ensure:
+            file_path, info, codecs = prepare_media_for_telegram(
+                "https://youtube.com/watch?v=x", "720p", settings, debug_context="ctx",
+            )
+
+        mock_dl.assert_called_once_with(
+            "https://youtube.com/watch?v=x", "720p", settings,
+            progress_hook=None, cookie_file=None, embed_subtitles=False,
+        )
+        mock_validate.assert_called_once_with(fake_file, "720p")
+        mock_log.assert_called_once_with(fake_file, context="ctx")
+        mock_ensure.assert_called_once_with(fake_file, {"video": "h264"})
+        assert file_path is fake_file
+        assert info == {"title": "T"}
+        assert codecs == {"video": "h264"}
+
+    def test_audio_quality_skips_compat_transcode(self):
+        fake_file = MagicMock(spec=Path)
+        settings = MagicMock()
+
+        with patch("app.worker.downloader.download_video", return_value=(fake_file, {})), \
+             patch("app.worker.downloader.validate_media_file"), \
+             patch("app.worker.downloader.log_media_debug_info", return_value={}), \
+             patch("app.worker.downloader.ensure_telegram_compatible_video") as mock_ensure:
+            prepare_media_for_telegram("https://youtube.com/watch?v=x", "audio", settings)
+
+        mock_ensure.assert_not_called()
+
+    def test_invalid_media_propagates(self):
+        fake_file = MagicMock(spec=Path)
+        settings = MagicMock()
+
+        with patch("app.worker.downloader.download_video", return_value=(fake_file, {})), \
+             patch("app.worker.downloader.validate_media_file", side_effect=MediaValidationError("bad")):
+            with pytest.raises(MediaValidationError):
+                prepare_media_for_telegram("https://youtube.com/watch?v=x", "720p", settings)

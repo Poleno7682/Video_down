@@ -22,12 +22,9 @@ from app.worker.downloader import (
     MediaValidationError,
     compress_to_size_limit,
     cookie_file_for_url,
-    download_video,
-    ensure_telegram_compatible_video,
     is_active_livestream,
-    log_media_debug_info,
+    prepare_media_for_telegram,
     probe_video_dimensions,
-    validate_media_file,
 )
 from aiogram.exceptions import TelegramEntityTooLarge
 
@@ -374,20 +371,15 @@ def _download_and_prepare_media(
     cookies_were_used = user_cookie_path is not None or cookie_file_for_url(
         normalized_url, settings
     ) is not None
-    file_path, info = download_video(
+    file_path, info, _codecs = prepare_media_for_telegram(
         normalized_url,
         quality,
         settings,
         progress_hook=_build_progress_hook(sender, chat_id, status_message_id),
         cookie_file=user_cookie_path,
         embed_subtitles=settings.embed_subtitles,
+        debug_context=f"request={request_id} url={normalized_url} quality={quality}",
     )
-
-    validate_media_file(file_path, quality)
-    debug_context = f"request={request_id} url={normalized_url} quality={quality}"
-    codecs = log_media_debug_info(file_path, context=debug_context)
-    if quality != "audio":
-        file_path = ensure_telegram_compatible_video(file_path, codecs)
 
     return file_path, info, user_cookie_path, cookies_were_used
 

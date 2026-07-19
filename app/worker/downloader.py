@@ -562,3 +562,36 @@ def download_video(
         return dest, info or {}
     finally:
         shutil.rmtree(work_dir, ignore_errors=True)
+
+
+def prepare_media_for_telegram(
+    url: str,
+    quality: str,
+    settings: Settings,
+    *,
+    progress_hook: Callable[[dict], None] | None = None,
+    cookie_file: Path | None = None,
+    embed_subtitles: bool = False,
+    debug_context: str = "",
+) -> tuple[Path, dict, dict[str, str]]:
+    """Facade over the yt-dlp+ffmpeg pipeline: download, validate, and make
+    Telegram-compatible in one call.
+
+    Fixed sequence: download -> reject files with missing/corrupt streams ->
+    probe codecs (logged for later debugging) -> transcode away codecs known
+    to break Telegram's own player. Raises MediaValidationError if the
+    downloaded file is unusable. Returns (file_path, info, codecs).
+    """
+    file_path, info = download_video(
+        url,
+        quality,
+        settings,
+        progress_hook=progress_hook,
+        cookie_file=cookie_file,
+        embed_subtitles=embed_subtitles,
+    )
+    validate_media_file(file_path, quality)
+    codecs = log_media_debug_info(file_path, context=debug_context)
+    if quality != "audio":
+        file_path = ensure_telegram_compatible_video(file_path, codecs)
+    return file_path, info, codecs

@@ -238,8 +238,8 @@ def _task_ctx(req=None, settings=None, ready_video=None,
          patch("app.worker.tasks.Repository", return_value=repo), \
          patch("app.worker.tasks.get_default_sender", return_value=sender), \
          patch("app.worker.tasks.is_active_livestream", return_value=False), \
-         patch("app.worker.tasks.validate_media_file"), \
-         patch("app.worker.tasks.download_video", return_value=dl_result):
+         patch("app.worker.downloader.validate_media_file"), \
+         patch("app.worker.downloader.download_video", return_value=dl_result):
         yield repo, limiter, sender
 
 
@@ -321,7 +321,7 @@ class TestProcessDownloadRequest:
         fake_file = MagicMock(spec=Path)
         fake_file.stat.return_value.st_size = 10 * 1024 * 1024
         with _task_ctx(download_result=(fake_file, {"title": "Vid"})) as (repo, _, _sender):
-            with patch("app.worker.tasks.log_media_debug_info") as mock_log:
+            with patch("app.worker.downloader.log_media_debug_info") as mock_log:
                 process_download_request.apply(args=[1])
         mock_log.assert_called_once()
         assert mock_log.call_args[0][0] is fake_file
@@ -334,8 +334,8 @@ class TestProcessDownloadRequest:
         transcoded_file.stat.return_value.st_size = 12 * 1024 * 1024
 
         with _task_ctx(download_result=(fake_file, {"title": "Vid"})) as (repo, _, _sender):
-            with patch("app.worker.tasks.log_media_debug_info", return_value={"video": "av1", "audio": "aac"}), \
-                 patch("app.worker.tasks.ensure_telegram_compatible_video", return_value=transcoded_file) as mock_ensure:
+            with patch("app.worker.downloader.log_media_debug_info", return_value={"video": "av1", "audio": "aac"}), \
+                 patch("app.worker.downloader.ensure_telegram_compatible_video", return_value=transcoded_file) as mock_ensure:
                 process_download_request.apply(args=[1])
 
         mock_ensure.assert_called_once_with(fake_file, {"video": "av1", "audio": "aac"})
@@ -347,7 +347,7 @@ class TestProcessDownloadRequest:
         fake_file.stat.return_value.st_size = 5 * 1024 * 1024
 
         with _task_ctx(req=req, download_result=(fake_file, {})) as (repo, _, _sender):
-            with patch("app.worker.tasks.ensure_telegram_compatible_video") as mock_ensure:
+            with patch("app.worker.downloader.ensure_telegram_compatible_video") as mock_ensure:
                 process_download_request.apply(args=[1])
 
         mock_ensure.assert_not_called()
@@ -363,7 +363,7 @@ class TestProcessDownloadRequest:
 
         with _task_ctx() as (repo, _, _sender):
             repo.get_user_cookies.return_value = "# Netscape HTTP Cookie File\n"
-            with patch("app.worker.tasks.download_video", side_effect=capture):
+            with patch("app.worker.downloader.download_video", side_effect=capture):
                 process_download_request.apply(args=[1])
 
         assert captured["cookie_file"] is not None
@@ -427,7 +427,7 @@ class TestProcessDownloadRequest:
     def test_active_livestream_rejected_before_download(self):
         with _task_ctx() as (repo, _, _sender):
             with patch("app.worker.tasks.is_active_livestream", return_value=True) as mock_live, \
-                 patch("app.worker.tasks.download_video") as mock_download:
+                 patch("app.worker.downloader.download_video") as mock_download:
                 process_download_request.apply(args=[1])
         mock_live.assert_called_once()
         mock_download.assert_not_called()
@@ -438,7 +438,7 @@ class TestProcessDownloadRequest:
         from app.worker.downloader import MediaValidationError
 
         with _task_ctx() as (repo, _, _sender):
-            with patch("app.worker.tasks.validate_media_file", side_effect=MediaValidationError("bad")):
+            with patch("app.worker.downloader.validate_media_file", side_effect=MediaValidationError("bad")):
                 with pytest.raises(MediaValidationError):
                     process_download_request.apply(args=[1])
         statuses = {c[0][1] for c in repo.update_request_status.call_args_list}
@@ -474,7 +474,7 @@ class TestProcessDownloadRequest:
 
     def test_download_exception_calls_handle_failure(self):
         with _task_ctx() as (repo, limiter, _sender):
-            with patch("app.worker.tasks.download_video", side_effect=RuntimeError("yt-dlp fail")), \
+            with patch("app.worker.downloader.download_video", side_effect=RuntimeError("yt-dlp fail")), \
                  patch("app.worker.tasks._handle_task_failure") as mock_fail:
                 with pytest.raises(RuntimeError, match="yt-dlp fail"):
                     process_download_request.apply(args=[1])
@@ -492,7 +492,7 @@ class TestProcessDownloadRequest:
         from celery.exceptions import Retry
 
         with _task_ctx() as (repo, limiter, sender):
-            with patch("app.worker.tasks.download_video", side_effect=ConnectionError("db blip")), \
+            with patch("app.worker.downloader.download_video", side_effect=ConnectionError("db blip")), \
                  patch("app.worker.tasks._handle_task_failure") as mock_fail:
                 with pytest.raises(Retry):
                     process_download_request.apply(args=[1])
@@ -507,7 +507,7 @@ class TestProcessDownloadRequest:
         same ConnectionError must be treated as terminal like any other
         failure: status marked failed and the user notified."""
         with _task_ctx() as (repo, limiter, sender):
-            with patch("app.worker.tasks.download_video", side_effect=ConnectionError("db blip")), \
+            with patch("app.worker.downloader.download_video", side_effect=ConnectionError("db blip")), \
                  patch("app.worker.tasks._handle_task_failure") as mock_fail:
                 with pytest.raises(Exception):
                     process_download_request.apply(args=[1], retries=3)
@@ -516,14 +516,14 @@ class TestProcessDownloadRequest:
     def test_download_exception_releases_slot(self):
         req = _make_req()
         with _task_ctx(req=req) as (repo, limiter, _sender):
-            with patch("app.worker.tasks.download_video", side_effect=RuntimeError("fail")):
+            with patch("app.worker.downloader.download_video", side_effect=RuntimeError("fail")):
                 with pytest.raises(RuntimeError):
                     process_download_request.apply(args=[1])
         limiter.release_user_download_slot.assert_called_with(req.user_id)
 
     def test_download_exception_releases_video_lock(self):
         with _task_ctx(lock_acquired=True) as (repo, limiter, _sender):
-            with patch("app.worker.tasks.download_video", side_effect=RuntimeError("fail")):
+            with patch("app.worker.downloader.download_video", side_effect=RuntimeError("fail")):
                 with pytest.raises(RuntimeError):
                     process_download_request.apply(args=[1])
         limiter.release_video_lock.assert_called_once()
@@ -569,9 +569,9 @@ class TestProcessDownloadRequest:
              patch("app.worker.tasks.Repository", return_value=repo), \
              patch("app.worker.tasks.get_default_sender", return_value=sender), \
              patch("app.worker.tasks.is_active_livestream", return_value=False), \
-             patch("app.worker.tasks.validate_media_file"), \
-             patch("app.worker.tasks.log_media_debug_info", return_value={}), \
-             patch("app.worker.tasks.download_video", return_value=(fake_file, {"title": "T"})):
+             patch("app.worker.downloader.validate_media_file"), \
+             patch("app.worker.downloader.log_media_debug_info", return_value={}), \
+             patch("app.worker.downloader.download_video", return_value=(fake_file, {"title": "T"})):
             with pytest.raises(RuntimeError, match="SSL connection"):
                 process_download_request.apply(args=[1])
 
@@ -605,7 +605,7 @@ class TestProgressHook:
 
         sender = _make_sender()
         with _task_ctx(sender=sender) as (repo, _, _sender):
-            with patch("app.worker.tasks.download_video", side_effect=capture):
+            with patch("app.worker.downloader.download_video", side_effect=capture):
                 process_download_request.apply(args=[1])
 
         return captured["hook"], sender
