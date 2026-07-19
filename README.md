@@ -622,7 +622,7 @@ Video_down/
 │   ├── bot/
 │   │   ├── main.py              # Запуск в режиме webhook или polling, регистрация команд
 │   │   ├── router.py            # Агрегатор sub-роутеров; подключает AccessMiddleware
-│   │   ├── access.py            # _is_admin, _is_allowed, _check_access — логика доступа
+│   │   ├── access.py            # _is_admin, _check_access — логика доступа
 │   │   ├── middleware.py        # AccessMiddleware — блокирует неавторизованных до хэндлера
 │   │   ├── filters.py           # AdminFilter — aiogram-фильтр для команд администратора
 │   │   ├── utils.py             # safe_edit_text — edit_text без TelegramBadRequest

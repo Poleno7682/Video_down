@@ -7,7 +7,6 @@ from aiogram import Router
 from aiogram.filters import Command
 from aiogram.types import Message
 
-from app.core.config import get_settings
 from app.db.repository import CookieRepository, GoogleTokenRepository
 from app.db.session import get_session
 from app.services.google_oauth import (

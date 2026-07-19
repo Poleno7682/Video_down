@@ -4,7 +4,6 @@ import logging
 
 from aiogram import F, Router
 from aiogram.exceptions import TelegramBadRequest
-from aiogram.filters import Command
 from aiogram.types import Message
 
 from app.core.config import get_settings

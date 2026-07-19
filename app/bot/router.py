@@ -11,7 +11,7 @@ from app.bot.routers.url_handler import router as url_router
 from app.bot.routers.user import router as user_router
 
 # Backward-compat re-exports used by main.py and any external imports.
-from app.bot.access import _check_access, _is_admin, _is_allowed  # noqa: F401
+from app.bot.access import _check_access, _is_admin  # noqa: F401
 
 # ---------------------------------------------------------------------------
 # Protected sub-router: AccessMiddleware blocks non-authorised users before

@@ -39,7 +39,3 @@ def _check_access(user_id: int, settings: Settings, redis: Redis) -> tuple[bool,
         return False, "⛔ У тебя нет доступа к этому боту."
 
     return True, ""
-
-
-def _is_allowed(user_id: int, allowed: set[int]) -> bool:
-    return not allowed or user_id in allowed

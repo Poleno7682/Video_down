@@ -5,26 +5,10 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from aiogram.exceptions import TelegramBadRequest
 
-from app.bot.access import _check_access, _is_allowed
+from app.bot.access import _check_access
 from app.bot.routers.user import HELP_TEXT
 from app.bot.routers.url_handler import _process_url_message, send_cached_file
 from app.db.models import DownloadStatus, TelegramFileType
-
-
-# ---------------------------------------------------------------------------
-# _is_allowed (backward-compat helper)
-# ---------------------------------------------------------------------------
-
-def test_is_allowed_empty_set_allows_all():
-    assert _is_allowed(123, set()) is True
-
-
-def test_is_allowed_user_in_set():
-    assert _is_allowed(123, {123, 456}) is True
-
-
-def test_is_allowed_user_not_in_set():
-    assert _is_allowed(999, {123, 456}) is False
 
 
 # ---------------------------------------------------------------------------
