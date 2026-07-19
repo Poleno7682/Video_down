@@ -547,6 +547,32 @@ def test_transcode_to_h264_success():
         assert result.exists()
 
 
+def test_transcode_to_h264_maps_first_real_video_stream():
+    """Without an explicit -map, ffmpeg's automatic stream selection can pick
+    an embedded cover-art/thumbnail stream instead of the real video track,
+    producing a file that plays audio but renders as a static image — the
+    exact bug this function exists to fix. Must force -map 0:v:0."""
+    with tempfile.TemporaryDirectory() as tmp:
+        src = Path(tmp) / "video.mp4"
+        src.write_bytes(b"x")
+
+        captured = {}
+
+        def fake_run(command, *, timeout, cwd=None):
+            captured["command"] = command
+            Path(command[-1]).write_bytes(b"transcoded")
+            return _completed(returncode=0)
+
+        with patch("app.worker.downloader._run_ffmpeg", side_effect=fake_run):
+            _transcode_to_h264(src)
+
+        command = captured["command"]
+        assert "-map" in command
+        map_args = [command[i + 1] for i, arg in enumerate(command) if arg == "-map"]
+        assert "0:v:0" in map_args
+        assert "0:a?" in map_args
+
+
 def test_transcode_to_h264_returns_none_on_failure():
     with tempfile.TemporaryDirectory() as tmp:
         src = Path(tmp) / "video.mp4"

@@ -345,6 +345,13 @@ def _transcode_to_h264(file_path: Path, timeout: int = COMPRESSION_TIMEOUT) -> P
     command = [
         "ffmpeg", "-y", "-nostdin", "-hide_banner", "-loglevel", "warning",
         "-i", str(file_path),
+        # Without an explicit -map, ffmpeg's automatic stream selection can
+        # pick an embedded cover-art/thumbnail stream (a single-frame
+        # "video" track many social-media MP4s carry) instead of the real
+        # video track, re-encoding *that* — the file plays audio fine but
+        # renders as a static image, the exact symptom this function exists
+        # to fix. -map 0:v:0 forces the first real video stream instead.
+        "-map", "0:v:0", "-map", "0:a?",
         "-c:v", "libx264", "-preset", "veryfast", "-crf", "20", "-pix_fmt", "yuv420p",
         "-c:a", "aac", "-b:a", "160k",
         "-movflags", "+faststart",
