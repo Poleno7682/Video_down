@@ -331,8 +331,147 @@ class RequestRepository:
         return int(self.session.execute(stmt).scalar_one()) > 0
 
 
-class Repository(UserRepository, CookieRepository, GoogleTokenRepository, VideoRepository, RequestRepository):
-    """Unified facade over all domain repositories — preserves existing call sites."""
+class Repository:
+    """Facade composing the domain repositories for call sites that touch several at once.
+
+    Composition rather than multiple inheritance: each domain repo stays a
+    small, independently usable class (as most call sites already use them
+    directly), and this facade just delegates to whichever one owns a given
+    method instead of merging all their APIs into one MRO.
+    """
 
     def __init__(self, session: Session) -> None:
         self.session = session
+        self._users = UserRepository(session)
+        self._cookies = CookieRepository(session)
+        self._google_tokens = GoogleTokenRepository(session)
+        self._videos = VideoRepository(session)
+        self._requests = RequestRepository(session)
+
+    # -- UserRepository ----------------------------------------------------
+    def upsert_user(self, user_id: int, username: str | None, first_name: str | None) -> User:
+        return self._users.upsert_user(user_id, username, first_name)
+
+    def get_user(self, user_id: int) -> User | None:
+        return self._users.get_user(user_id)
+
+    def ban_user(self, user_id: int, seconds: int) -> None:
+        self._users.ban_user(user_id, seconds)
+
+    def unban_if_expired(self, user_id: int) -> bool:
+        return self._users.unban_if_expired(user_id)
+
+    def get_all_user_ids(self) -> list[int]:
+        return self._users.get_all_user_ids()
+
+    # -- CookieRepository ----------------------------------------------------
+    def set_user_cookies(self, user_id: int, platform: str, cookies_text: str) -> None:
+        self._cookies.set_user_cookies(user_id, platform, cookies_text)
+
+    def get_user_cookies(self, user_id: int, platform: str) -> str | None:
+        return self._cookies.get_user_cookies(user_id, platform)
+
+    def delete_user_cookies(self, user_id: int, platform: str) -> bool:
+        return self._cookies.delete_user_cookies(user_id, platform)
+
+    def list_user_platforms(self, user_id: int) -> list[str]:
+        return self._cookies.list_user_platforms(user_id)
+
+    # -- GoogleTokenRepository -----------------------------------------------
+    def set_google_token(self, user_id: int, refresh_token: str) -> None:
+        self._google_tokens.set_google_token(user_id, refresh_token)
+
+    def get_google_token(self, user_id: int) -> UserGoogleToken | None:
+        return self._google_tokens.get_google_token(user_id)
+
+    def delete_google_token(self, user_id: int) -> bool:
+        return self._google_tokens.delete_google_token(user_id)
+
+    # -- VideoRepository -------------------------------------------------
+    def get_ready_video(self, url_hash: str, quality: str) -> Video | None:
+        return self._videos.get_ready_video(url_hash, quality)
+
+    def get_or_create_video(
+        self, original_url: str, normalized_url: str, url_hash: str, quality: str
+    ) -> Video:
+        return self._videos.get_or_create_video(original_url, normalized_url, url_hash, quality)
+
+    def mark_video_ready(
+        self,
+        video_id: int,
+        title: str | None,
+        telegram_file_id: str,
+        telegram_file_unique_id: str | None,
+        telegram_file_type: TelegramFileType,
+        local_file_path: str | None,
+        file_size_bytes: int | None,
+    ) -> None:
+        self._videos.mark_video_ready(
+            video_id,
+            title,
+            telegram_file_id,
+            telegram_file_unique_id,
+            telegram_file_type,
+            local_file_path,
+            file_size_bytes,
+        )
+
+    def mark_video_failed(self, video_id: int, error: str) -> None:
+        self._videos.mark_video_failed(video_id, error)
+
+    def invalidate_video_cache(self, video_id: int) -> None:
+        self._videos.invalidate_video_cache(video_id)
+
+    # -- RequestRepository ----------------------------------------------------
+    def create_request(
+        self,
+        user_id: int,
+        chat_id: int,
+        message_id: int | None,
+        status_message_id: int | None,
+        video_id: int | None,
+        original_url: str,
+        normalized_url: str,
+        url_hash: str,
+        quality: str,
+        status: DownloadStatus = DownloadStatus.queued,
+    ) -> DownloadRequest:
+        return self._requests.create_request(
+            user_id,
+            chat_id,
+            message_id,
+            status_message_id,
+            video_id,
+            original_url,
+            normalized_url,
+            url_hash,
+            quality,
+            status,
+        )
+
+    def get_request(self, request_id: int) -> DownloadRequest | None:
+        return self._requests.get_request(request_id)
+
+    def set_request_task_id(self, request_id: int, task_id: str) -> None:
+        self._requests.set_request_task_id(request_id, task_id)
+
+    def update_request_status(
+        self,
+        request_id: int,
+        status: DownloadStatus,
+        error: str | None = None,
+        finished: bool = False,
+    ) -> None:
+        self._requests.update_request_status(request_id, status, error, finished)
+
+    def count_user_active_requests(self, user_id: int) -> int:
+        return self._requests.count_user_active_requests(user_id)
+
+    def count_global_active_requests(self) -> int:
+        return self._requests.count_global_active_requests()
+
+    def count_user_today_requests(self, user_id: int) -> int:
+        return self._requests.count_user_today_requests(user_id)
+
+    def has_active_video_job(self, url_hash: str, quality: str) -> bool:
+        return self._requests.has_active_video_job(url_hash, quality)
