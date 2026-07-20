@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 
 from aiogram import Bot, F, Router
 from aiogram.filters import BaseFilter, Command
@@ -368,15 +369,40 @@ async def handle_proxy_file(message: Message, bot: Bot) -> None:
     truncated = len(lines) > _MAX_PROXY_LINES_PER_FILE
     lines = lines[:_MAX_PROXY_LINES_PER_FILE]
 
+    total = len(lines)
     status_msg = await message.answer(
-        f"🔍 Проверяю {len(lines)} прокси (до {_PROXY_CHECK_CONCURRENCY} одновременно)..."
+        f"🔍 Проверяю {total} прокси (до {_PROXY_CHECK_CONCURRENCY} одновременно)...\n"
+        f"✅ Прошли: 0 | ❌ Провалили: 0 | Осталось: {total}"
     )
     semaphore = asyncio.Semaphore(_PROXY_CHECK_CONCURRENCY)
+    progress = {"passed": 0, "failed": 0}
+    progress_lock = asyncio.Lock()
+    last_edit_at = 0.0
 
     async def _bounded_check(raw: str) -> tuple[str, str | None, str]:
+        nonlocal last_edit_at
         async with semaphore:
             added_url, note = await _check_and_add_proxy(raw, scheme, admin_id)
-            return raw, added_url, note
+        async with progress_lock:
+            if added_url:
+                progress["passed"] += 1
+            else:
+                progress["failed"] += 1
+            done = progress["passed"] + progress["failed"]
+            now = time.monotonic()
+            # Throttle edits to avoid Telegram rate limits on a large batch;
+            # always send the final one so the count ends up accurate.
+            if now - last_edit_at >= 3 or done == total:
+                last_edit_at = now
+                try:
+                    await status_msg.edit_text(
+                        f"🔍 Проверяю {total} прокси (до {_PROXY_CHECK_CONCURRENCY} одновременно)...\n"
+                        f"✅ Прошли: {progress['passed']} | ❌ Провалили: {progress['failed']} | "
+                        f"Осталось: {total - done}"
+                    )
+                except Exception:
+                    pass  # message unchanged since last edit, or edited/deleted by the user — not fatal
+        return raw, added_url, note
 
     results = await asyncio.gather(*(_bounded_check(raw) for raw in lines))
 
