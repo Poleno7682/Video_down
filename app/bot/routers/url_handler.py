@@ -5,6 +5,7 @@ import logging
 from aiogram import F, Router
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.types import Message
+from celery import chain
 
 from app.core.config import get_settings
 from app.db.models import DownloadStatus
@@ -15,7 +16,7 @@ from app.services.redis_client import get_redis
 from app.services.runtime_config import get_limit
 from app.utils.caption import get_caption
 from app.utils.quality import normalize_quality
-from app.utils.rezka import canonicalize_rezka_url, is_rezka_url
+from app.utils.rezka import build_selection_url, canonicalize_rezka_url, is_rezka_url
 from app.utils.url_tools import extract_url, is_valid_url, normalize_url, url_hash
 from app.worker.tasks import process_download_request
 
@@ -119,6 +120,90 @@ async def enqueue_download(
 
         task = process_download_request.delay(req.id)
         req_repo.set_request_task_id(req.id, task.id)
+
+
+async def enqueue_season_download(
+    message: Message,
+    user_id: int,
+    chat_id: int,
+    message_id: int | None,
+    raw_url: str,
+    base_url: str,
+    translator_id: int,
+    season: int,
+    episodes: list[int],
+    quality_value: str,
+) -> None:
+    """Queue every episode in episodes (already sorted ascending) for one
+    translator/season, one DownloadRequest/Video row per episode — exactly
+    like clicking each episode individually, so a re-run serves already-
+    downloaded episodes straight from their cached Telegram file_id via
+    process_download_request's own cache check.
+
+    The requests are chained with Celery's chain() rather than fired off
+    with N separate .delay() calls, so episode 2 only starts once episode
+    1's request has fully finished (downloaded+sent, or served from cache)
+    — "step by step" as asked, and it sidesteps the per-user active-request
+    queue limit, which would otherwise reject most of a season's requests
+    outright since they'd all be sitting "queued" at once.
+    """
+    if not episodes:
+        await message.answer("⚠️ В этом сезоне нет серий для этой озвучки.")
+        return
+
+    settings = get_settings()
+    redis = get_redis()
+
+    with get_session() as session:
+        req_repo = RequestRepository(session)
+        video_repo = VideoRepository(session)
+
+        daily_limit = get_limit("user_daily_limit", settings, redis)
+        if daily_limit > 0:
+            remaining = daily_limit - req_repo.count_user_today_requests(user_id)
+            if remaining <= 0:
+                await message.answer("⚠️ Дневной лимит запросов исчерпан.")
+                return
+            episodes = episodes[:remaining]
+
+        global_limit = get_limit("global_queue_limit", settings, redis)
+        if global_limit > 0 and req_repo.count_global_active_requests() >= global_limit:
+            await message.answer("⚠️ Сервер сейчас перегружен. Попробуй позже.")
+            return
+
+        request_ids: list[int] = []
+        for episode in episodes:
+            final_url = build_selection_url(base_url, translator_id, season, episode)
+            h = url_hash(final_url)
+            video = video_repo.get_or_create_video(
+                original_url=raw_url,
+                normalized_url=final_url,
+                url_hash=h,
+                quality=quality_value,
+            )
+            status_msg = await message.answer(f"🧾 Серия {episode}: добавлена в очередь сезона.")
+            req = req_repo.create_request(
+                user_id=user_id,
+                chat_id=chat_id,
+                message_id=message_id,
+                status_message_id=status_msg.message_id,
+                video_id=video.id,
+                original_url=raw_url,
+                normalized_url=final_url,
+                url_hash=h,
+                quality=quality_value,
+                status=DownloadStatus.queued,
+            )
+            request_ids.append(req.id)
+
+        if not request_ids:
+            return
+
+        signatures = [process_download_request.si(rid) for rid in request_ids]
+        for rid, sig in zip(request_ids, signatures):
+            req_repo.set_request_task_id(rid, sig.freeze().id)
+
+    chain(*signatures).apply_async()
 
 
 # Must be the last router included — these are the most generic handlers

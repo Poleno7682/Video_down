@@ -7,7 +7,12 @@ from aiogram.exceptions import TelegramBadRequest
 
 from app.bot.access import _check_access
 from app.bot.routers.user import HELP_TEXT
-from app.bot.routers.url_handler import _process_url_message, enqueue_download, send_cached_file
+from app.bot.routers.url_handler import (
+    _process_url_message,
+    enqueue_download,
+    enqueue_season_download,
+    send_cached_file,
+)
 from app.db.models import DownloadStatus, TelegramFileType
 
 
@@ -1231,3 +1236,135 @@ async def test_broadcast_cancel_clears_key():
         await broadcast_cancel_callback(cb)
 
     redis.delete.assert_called_once_with("broadcast_mode:1")
+
+
+# ---------------------------------------------------------------------------
+# enqueue_season_download
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_enqueue_season_download_creates_one_request_per_episode_and_chains():
+    message = _make_message()
+    settings = _make_settings()
+    redis = _make_redis_mock()
+
+    repo = MagicMock()
+    repo.count_user_today_requests.return_value = 0
+    repo.count_global_active_requests.return_value = 0
+    video = MagicMock()
+    video.id = 42
+    repo.get_or_create_video.return_value = video
+    created = []
+
+    def _create_request(**kwargs):
+        req = MagicMock()
+        req.id = 100 + len(created)
+        created.append(kwargs)
+        return req
+
+    repo.create_request.side_effect = _create_request
+
+    session = _make_session(repo)
+    sig = MagicMock()
+    sig.freeze.return_value.id = "task-id"
+
+    with patch("app.bot.routers.url_handler.get_settings", return_value=settings), \
+         patch("app.bot.routers.url_handler.get_redis", return_value=redis), \
+         patch("app.bot.routers.url_handler.get_session", return_value=session), \
+         patch("app.bot.routers.url_handler.RequestRepository", return_value=repo), \
+         patch("app.bot.routers.url_handler.VideoRepository", return_value=repo), \
+         patch("app.bot.routers.url_handler.process_download_request") as mock_task, \
+         patch("app.bot.routers.url_handler.chain") as mock_chain:
+        mock_task.si.return_value = sig
+        await enqueue_season_download(
+            message, 1, 1, 1,
+            "https://rezka.ag/series/x/1-y.html",
+            "https://rezka.ag/series/x/1-y.html",
+            56, 2, [1, 2, 3], "720p",
+        )
+
+    assert repo.create_request.call_count == 3
+    assert mock_task.si.call_count == 3
+    mock_chain.assert_called_once_with(sig, sig, sig)
+    mock_chain.return_value.apply_async.assert_called_once()
+    for kwargs in created:
+        assert "rezka_tr=56" in kwargs["normalized_url"]
+        assert "rezka_s=2" in kwargs["normalized_url"]
+
+
+@pytest.mark.asyncio
+async def test_enqueue_season_download_no_episodes_sends_warning():
+    message = _make_message()
+    with patch("app.bot.routers.url_handler.get_settings", return_value=_make_settings()), \
+         patch("app.bot.routers.url_handler.get_redis", return_value=_make_redis_mock()):
+        await enqueue_season_download(
+            message, 1, 1, 1,
+            "https://rezka.ag/series/x/1-y.html",
+            "https://rezka.ag/series/x/1-y.html",
+            56, 2, [], "720p",
+        )
+    assert "⚠️" in message.answer.call_args[0][0]
+
+
+@pytest.mark.asyncio
+async def test_enqueue_season_download_respects_daily_limit():
+    message = _make_message()
+    settings = _make_settings()
+    redis = _make_redis_mock()
+
+    repo = MagicMock()
+    repo.count_user_today_requests.return_value = 49  # 1 remaining out of 50
+    repo.count_global_active_requests.return_value = 0
+    video = MagicMock()
+    video.id = 42
+    repo.get_or_create_video.return_value = video
+    repo.create_request.side_effect = lambda **kwargs: MagicMock(id=200)
+
+    session = _make_session(repo)
+    sig = MagicMock()
+    sig.freeze.return_value.id = "task-id"
+
+    with patch("app.bot.routers.url_handler.get_settings", return_value=settings), \
+         patch("app.bot.routers.url_handler.get_redis", return_value=redis), \
+         patch("app.bot.routers.url_handler.get_session", return_value=session), \
+         patch("app.bot.routers.url_handler.RequestRepository", return_value=repo), \
+         patch("app.bot.routers.url_handler.VideoRepository", return_value=repo), \
+         patch("app.bot.routers.url_handler.process_download_request") as mock_task, \
+         patch("app.bot.routers.url_handler.chain") as mock_chain:
+        mock_task.si.return_value = sig
+        await enqueue_season_download(
+            message, 1, 1, 1,
+            "https://rezka.ag/series/x/1-y.html",
+            "https://rezka.ag/series/x/1-y.html",
+            56, 2, [1, 2, 3], "720p",
+        )
+
+    assert repo.create_request.call_count == 1
+
+
+@pytest.mark.asyncio
+async def test_enqueue_season_download_global_limit_blocks():
+    message = _make_message()
+    settings = _make_settings()
+    redis = _make_redis_mock()
+
+    repo = MagicMock()
+    repo.count_user_today_requests.return_value = 0
+    repo.count_global_active_requests.return_value = 999
+
+    session = _make_session(repo)
+
+    with patch("app.bot.routers.url_handler.get_settings", return_value=settings), \
+         patch("app.bot.routers.url_handler.get_redis", return_value=redis), \
+         patch("app.bot.routers.url_handler.get_session", return_value=session), \
+         patch("app.bot.routers.url_handler.RequestRepository", return_value=repo), \
+         patch("app.bot.routers.url_handler.VideoRepository", return_value=repo):
+        await enqueue_season_download(
+            message, 1, 1, 1,
+            "https://rezka.ag/series/x/1-y.html",
+            "https://rezka.ag/series/x/1-y.html",
+            56, 2, [1, 2, 3], "720p",
+        )
+
+    repo.create_request.assert_not_called()
+    assert "⚠️" in message.answer.call_args[0][0]

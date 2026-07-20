@@ -6,7 +6,7 @@ import logging
 from aiogram import F, Router
 from aiogram.types import CallbackQuery, Message
 
-from app.bot.routers.url_handler import enqueue_download
+from app.bot.routers.url_handler import enqueue_download, enqueue_season_download
 from app.core.config import get_settings
 from app.keyboards.rezka import episode_keyboard, season_keyboard, translator_keyboard
 from app.services.redis_client import get_redis
@@ -123,6 +123,60 @@ async def _after_translator_chosen(status_msg: Message, user_id: int, translator
         return
 
     await status_msg.edit_text("📺 Выберите сезон:", reply_markup=season_keyboard(seasons))
+
+
+@router.callback_query(F.data == "rezka:back:translators")
+async def rezka_back_to_translators(callback: CallbackQuery) -> None:
+    """Re-show the translator list from the session's own cached data
+    (fetched once in start_rezka_flow) — no re-fetch from rezka.ag."""
+    await callback.answer()
+    session = get_rezka_session(callback.from_user.id, get_redis())
+    if not session:
+        await callback.message.edit_text(_SESSION_EXPIRED)
+        return
+    translators = {int(k): v for k, v in session["translators"].items()}
+    await callback.message.edit_text(
+        f"🎬 <b>{session['title']}</b>\n\nВыберите озвучку:",
+        reply_markup=translator_keyboard(translators),
+    )
+
+
+@router.callback_query(F.data == "rezka:back:season")
+async def rezka_back_to_seasons(callback: CallbackQuery) -> None:
+    """Re-show the season list, recomputed from the session's cached
+    episodes_info — no re-fetch from rezka.ag."""
+    await callback.answer()
+    session = get_rezka_session(callback.from_user.id, get_redis())
+    if not session or "translator_id" not in session:
+        await callback.message.edit_text(_SESSION_EXPIRED)
+        return
+    seasons = seasons_for_translator(session["episodes_info"], session["translator_id"])
+    if not seasons:
+        await callback.message.edit_text(_SESSION_EXPIRED)
+        return
+    await callback.message.edit_text("📺 Выберите сезон:", reply_markup=season_keyboard(seasons))
+
+
+@router.callback_query(F.data == "rezka:season_all")
+async def rezka_season_all_chosen(callback: CallbackQuery) -> None:
+    await callback.answer()
+    user_id = callback.from_user.id
+    redis = get_redis()
+    session = get_rezka_session(user_id, redis)
+    if not session or "translator_id" not in session or "season" not in session:
+        await callback.message.edit_text(_SESSION_EXPIRED)
+        return
+
+    episodes = sorted(
+        episodes_for_translator_season(session["episodes_info"], session["translator_id"], session["season"])
+    )
+    clear_rezka_session(user_id, redis)
+    await callback.message.edit_text(f"⏳ Добавляю сезон {session['season']} в очередь ({len(episodes)} серий)...")
+    await enqueue_season_download(
+        callback.message, user_id, session["chat_id"], session["message_id"],
+        session["raw_url"], session["url"], session["translator_id"], session["season"],
+        episodes, session["quality"],
+    )
 
 
 @router.callback_query(F.data.startswith("rezka:season:"))

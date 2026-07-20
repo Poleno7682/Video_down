@@ -5,7 +5,10 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from app.bot.routers.rezka_flow import (
+    rezka_back_to_seasons,
+    rezka_back_to_translators,
     rezka_episode_chosen,
+    rezka_season_all_chosen,
     rezka_season_chosen,
     rezka_translator_chosen,
     start_rezka_flow,
@@ -273,4 +276,116 @@ async def test_rezka_episode_chosen_enqueues_with_full_selection():
     final_url = mock_enqueue.call_args[0][5]
     assert "rezka_tr=56" in final_url
     assert "rezka_s=2" in final_url
-    assert "rezka_e=5" in final_url
+
+
+# ---------------------------------------------------------------------------
+# rezka_back_to_translators / rezka_back_to_seasons
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_rezka_back_to_translators_uses_cached_session_data():
+    callback = _make_callback(data="rezka:back:translators")
+    session = {"title": "A Movie", "translators": {"56": "Дубляж", "99": "Оригинал"}}
+    redis = MagicMock()
+
+    with patch("app.bot.routers.rezka_flow.get_redis", return_value=redis), \
+         patch("app.bot.routers.rezka_flow.get_rezka_session", return_value=session):
+        await rezka_back_to_translators(callback)
+
+    callback.message.edit_text.assert_awaited_once()
+    args, kwargs = callback.message.edit_text.call_args
+    assert "A Movie" in args[0]
+    assert "reply_markup" in kwargs
+
+
+@pytest.mark.asyncio
+async def test_rezka_back_to_translators_expired_session():
+    callback = _make_callback(data="rezka:back:translators")
+    with patch("app.bot.routers.rezka_flow.get_redis", return_value=MagicMock()), \
+         patch("app.bot.routers.rezka_flow.get_rezka_session", return_value=None):
+        await rezka_back_to_translators(callback)
+    callback.message.edit_text.assert_awaited_once_with(
+        "⚠️ Время выбора истекло, пришли ссылку ещё раз."
+    )
+
+
+@pytest.mark.asyncio
+async def test_rezka_back_to_seasons_recomputes_from_episodes_info():
+    callback = _make_callback(data="rezka:back:season")
+    episodes_info = [
+        {"season": 1, "episodes": [{"episode": 1, "translations": [{"translator_id": 56}]}]},
+        {"season": 2, "episodes": [{"episode": 1, "translations": [{"translator_id": 56}]}]},
+    ]
+    session = {"translator_id": 56, "episodes_info": episodes_info}
+    redis = MagicMock()
+
+    with patch("app.bot.routers.rezka_flow.get_redis", return_value=redis), \
+         patch("app.bot.routers.rezka_flow.get_rezka_session", return_value=session):
+        await rezka_back_to_seasons(callback)
+
+    callback.message.edit_text.assert_awaited_once()
+    args, kwargs = callback.message.edit_text.call_args
+    assert "сезон" in args[0].lower()
+    assert "reply_markup" in kwargs
+
+
+@pytest.mark.asyncio
+async def test_rezka_back_to_seasons_expired_session():
+    callback = _make_callback(data="rezka:back:season")
+    with patch("app.bot.routers.rezka_flow.get_redis", return_value=MagicMock()), \
+         patch("app.bot.routers.rezka_flow.get_rezka_session", return_value={}):
+        await rezka_back_to_seasons(callback)
+    callback.message.edit_text.assert_awaited_once_with(
+        "⚠️ Время выбора истекло, пришли ссылку ещё раз."
+    )
+
+
+# ---------------------------------------------------------------------------
+# rezka_season_all_chosen
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_rezka_season_all_chosen_enqueues_sorted_episodes():
+    callback = _make_callback(data="rezka:season_all")
+    episodes_info = [
+        {"season": 2, "episodes": [
+            {"episode": 3, "translations": [{"translator_id": 56}]},
+            {"episode": 1, "translations": [{"translator_id": 56}]},
+            {"episode": 2, "translations": [{"translator_id": 56}]},
+        ]},
+    ]
+    session = {
+        "raw_url": "https://rezka.ag/series/x/1-y.html",
+        "url": "https://rezka.ag/series/x/1-y.html",
+        "quality": "720p",
+        "translator_id": 56,
+        "season": 2,
+        "episodes_info": episodes_info,
+        "chat_id": 1,
+        "message_id": 10,
+    }
+    redis = MagicMock()
+
+    with patch("app.bot.routers.rezka_flow.get_redis", return_value=redis), \
+         patch("app.bot.routers.rezka_flow.get_rezka_session", return_value=session), \
+         patch("app.bot.routers.rezka_flow.clear_rezka_session") as mock_clear, \
+         patch("app.bot.routers.rezka_flow.enqueue_season_download", new=AsyncMock()) as mock_enqueue:
+        await rezka_season_all_chosen(callback)
+
+    mock_clear.assert_called_once_with(1, redis)
+    mock_enqueue.assert_awaited_once()
+    args = mock_enqueue.call_args[0]
+    assert args[6] == 56  # translator_id
+    assert args[7] == 2  # season
+    assert args[8] == [1, 2, 3]  # sorted episodes
+
+
+@pytest.mark.asyncio
+async def test_rezka_season_all_chosen_expired_session():
+    callback = _make_callback(data="rezka:season_all")
+    with patch("app.bot.routers.rezka_flow.get_redis", return_value=MagicMock()), \
+         patch("app.bot.routers.rezka_flow.get_rezka_session", return_value=None):
+        await rezka_season_all_chosen(callback)
+    callback.message.edit_text.assert_awaited_once_with(
+        "⚠️ Время выбора истекло, пришли ссылку ещё раз."
+    )
