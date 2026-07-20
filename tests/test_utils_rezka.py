@@ -57,6 +57,41 @@ def test_resolve_rezka_stream_raises_when_page_fails_to_load():
             resolve_rezka_stream("https://rezka.ag/films/x/1-y-2020.html", "720p")
 
 
+def test_resolve_rezka_stream_reports_page_title_when_not_a_movie_page():
+    """Regression guard: production hit a bare AttributeError when the page
+    HdRezkaApi fetched (rezka.ok passed) had no og:type meta tag — e.g. an
+    anti-bot interstitial neither HdRezkaApi's own Sign-In/Verify title
+    check nor our rezka.ok check caught. Must surface the page title
+    instead of crashing with AttributeError."""
+    class _FakeTitle:
+        @staticmethod
+        def get_text(strip=True):
+            return "Just a moment..."
+
+    class _FakeSoup:
+        title = _FakeTitle()
+
+    class _FakeApi:
+        ok = True
+        soup = _FakeSoup()
+
+        @property
+        def type(self):
+            raise AttributeError("no og:type")
+
+    with patch("app.utils.rezka.HdRezkaApi", return_value=_FakeApi()):
+        with pytest.raises(RezkaResolveError, match="Just a moment"):
+            resolve_rezka_stream("https://rezka.ag/films/x/1-y-2020.html", "720p")
+
+
+def test_resolve_rezka_stream_passes_modern_user_agent():
+    mock_api = _mock_movie_api({"720p": ["u720"]})
+    with patch("app.utils.rezka.HdRezkaApi", return_value=mock_api) as mock_cls:
+        resolve_rezka_stream("https://rezka.ag/films/x/1-y-2020.html", "720p")
+    _, kwargs = mock_cls.call_args
+    assert "Chrome" in kwargs["headers"]["User-Agent"]
+
+
 def test_resolve_rezka_stream_rejects_series():
     from HdRezkaApi.types import TVSeries
 
