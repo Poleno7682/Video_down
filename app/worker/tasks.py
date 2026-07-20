@@ -18,7 +18,7 @@ from app.services.rate_limiter import RateLimiter
 from app.services.redis_client import get_redis
 from app.services.runtime_config import get_limit
 from app.utils.caption import get_caption
-from app.utils.platforms import detect_platform
+from app.utils.platforms import YOUTUBE, detect_platform
 from app.worker.celery_app import celery_app
 from app.worker.downloader import (
     COMPRESSION_TIMEOUT,
@@ -347,9 +347,18 @@ def _acquire_video_lock_or_reject(
     return False
 
 
-def _resolve_proxies(repo: Repository, settings: Settings) -> list[str]:
+def _resolve_proxies(repo: Repository, settings: Settings, url: str) -> list[str]:
     """Proxies to try, least-failed first. Falls back to YTDLP_PROXY when the
-    admin-managed pool (DB) is empty, so an env-only setup keeps working."""
+    admin-managed pool (DB) is empty, so an env-only setup keeps working.
+
+    Only used for YouTube: the pool exists to route around YouTube's
+    datacenter-IP anti-bot block specifically, and every proxy in a typical
+    free/cheap pool is unreliable enough (dead, wrong scheme, geo-blocked)
+    that routing unrelated sites through it too just adds failure modes
+    those sites never had a problem with in the first place.
+    """
+    if detect_platform(url) != YOUTUBE:
+        return []
     db_proxies = repo.get_enabled_proxy_urls()
     if db_proxies:
         return db_proxies
@@ -567,7 +576,7 @@ def process_download_request(self, request_id: int) -> None:
     quality = req.quality
     normalized_url = req.normalized_url
 
-    proxies = _resolve_proxies(repo, settings)
+    proxies = _resolve_proxies(repo, settings, normalized_url)
     on_proxy_result = _record_proxy_result(repo, request_id)
 
     max_duration = get_limit("max_download_duration_seconds", settings, redis)

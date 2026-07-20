@@ -154,23 +154,32 @@ class TestCleanupStaleDownloadsTask:
 
 
 class TestResolveProxies:
+    _YT_URL = "https://www.youtube.com/watch?v=x"
+
     def test_uses_db_pool_when_present(self):
         repo = MagicMock()
         repo.get_enabled_proxy_urls.return_value = ["socks5h://a:1080", "socks5h://b:1080"]
         settings = _make_settings(ytdlp_proxy="socks5h://env:1080")
-        assert _resolve_proxies(repo, settings) == ["socks5h://a:1080", "socks5h://b:1080"]
+        assert _resolve_proxies(repo, settings, self._YT_URL) == ["socks5h://a:1080", "socks5h://b:1080"]
 
     def test_falls_back_to_env_proxy_when_db_empty(self):
         repo = MagicMock()
         repo.get_enabled_proxy_urls.return_value = []
         settings = _make_settings(ytdlp_proxy="socks5h://env:1080")
-        assert _resolve_proxies(repo, settings) == ["socks5h://env:1080"]
+        assert _resolve_proxies(repo, settings, self._YT_URL) == ["socks5h://env:1080"]
 
     def test_empty_when_neither_configured(self):
         repo = MagicMock()
         repo.get_enabled_proxy_urls.return_value = []
         settings = _make_settings(ytdlp_proxy="")
-        assert _resolve_proxies(repo, settings) == []
+        assert _resolve_proxies(repo, settings, self._YT_URL) == []
+
+    def test_empty_for_non_youtube_url_even_with_pool_configured(self):
+        repo = MagicMock()
+        repo.get_enabled_proxy_urls.return_value = ["socks5h://a:1080"]
+        settings = _make_settings(ytdlp_proxy="socks5h://env:1080")
+        assert _resolve_proxies(repo, settings, "https://rezka.ag/films/x-1997.html") == []
+        repo.get_enabled_proxy_urls.assert_not_called()
 
 
 class TestRecordProxyResult:
