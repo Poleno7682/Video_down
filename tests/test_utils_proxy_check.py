@@ -64,6 +64,16 @@ def test_check_proxy_raises_on_https_scheme_mismatch_cert_mismatch():
             check_proxy("https://actually-http:443")
 
 
+def test_check_proxy_raises_on_http_vs_socks5_mismatch():
+    mock_ydl = MagicMock()
+    mock_ydl.__enter__ = MagicMock(return_value=mock_ydl)
+    mock_ydl.__exit__ = MagicMock(return_value=False)
+    mock_ydl.extract_info.side_effect = Exception("('Connection aborted.', BadStatusLine('\x05\xff'))")
+    with patch("app.utils.proxy_check.YoutubeDL", return_value=mock_ydl):
+        with pytest.raises(ProxyCheckError, match="SOCKS5-прокси"):
+            check_proxy("http://actually-socks5:1080")
+
+
 def test_check_proxy_raises_on_generic_failure():
     mock_ydl = MagicMock()
     mock_ydl.__enter__ = MagicMock(return_value=mock_ydl)

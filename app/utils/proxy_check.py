@@ -34,6 +34,17 @@ _HTTPS_MISMATCH_MARKERS = (
     "your proxy appears to only use http and not https",
 )
 
+# An HTTP(S) client parses the proxy's reply as an HTTP status line; a SOCKS5
+# server's handshake reply starts with the raw byte 0x05 (the SOCKS version),
+# which shows up as a garbled/binary "BadStatusLine" — i.e. the proxy is
+# actually SOCKS5 but was added as HTTP/HTTPS. \x05 alone is too common to
+# match on its own, so require it alongside "badstatusline".
+_HTTP_VS_SOCKS5_MISMATCH_MARKER = "badstatusline"
+
+
+def _is_http_vs_socks5_mismatch(text: str, original: str) -> bool:
+    return _HTTP_VS_SOCKS5_MISMATCH_MARKER in text and "\x05" in original
+
 
 class ProxyCheckError(RuntimeError):
     """The proxy failed the automatic connectivity/anti-bot probe."""
@@ -72,5 +83,10 @@ def check_proxy(proxy_url: str, timeout: int = 20) -> None:
             raise ProxyCheckError(
                 "Похоже, это обычный HTTP-прокси без TLS, а он был добавлен как HTTPS. "
                 "Попробуйте добавить его как HTTP."
+            ) from exc
+        if _is_http_vs_socks5_mismatch(text, str(exc)):
+            raise ProxyCheckError(
+                "Похоже, это SOCKS5-прокси, а он был добавлен как HTTP/HTTPS. "
+                "Попробуйте добавить его как SOCKS5."
             ) from exc
         raise ProxyCheckError(f"Прокси не отвечает или соединение не удалось: {exc}") from exc
