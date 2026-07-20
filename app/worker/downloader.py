@@ -212,9 +212,10 @@ def is_active_livestream(
     proxies, if given, is tried in order until one of them completes the
     check successfully (used to route around anti-bot IP blocks the same way
     the real download does) — a failed proxy just moves on to the next one
-    rather than failing the whole pre-check.
+    rather than failing the whole pre-check. A final direct attempt is
+    always appended too, same reasoning as download_video's own proxy_list.
     """
-    proxy_list: list[str | None] = list(proxies) if proxies else [None]
+    proxy_list: list[str | None] = [*proxies, None] if proxies else [None]
     for proxy in proxy_list:
         opts = {
             "quiet": True,
@@ -747,8 +748,12 @@ def download_video(
         # proxies is tried in order — a proxy that's blocked/down for this
         # request just falls through to the next one instead of failing the
         # whole download, since which datacenter IP range gets flagged by a
-        # given site can vary proxy to proxy.
-        proxy_list: list[str | None] = list(proxies) if proxies else [None]
+        # given site can vary proxy to proxy. A final direct (no proxy)
+        # attempt is always appended too: a free/cheap proxy pool is
+        # unreliable enough (dead, 403s, tunnel errors) that "every proxy
+        # failed" doesn't mean direct would too — seen in production on
+        # rezka, whose CDN (unlike YouTube) isn't blocked for every VPS.
+        proxy_list: list[str | None] = [*proxies, None] if proxies else [None]
         info: dict | None = None
         last_exc: Exception | None = None
         for idx, proxy in enumerate(proxy_list):

@@ -421,6 +421,71 @@ def test_download_video_raises_when_all_proxies_fail():
             )
 
 
+def test_download_video_tries_direct_after_all_proxies_fail():
+    """Regression guard: a free/cheap proxy pool can be unreliable enough
+    (dead, 403s, tunnel errors) that every proxy fails even though a plain
+    direct request would succeed — seen in production on rezka's CDN,
+    which (unlike YouTube) isn't blocked for every VPS. A direct attempt
+    must still happen after the whole proxy list is exhausted, not just
+    when no proxies were configured at all."""
+    with tempfile.TemporaryDirectory() as tmp:
+        settings = MagicMock()
+        settings.download_dir = Path(tmp)
+        settings.default_quality = "720p"
+        settings.use_cookies = False
+
+        fixed_hex = "aabbccdd11223344aabbccdd11223344"
+        work_subdir = Path(tmp) / "active" / fixed_hex
+
+        def fake_extract_info(url, download):
+            work_subdir.mkdir(parents=True, exist_ok=True)
+            (work_subdir / "video.mp4").write_bytes(b"x" * 100)
+            return {"title": "Test Video"}
+
+        mock_ydl = MagicMock()
+        mock_ydl.__enter__ = MagicMock(return_value=mock_ydl)
+        mock_ydl.__exit__ = MagicMock(return_value=False)
+        mock_ydl.extract_info.side_effect = [
+            DownloadError("blocked"), DownloadError("blocked"), fake_extract_info(None, True),
+        ]
+
+        mock_uuid = MagicMock()
+        mock_uuid.hex = fixed_hex
+
+        with patch("app.worker.downloader.uuid.uuid4", return_value=mock_uuid), \
+             patch("app.worker.downloader.YoutubeDL", return_value=mock_ydl) as mock_ydl_cls:
+            download_video(
+                "https://youtube.com/watch?v=x", "720p", settings,
+                proxies=["socks5h://a:1080", "socks5h://b:1080"],
+            )
+
+        opts_tried = [call.args[0].get("proxy") for call in mock_ydl_cls.call_args_list]
+        assert opts_tried == ["socks5h://a:1080", "socks5h://b:1080", None]
+
+
+def test_download_video_raises_when_direct_fallback_also_fails():
+    with tempfile.TemporaryDirectory() as tmp:
+        settings = MagicMock()
+        settings.download_dir = Path(tmp)
+        settings.default_quality = "720p"
+        settings.use_cookies = False
+
+        mock_ydl = MagicMock()
+        mock_ydl.__enter__ = MagicMock(return_value=mock_ydl)
+        mock_ydl.__exit__ = MagicMock(return_value=False)
+        mock_ydl.extract_info.side_effect = DownloadError("blocked")
+
+        with patch("app.worker.downloader.YoutubeDL", return_value=mock_ydl) as mock_ydl_cls, \
+             pytest.raises(DownloadError):
+            download_video(
+                "https://youtube.com/watch?v=x", "720p", settings,
+                proxies=["socks5h://a:1080", "socks5h://b:1080"],
+            )
+
+        opts_tried = [call.args[0].get("proxy") for call in mock_ydl_cls.call_args_list]
+        assert opts_tried == ["socks5h://a:1080", "socks5h://b:1080", None]
+
+
 def test_download_video_resolves_rezka_url_to_direct_stream():
     with tempfile.TemporaryDirectory() as tmp:
         settings = MagicMock()
@@ -679,6 +744,18 @@ def test_is_active_livestream_falls_over_to_next_proxy():
     assert result is True
     proxies_tried = [call.args[0]["proxy"] for call in mock_ydl_cls.call_args_list]
     assert proxies_tried == ["socks5h://bad:1080", "socks5h://good:1080"]
+
+
+def test_is_active_livestream_tries_direct_after_all_proxies_fail():
+    mock_ydl = MagicMock()
+    mock_ydl.__enter__ = MagicMock(return_value=mock_ydl)
+    mock_ydl.__exit__ = MagicMock(return_value=False)
+    mock_ydl.extract_info.side_effect = [Exception("blocked"), {"is_live": True}]
+    with patch("app.worker.downloader.YoutubeDL", return_value=mock_ydl) as mock_ydl_cls:
+        result = is_active_livestream("https://x.test/live", proxies=["socks5h://bad:1080"])
+    assert result is True
+    proxies_tried = [call.args[0].get("proxy") for call in mock_ydl_cls.call_args_list]
+    assert proxies_tried == ["socks5h://bad:1080", None]
 
 
 def test_is_active_livestream_logs_which_proxy_succeeded(caplog):
