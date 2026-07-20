@@ -6,6 +6,7 @@ import re
 import urllib.parse
 from dataclasses import dataclass
 
+import requests
 from HdRezkaApi import HdRezkaApi
 from HdRezkaApi.types import Movie, TVSeries
 
@@ -409,6 +410,40 @@ def _open_rezka_session(url: str, proxy: str | None, bypass_antibot: bool, redis
             raise _page_diagnostic_error(exc2.rezka, exc2.cause) from exc2.cause
 
 
+_STREAM_FETCH_TIMEOUT_SECONDS = 15
+
+
+def _diagnose_fetch_failure(rezka, translator_id: int | None, season: int | None, episode: int | None) -> None:
+    """HdRezkaApi's own FetchFailed carries no detail at all — just "Failed
+    to fetch stream!" — when /ajax/get_cdn_series/ answers with success=false
+    (e.g. a premium-only translator with no logged-in account, or the
+    antibot challenge reappearing for this specific endpoint). Re-issue the
+    same request ourselves purely to log the raw response so the next
+    production log actually shows why, instead of just the generic message.
+    Best-effort only: any failure here is swallowed, since this exists to
+    aid diagnosis, not to affect the actual (already-failed) request.
+    """
+    if translator_id is None:
+        return
+    try:
+        data = {
+            "id": rezka.id,
+            "translator_id": translator_id,
+            "action": "get_movie" if season is None else "get_stream",
+        }
+        if season is not None:
+            data["season"] = season
+            data["episode"] = episode
+        r = requests.post(
+            f"{rezka.origin}/ajax/get_cdn_series/", data=data,
+            headers=rezka.HEADERS, proxies=rezka.proxy, cookies=rezka.cookies,
+            timeout=_STREAM_FETCH_TIMEOUT_SECONDS,
+        )
+        logger.info("rezka get_cdn_series diagnostic response (%d): %s", r.status_code, r.text[:500])
+    except Exception as diag_exc:
+        logger.info("rezka get_cdn_series diagnostic request itself failed: %s", diag_exc)
+
+
 def resolve_rezka_stream(
     url: str,
     quality: str,
@@ -448,6 +483,7 @@ def resolve_rezka_stream(
         try:
             stream = rezka.getStream(translation=translator_id) if translator_id is not None else rezka.getStream()
         except Exception as exc:
+            _diagnose_fetch_failure(rezka, translator_id, None, None)
             raise RezkaResolveError(f"Не удалось получить поток видео: {exc}") from exc
     elif content_type == TVSeries:
         if season is None or episode is None:
@@ -458,6 +494,7 @@ def resolve_rezka_stream(
         try:
             stream = rezka.getStream(season=season, episode=episode, translation=translator_id)
         except Exception as exc:
+            _diagnose_fetch_failure(rezka, translator_id, season, episode)
             raise RezkaResolveError(f"Не удалось получить поток видео: {exc}") from exc
     else:
         raise RezkaResolveError("Неизвестный тип контента на странице rezka.")

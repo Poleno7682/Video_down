@@ -155,6 +155,49 @@ def test_resolve_rezka_stream_raises_when_get_stream_fails():
             resolve_rezka_stream("https://rezka.ag/films/x/1-y-2020.html", "720p")
 
 
+def test_resolve_rezka_stream_get_stream_failure_logs_diagnostic_when_translator_known(caplog):
+    """Regression guard: production hit HdRezkaApi.errors.FetchFailed
+    ("Failed to fetch stream!") with zero detail about *why* the site's
+    /ajax/get_cdn_series/ endpoint returned success=false. When the
+    translator_id is known, resolve_rezka_stream should re-issue the same
+    request itself purely to log the raw response for diagnosis."""
+    import logging
+
+    mock_api = _mock_movie_api({})
+    mock_api.id = 3356
+    mock_api.origin = "https://rezka.ag"
+    mock_api.HEADERS = {"User-Agent": "x"}
+    mock_api.proxy = {}
+    mock_api.cookies = {}
+    mock_api.getStream.side_effect = Exception("Failed to fetch stream!")
+
+    mock_response = MagicMock()
+    mock_response.status_code = 200
+    mock_response.text = '{"success": false, "message": "premium required"}'
+
+    url = build_selection_url("https://rezka.ag/films/x/1-y-2020.html", 80)
+    with caplog.at_level(logging.INFO, logger="app.utils.rezka"), \
+         patch("app.utils.rezka.HdRezkaApi", return_value=mock_api), \
+         patch("app.utils.rezka.requests.post", return_value=mock_response) as mock_post:
+        with pytest.raises(RezkaResolveError, match="Не удалось получить поток"):
+            resolve_rezka_stream(url, "720p")
+
+    mock_post.assert_called_once()
+    assert mock_post.call_args.kwargs["data"]["translator_id"] == 80
+    assert mock_post.call_args.kwargs["data"]["action"] == "get_movie"
+    assert "premium required" in caplog.text
+
+
+def test_resolve_rezka_stream_get_stream_failure_skips_diagnostic_without_translator_id():
+    mock_api = _mock_movie_api({})
+    mock_api.getStream.side_effect = Exception("Failed to fetch stream!")
+    with patch("app.utils.rezka.HdRezkaApi", return_value=mock_api), \
+         patch("app.utils.rezka.requests.post") as mock_post:
+        with pytest.raises(RezkaResolveError):
+            resolve_rezka_stream("https://rezka.ag/films/x/1-y-2020.html", "720p")
+    mock_post.assert_not_called()
+
+
 def test_resolve_rezka_stream_raises_when_no_videos_available():
     mock_api = _mock_movie_api({})
     with patch("app.utils.rezka.HdRezkaApi", return_value=mock_api):
