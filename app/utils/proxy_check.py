@@ -14,6 +14,12 @@ _ANTI_BOT_MARKERS = (
     "confirm you’re not a bot",  # typographic apostrophe from yt-dlp
 )
 
+# "Expected 05 got 48" is a SOCKS5 client reading an HTTP response instead of
+# a SOCKS5 handshake reply (0x05 is the SOCKS5 version byte; 0x48 is ASCII
+# 'H', the start of "HTTP/1.1..."). It means the proxy is actually
+# HTTP(S)-only but was added as SOCKS5 — a scheme mismatch, not a dead proxy.
+_SCHEME_MISMATCH_MARKERS = ("expected 05 got 48", "expected 05, got 48")
+
 
 class ProxyCheckError(RuntimeError):
     """The proxy failed the automatic connectivity/anti-bot probe."""
@@ -42,5 +48,10 @@ def check_proxy(proxy_url: str, timeout: int = 20) -> None:
         if any(marker in text for marker in _ANTI_BOT_MARKERS):
             raise ProxyCheckError(
                 "YouTube заблокировал этот прокси (Sign in to confirm you're not a bot)."
+            ) from exc
+        if any(marker in text for marker in _SCHEME_MISMATCH_MARKERS):
+            raise ProxyCheckError(
+                "Похоже, это не SOCKS5-прокси (сервер ответил по HTTP). "
+                "Попробуйте добавить его как HTTPS."
             ) from exc
         raise ProxyCheckError(f"Прокси не отвечает или соединение не удалось: {exc}") from exc
