@@ -418,11 +418,14 @@ def resolve_rezka_stream(
 ) -> tuple[str, str]:
     """Resolve a rezka.ag/hdrezka.* page to a direct video URL.
 
-    Returns (direct_url, title). url may carry a translator/season/episode
-    selection appended by build_selection_url() (see the bot's inline-
-    keyboard flow in app.bot.routers.rezka_flow) — without one, the first/
-    priority translator is used automatically and a series page fails with
-    a clear message, since there'd be no season/episode to pick.
+    Returns (direct_url, title), where title is "<Title>, <Translator>" for
+    a movie and "<Title>, <Translator>, <N> сезон, <M> серия" for a series
+    episode — used verbatim as the caption's title line (see
+    app.utils.caption.get_caption). url may carry a translator/season/
+    episode selection appended by build_selection_url() (see the bot's
+    inline-keyboard flow in app.bot.routers.rezka_flow) — without one, the
+    first/priority translator is used automatically and a series page fails
+    with a clear message, since there'd be no season/episode to pick.
 
     rezka.ag sits behind an Anubis proof-of-work JS challenge ("Проверяем,
     что вы не бот!") that a plain HTTP request can never pass on its own.
@@ -465,6 +468,8 @@ def resolve_rezka_stream(
 
     target_quality = _closest_quality(available, quality)
     title = _title_with_translator(rezka, translator_id)
+    if content_type == TVSeries:
+        title = f"{title}, {season} сезон, {episode} серия"
     return stream.videos[target_quality][0], title
 
 

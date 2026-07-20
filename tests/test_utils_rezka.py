@@ -420,7 +420,16 @@ def test_resolve_rezka_stream_series_calls_getstream_with_season_episode_transla
         resolved_url, title = resolve_rezka_stream(url, "720p")
     mock_api.getStream.assert_called_once_with(season=2, episode=5, translation=56)
     assert resolved_url == "u720"
-    assert title == "Some Show"
+    assert title == "Some Show, 2 сезон, 5 серия"
+
+
+def test_resolve_rezka_stream_series_title_includes_translator_season_episode():
+    mock_api = _mock_series_api([], {"720p": ["u720"]}, name="Рик и Морти")
+    mock_api.translators = {355: {"name": "Сыендук", "premium": False}}
+    url = build_selection_url("https://rezka.ag/cartoons/x/1-y-2020.html", 355, 1, 3)
+    with patch("app.utils.rezka.HdRezkaApi", return_value=mock_api):
+        _, title = resolve_rezka_stream(url, "720p")
+    assert title == "Рик и Морти, Сыендук, 1 сезон, 3 серия"
 
 
 def test_resolve_rezka_stream_appends_translator_name_to_title():
