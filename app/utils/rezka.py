@@ -241,6 +241,31 @@ class _NotMoviePageError(Exception):
         super().__init__(str(cause))
 
 
+def _sanitize_translators_list(rezka) -> None:
+    """Strip any child of #translators-list that has no data-translator_id
+    attribute, in place, before HdRezkaApi's own .translators property (used
+    internally by both get_rezka_content_info and getStream) ever looks at
+    it.
+
+    Seen in production on every rezka.ag page tried (not a page-specific
+    quirk): the site's current markup puts at least one non-translator
+    child (a decorative wrapper) inside #translators-list, and this
+    HdRezkaApi version's parser does `int(child.attrs['data-translator_id'])`
+    on every direct child unconditionally — KeyError on the first one that
+    doesn't have it. Removing those children first makes HdRezkaApi's own
+    (otherwise correct) loop see only real translator entries.
+    """
+    try:
+        container = rezka.soup.find(id="translators-list")
+    except Exception:
+        return
+    if not container:
+        return
+    for child in list(container.find_all(recursive=False)):
+        if "data-translator_id" not in getattr(child, "attrs", {}):
+            child.decompose()
+
+
 def _open_movie_page(url: str, proxies: dict, headers: dict, cookies: dict):
     """Fetch url via HdRezkaApi and return (api, content_type).
 
@@ -256,6 +281,7 @@ def _open_movie_page(url: str, proxies: dict, headers: dict, cookies: dict):
         content_type = rezka.type
     except Exception as exc:
         raise _NotMoviePageError(rezka, exc) from exc
+    _sanitize_translators_list(rezka)
     return rezka, content_type
 
 

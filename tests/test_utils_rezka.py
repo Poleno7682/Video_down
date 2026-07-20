@@ -465,6 +465,60 @@ def test_get_rezka_content_info_raises_on_unknown_type():
             get_rezka_content_info("https://rezka.ag/films/x/1-y-2020.html")
 
 
+def test_sanitize_translators_list_removes_children_without_translator_id():
+    """Regression guard: production hit KeyError('data-translator_id') on
+    every rezka.ag page tried — the site's current #translators-list markup
+    includes a non-translator child element HdRezkaApi's own parser doesn't
+    skip. Must remove it in place, keeping the real translator entries."""
+    from bs4 import BeautifulSoup
+
+    from app.utils.rezka import _sanitize_translators_list
+
+    soup = BeautifulSoup(
+        '<div id="translators-list">'
+        '<div class="wrapper-decoration"></div>'
+        '<li data-translator_id="56">Дубляж</li>'
+        '<li data-translator_id="99">Оригинал</li>'
+        "</div>",
+        "html.parser",
+    )
+
+    class _FakeApi:
+        pass
+
+    fake = _FakeApi()
+    fake.soup = soup
+    _sanitize_translators_list(fake)
+
+    children = soup.find(id="translators-list").find_all(recursive=False)
+    assert len(children) == 2
+    assert all("data-translator_id" in c.attrs for c in children)
+
+
+def test_sanitize_translators_list_noop_when_no_container():
+    from bs4 import BeautifulSoup
+
+    from app.utils.rezka import _sanitize_translators_list
+
+    class _FakeApi:
+        pass
+
+    fake = _FakeApi()
+    fake.soup = BeautifulSoup("<html></html>", "html.parser")
+    _sanitize_translators_list(fake)  # must not raise
+
+
+def test_sanitize_translators_list_swallows_soup_access_errors():
+    from app.utils.rezka import _sanitize_translators_list
+
+    class _FakeApi:
+        @property
+        def soup(self):
+            raise AttributeError("boom")
+
+    _sanitize_translators_list(_FakeApi())  # must not raise
+
+
 def test_get_rezka_content_info_reports_unparseable_translator_markup():
     """Regression guard: production hit a raw KeyError on a franchise-style
     URL (.../2136-rik-i-morti-2013-latest/66-syenduk.html) whose translator
