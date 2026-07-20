@@ -725,23 +725,8 @@ def download_video(
         extract_url = url
         extra_headers: dict[str, str] | None = None
         rezka_title: str | None = None
-        if is_rezka_url(url):
-            # Always fetched direct (no proxy), never through proxies below:
-            # the anti-bot cookies (cached or freshly solved) are earned by
-            # Playwright on this machine's own direct IP, and Anubis ties a
-            # solved challenge's cookies to the IP that solved it — routing
-            # this specific request through a different-IP proxy makes the
-            # cookies look stolen and the challenge reappears every time.
-            # proxies (if any) are still used below, for the actual CDN
-            # stream download, which has no such IP binding.
-            try:
-                extract_url, rezka_title = resolve_rezka_stream(
-                    url, quality,
-                    bypass_antibot=settings.rezka_antibot_bypass,
-                    redis=redis,
-                )
-            except RezkaResolveError as exc:
-                raise DownloadError(str(exc)) from exc
+        is_rezka = is_rezka_url(url)
+        if is_rezka:
             page_origin = urllib.parse.urlparse(url)
             origin = f"{page_origin.scheme}://{page_origin.hostname}"
             extra_headers = {"Referer": origin + "/", "Origin": origin}
@@ -756,32 +741,75 @@ def download_video(
         # just falls through to the next one, since which datacenter IP
         # range gets flagged by a given site can vary proxy to proxy.
         proxy_list: list[str | None] = [None, *proxies] if proxies else [None]
-        info: dict | None = None
-        last_exc: Exception | None = None
-        for idx, proxy in enumerate(proxy_list):
-            opts = _build_ydl_opts(extract_url, quality, work_dir, progress_hook, cookie_file, embed_subtitles, proxy)
-            if extra_headers:
-                opts["http_headers"] = {**opts.get("http_headers", {}), **extra_headers}
-            try:
-                info = _extract_with_retry(extract_url, opts)
-            except Exception as exc:
-                last_exc = exc
-                if on_proxy_result:
-                    on_proxy_result(proxy, False)
-                logger.warning(
-                    "Download attempt %d/%d via proxy=%s failed for %s: %s",
-                    idx + 1, len(proxy_list), proxy or "direct", url, exc,
-                )
-                continue
-            if on_proxy_result:
-                on_proxy_result(proxy, True)
-            logger.info(
-                "Download succeeded via proxy=%s (attempt %d/%d) for %s",
-                proxy or "direct", idx + 1, len(proxy_list), url,
+
+        def _resolve_stream_url(proxy: str | None) -> str:
+            # rezka's CDN issues signed URLs that appear bound to the IP
+            # that resolved them (a stale-token 404 was seen in production
+            # when the resolve happened direct but the download then went
+            # through a different-IP proxy) — resolving fresh per proxy
+            # attempt, through that same proxy, keeps resolve and download
+            # on one consistent IP. See resolve_rezka_stream's own
+            # docstring for the antibot-cookie side of this same rule.
+            nonlocal rezka_title
+            resolved_url, rezka_title = resolve_rezka_stream(
+                url, quality, proxy=proxy, bypass_antibot=settings.rezka_antibot_bypass, redis=redis,
             )
-            break
-        else:
+            return resolved_url
+
+        def _attempt_download() -> dict:
+            last_exc: Exception | None = None
+            for idx, proxy in enumerate(proxy_list):
+                if is_rezka:
+                    try:
+                        dl_url = _resolve_stream_url(proxy)
+                    except RezkaResolveError as exc:
+                        last_exc = DownloadError(str(exc))
+                        last_exc.__cause__ = exc
+                        if on_proxy_result:
+                            on_proxy_result(proxy, False)
+                        logger.warning(
+                            "Rezka resolve via proxy=%s failed for %s: %s", proxy or "direct", url, exc,
+                        )
+                        continue
+                else:
+                    dl_url = extract_url
+                opts = _build_ydl_opts(dl_url, quality, work_dir, progress_hook, cookie_file, embed_subtitles, proxy)
+                if extra_headers:
+                    opts["http_headers"] = {**opts.get("http_headers", {}), **extra_headers}
+                try:
+                    result = _extract_with_retry(dl_url, opts)
+                except Exception as exc:
+                    last_exc = exc
+                    if on_proxy_result:
+                        on_proxy_result(proxy, False)
+                    logger.warning(
+                        "Download attempt %d/%d via proxy=%s failed for %s: %s",
+                        idx + 1, len(proxy_list), proxy or "direct", url, exc,
+                    )
+                    continue
+                if on_proxy_result:
+                    on_proxy_result(proxy, True)
+                logger.info(
+                    "Download succeeded via proxy=%s (attempt %d/%d) for %s",
+                    proxy or "direct", idx + 1, len(proxy_list), url,
+                )
+                return result or {}
             raise last_exc
+
+        try:
+            info = _attempt_download()
+        except Exception as exc:
+            # Only retry the whole cycle again for a genuine download-stage
+            # failure (a CDN mirror transiently slow/unhealthy) — not when
+            # every proxy's *resolve* itself failed the same way (a
+            # RezkaResolveError cause set above), since that's a structural
+            # problem (wrong content type, translator has no stream, etc.)
+            # a second identical pass — including another expensive antibot
+            # solve per proxy — won't fix.
+            if not is_rezka or isinstance(exc.__cause__, RezkaResolveError):
+                raise
+            logger.info("Rezka download failed for %s, retrying the full attempt once more: %s", url, exc)
+            info = _attempt_download()
 
         file_path = _select_output_file(work_dir, set())
         if embed_subtitles and quality != "audio":

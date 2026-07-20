@@ -277,12 +277,33 @@ def test_solve_challenge_with_browser_raises_on_generic_error():
             _solve_challenge_with_browser("https://rezka.ag/films/x/1-y-2020.html")
 
 
+def test_solve_challenge_with_browser_routes_through_proxy():
+    """Anubis ties a solved challenge's cookies to the IP that solved it —
+    the browser itself must go through the same proxy the caller will use
+    for the subsequent page/stream requests, or those cookies get rejected."""
+    mock_cm, _mock_page, _mock_browser = _mock_sync_playwright([{"name": "a", "value": "1"}])
+    with patch("playwright.sync_api.sync_playwright", return_value=mock_cm) as mock_sp:
+        _solve_challenge_with_browser("https://rezka.ag/films/x/1-y-2020.html", proxy="http://vpn:8888")
+    mock_p = mock_sp.return_value.__enter__.return_value
+    mock_p.chromium.launch.assert_called_once_with(
+        headless=True, args=["--no-sandbox"], proxy={"server": "http://vpn:8888"}
+    )
+
+
+def test_solve_challenge_with_browser_no_proxy_kwarg_when_unset():
+    mock_cm, _mock_page, _mock_browser = _mock_sync_playwright([{"name": "a", "value": "1"}])
+    with patch("playwright.sync_api.sync_playwright", return_value=mock_cm) as mock_sp:
+        _solve_challenge_with_browser("https://rezka.ag/films/x/1-y-2020.html")
+    mock_p = mock_sp.return_value.__enter__.return_value
+    mock_p.chromium.launch.assert_called_once_with(headless=True, args=["--no-sandbox"])
+
+
 def test_resolve_rezka_stream_uses_browser_cookies_when_bypass_enabled():
     mock_api = _mock_movie_api({"720p": ["u720"]})
     with patch("app.utils.rezka.HdRezkaApi", return_value=mock_api) as mock_cls, \
          patch("app.utils.rezka._solve_challenge_with_browser", return_value={"a": "1"}) as mock_solve:
         resolve_rezka_stream("https://rezka.ag/films/x/1-y-2020.html", "720p", bypass_antibot=True)
-    mock_solve.assert_called_once_with("https://rezka.ag/films/x/1-y-2020.html")
+    mock_solve.assert_called_once_with("https://rezka.ag/films/x/1-y-2020.html", proxy=None)
     _, kwargs = mock_cls.call_args
     assert kwargs["cookies"] == {"a": "1"}
 
@@ -326,6 +347,26 @@ def test_resolve_rezka_stream_stores_freshly_solved_cookies_in_cache():
     mock_solve.assert_called_once()
     redis.setex.assert_called_once_with(
         "rezka_antibot_cookies:rezka.ag", 6 * 3600, json.dumps({"fresh": "cookie"})
+    )
+
+
+def test_resolve_rezka_stream_cache_key_isolated_by_proxy():
+    """Cookies earned direct and cookies earned via a given proxy are not
+    interchangeable (see _cache_key's docstring) — the redis key must
+    encode which one, so a direct-earned entry is never handed to a
+    proxied resolve or vice versa."""
+    mock_api = _mock_movie_api({"720p": ["u720"]})
+    redis = MagicMock()
+    redis.get.return_value = None
+    with patch("app.utils.rezka.HdRezkaApi", return_value=mock_api), \
+         patch("app.utils.rezka._solve_challenge_with_browser", return_value={"fresh": "cookie"}):
+        resolve_rezka_stream(
+            "https://rezka.ag/films/x/1-y-2020.html", "720p",
+            proxy="http://vpn:8888", bypass_antibot=True, redis=redis,
+        )
+    redis.get.assert_called_once_with("rezka_antibot_cookies:rezka.ag:http://vpn:8888")
+    redis.setex.assert_called_once_with(
+        "rezka_antibot_cookies:rezka.ag:http://vpn:8888", 6 * 3600, json.dumps({"fresh": "cookie"})
     )
 
 

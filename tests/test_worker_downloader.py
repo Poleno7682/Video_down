@@ -527,7 +527,7 @@ def test_download_video_resolves_rezka_url_to_direct_stream():
 
         mock_resolve.assert_called_once_with(
             "https://rezka.ag/films/detective/807-advokat-dyavola-1997.html", "720p",
-            bypass_antibot=False, redis=None,
+            proxy=None, bypass_antibot=False, redis=None,
         )
         assert captured_urls == ["https://cdn.example/video.mp4"]
         opts_used = mock_ydl_cls.call_args[0][0]
@@ -537,12 +537,13 @@ def test_download_video_resolves_rezka_url_to_direct_stream():
         assert info["title"] == "Advocate of the Devil"
 
 
-def test_download_video_resolves_rezka_stream_without_proxy_even_when_proxies_given():
-    """Regression guard: routing the rezka.ag page-open request through a
-    proxy makes Anubis's solved-challenge cookies (earned on this machine's
-    own direct IP) look stolen, and the antibot interstitial reappears even
-    right after a successful solve. Only the later CDN download (of the
-    already-resolved direct stream URL) should ever use proxies."""
+def test_download_video_resolves_rezka_stream_direct_first_even_when_proxies_given():
+    """Direct (proxy=None) is still tried first for the resolve step too —
+    cheapest, and usually works. resolve_rezka_stream itself is what keeps
+    the antibot solve on the same IP as the proxy passed to it (see
+    app.utils.rezka), so once resolving via a *given* proxy is needed, that
+    proxy must reach resolve_rezka_stream too — not just the later CDN
+    download — to avoid a signed-URL IP mismatch between the two."""
     with tempfile.TemporaryDirectory() as tmp:
         settings = MagicMock()
         settings.download_dir = Path(tmp)
@@ -577,7 +578,59 @@ def test_download_video_resolves_rezka_stream_without_proxy_even_when_proxies_gi
                 proxies=["socks5h://a:1080", "socks5h://b:1080"],
             )
 
-        assert "proxy" not in mock_resolve.call_args.kwargs
+        mock_resolve.assert_called_once_with(
+            "https://rezka.ag/films/detective/807-advokat-dyavola-1997.html", "720p",
+            proxy=None, bypass_antibot=True, redis=None,
+        )
+
+
+def test_download_video_resolves_rezka_stream_via_same_proxy_as_download_on_fallback():
+    """When direct fails outright, the fallback proxy must be used for
+    *both* the re-resolve and the download of the URL it returns — not
+    resolved direct and downloaded through the proxy, which is exactly the
+    signed-URL IP-mismatch bug seen in production (a 404 on a token minted
+    for a different IP)."""
+    with tempfile.TemporaryDirectory() as tmp:
+        settings = MagicMock()
+        settings.download_dir = Path(tmp)
+        settings.default_quality = "720p"
+        settings.use_cookies = False
+        settings.rezka_antibot_bypass = False
+
+        fixed_hex = "abc123"
+        work_subdir = settings.download_dir / "active" / fixed_hex
+
+        def fake_extract_info(url, download):
+            work_subdir.mkdir(parents=True, exist_ok=True)
+            (work_subdir / "video.mp4").write_bytes(b"x" * 100)
+            return {"title": "url-slug"}
+
+        mock_ydl = MagicMock()
+        mock_ydl.__enter__ = MagicMock(return_value=mock_ydl)
+        mock_ydl.__exit__ = MagicMock(return_value=False)
+        mock_ydl.extract_info.side_effect = fake_extract_info
+
+        mock_uuid = MagicMock()
+        mock_uuid.hex = fixed_hex
+
+        with patch("app.worker.downloader.uuid.uuid4", return_value=mock_uuid), \
+             patch("app.worker.downloader.YoutubeDL", return_value=mock_ydl) as mock_ydl_cls, \
+             patch(
+                 "app.worker.downloader.resolve_rezka_stream",
+                 side_effect=[
+                     RezkaResolveError("страница недоступна напрямую"),
+                     ("https://cdn.example/via-proxy.mp4", "Title, Voice"),
+                 ],
+             ) as mock_resolve:
+            download_video(
+                "https://rezka.ag/films/detective/807-advokat-dyavola-1997.html", "720p", settings,
+                proxies=["http://vpn:8888"],
+            )
+
+        assert mock_resolve.call_args_list[0].kwargs["proxy"] is None
+        assert mock_resolve.call_args_list[1].kwargs["proxy"] == "http://vpn:8888"
+        opts_used = mock_ydl_cls.call_args[0][0]
+        assert opts_used["proxy"] == "http://vpn:8888"
 
 
 def test_download_video_raises_when_rezka_resolve_fails():
@@ -594,6 +647,86 @@ def test_download_video_raises_when_rezka_resolve_fails():
             download_video(
                 "https://rezka.ag/series/drama/1-x-2020.html", "720p", settings,
             )
+
+
+def test_download_video_retries_rezka_with_fresh_resolve_after_all_proxies_fail():
+    """If every proxy attempt fails for a rezka URL (e.g. the resolved CDN
+    mirror is unhealthy), re-resolve once for a fresh signed URL/mirror and
+    retry the whole proxy list once more before giving up."""
+    with tempfile.TemporaryDirectory() as tmp:
+        settings = MagicMock()
+        settings.download_dir = Path(tmp)
+        settings.default_quality = "720p"
+        settings.use_cookies = False
+        settings.rezka_antibot_bypass = False
+
+        fixed_hex = "aabbccdd11223344aabbccdd11223344"
+        work_subdir = Path(tmp) / "active" / fixed_hex
+
+        captured_urls = []
+
+        def fake_extract_info(url, download):
+            captured_urls.append(url)
+            if len(captured_urls) <= 1:
+                # A message that doesn't match _extract_with_retry's own
+                # internal access/timeout retry markers, so it fails
+                # outright and falls through to download_video's rezka
+                # re-resolve retry (the thing under test here).
+                raise DownloadError("network unreachable")
+            work_subdir.mkdir(parents=True, exist_ok=True)
+            (work_subdir / "video.mp4").write_bytes(b"x" * 100)
+            return {"title": "url-slug"}
+
+        mock_ydl = MagicMock()
+        mock_ydl.__enter__ = MagicMock(return_value=mock_ydl)
+        mock_ydl.__exit__ = MagicMock(return_value=False)
+        mock_ydl.extract_info.side_effect = fake_extract_info
+
+        mock_uuid = MagicMock()
+        mock_uuid.hex = fixed_hex
+
+        with patch("app.worker.downloader.uuid.uuid4", return_value=mock_uuid), \
+             patch("app.worker.downloader.YoutubeDL", return_value=mock_ydl), \
+             patch(
+                 "app.worker.downloader.resolve_rezka_stream",
+                 side_effect=[
+                     ("https://cdn.example/mirror-a.mp4", "Title, Voice"),
+                     ("https://cdn.example/mirror-b.mp4", "Title, Voice"),
+                 ],
+             ) as mock_resolve:
+            path, info = download_video(
+                "https://rezka.ag/films/detective/807-advokat-dyavola-1997.html", "720p", settings,
+            )
+
+        assert mock_resolve.call_count == 2
+        assert captured_urls == ["https://cdn.example/mirror-a.mp4", "https://cdn.example/mirror-b.mp4"]
+        assert path == Path(tmp) / "active" / "video.mp4"
+
+
+def test_download_video_raises_after_rezka_retry_also_fails():
+    with tempfile.TemporaryDirectory() as tmp:
+        settings = MagicMock()
+        settings.download_dir = Path(tmp)
+        settings.default_quality = "720p"
+        settings.use_cookies = False
+        settings.rezka_antibot_bypass = False
+
+        mock_ydl = MagicMock()
+        mock_ydl.__enter__ = MagicMock(return_value=mock_ydl)
+        mock_ydl.__exit__ = MagicMock(return_value=False)
+        mock_ydl.extract_info.side_effect = DownloadError("timed out")
+
+        with patch("app.worker.downloader.YoutubeDL", return_value=mock_ydl), \
+             patch(
+                 "app.worker.downloader.resolve_rezka_stream",
+                 return_value=("https://cdn.example/mirror.mp4", "Title, Voice"),
+             ) as mock_resolve, \
+             pytest.raises(DownloadError):
+            download_video(
+                "https://rezka.ag/films/detective/807-advokat-dyavola-1997.html", "720p", settings,
+            )
+
+        assert mock_resolve.call_count == 2
 
 
 def test_download_video_empty_info():

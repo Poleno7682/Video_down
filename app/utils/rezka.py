@@ -161,14 +161,21 @@ def episodes_for_translator_season(episodes_info: list[dict], translator_id: int
     return []
 
 
-def _cache_key(domain: str) -> str:
-    return f"{_COOKIE_CACHE_PREFIX}{domain}"
+def _cache_key(domain: str, proxy: str | None) -> str:
+    # Anubis ties a solved challenge's cookies to the IP that solved it, so
+    # cookies earned direct and cookies earned via a given proxy are never
+    # interchangeable — keying the cache on proxy identity too (not just
+    # domain) stops a direct-earned entry from being handed to a
+    # proxied request (or vice versa) and failing the exact same way a
+    # stale/expired entry would.
+    suffix = f":{proxy}" if proxy else ""
+    return f"{_COOKIE_CACHE_PREFIX}{domain}{suffix}"
 
 
-def _load_cached_cookies(redis, domain: str) -> dict[str, str] | None:
+def _load_cached_cookies(redis, domain: str, proxy: str | None) -> dict[str, str] | None:
     if redis is None:
         return None
-    raw = redis.get(_cache_key(domain))
+    raw = redis.get(_cache_key(domain, proxy))
     if not raw:
         return None
     try:
@@ -177,18 +184,20 @@ def _load_cached_cookies(redis, domain: str) -> dict[str, str] | None:
         return None
 
 
-def _store_cached_cookies(redis, domain: str, cookies: dict[str, str]) -> None:
+def _store_cached_cookies(redis, domain: str, proxy: str | None, cookies: dict[str, str]) -> None:
     if redis is None or not cookies:
         return
-    redis.setex(_cache_key(domain), _COOKIE_CACHE_TTL_SECONDS, json.dumps(cookies))
+    redis.setex(_cache_key(domain, proxy), _COOKIE_CACHE_TTL_SECONDS, json.dumps(cookies))
 
 
-def _clear_cached_cookies(redis, domain: str) -> None:
+def _clear_cached_cookies(redis, domain: str, proxy: str | None) -> None:
     if redis is not None:
-        redis.delete(_cache_key(domain))
+        redis.delete(_cache_key(domain, proxy))
 
 
-def _solve_challenge_with_browser(url: str, timeout_ms: int = _CHALLENGE_TIMEOUT_MS) -> dict[str, str]:
+def _solve_challenge_with_browser(
+    url: str, timeout_ms: int = _CHALLENGE_TIMEOUT_MS, proxy: str | None = None
+) -> dict[str, str]:
     """Load url in a real headless Chromium so its anti-bot JS challenge
     actually runs and resolves, returning the cookies it earned for plain
     `requests` calls (what HdRezkaApi itself makes) to reuse afterwards.
@@ -198,6 +207,14 @@ def _solve_challenge_with_browser(url: str, timeout_ms: int = _CHALLENGE_TIMEOUT
     tried first, doesn't even recognize it as a challenge type it handles)
     — nothing but actually running the real client-side JS computes the
     right answer, so a genuine browser engine is unavoidable here.
+
+    proxy, when given, routes the browser's own traffic through it —
+    required so the cookies this earns are valid for *this* IP: Anubis
+    ties a solved challenge to the IP that solved it, so solving direct
+    and then making the actual page/stream requests through a proxy (or
+    vice versa) gets those cookies rejected as if stolen. Callers must
+    keep this in sync with the proxy used for every request that reuses
+    these cookies.
     """
     # Imported lazily: playwright + its browser binary are a heavy,
     # optional dependency only needed when the antibot bypass is actually
@@ -207,7 +224,10 @@ def _solve_challenge_with_browser(url: str, timeout_ms: int = _CHALLENGE_TIMEOUT
 
     try:
         with sync_playwright() as p:
-            browser = p.chromium.launch(headless=True, args=["--no-sandbox"])
+            launch_kwargs: dict = {"headless": True, "args": ["--no-sandbox"]}
+            if proxy:
+                launch_kwargs["proxy"] = {"server": proxy}
+            browser = p.chromium.launch(**launch_kwargs)
             try:
                 context = browser.new_context(user_agent=_HEADERS["User-Agent"])
                 page = context.new_page()
@@ -410,12 +430,15 @@ def _open_rezka_session(url: str, proxy: str | None, bypass_antibot: bool, redis
     cookies: dict[str, str] = {}
     used_cached_cookies = False
     if bypass_antibot:
-        cached = None if force_fresh_cookies else _load_cached_cookies(redis, domain)
+        cached = None if force_fresh_cookies else _load_cached_cookies(redis, domain, proxy)
         if cached:
             cookies, used_cached_cookies = cached, True
         else:
-            cookies = _solve_challenge_with_browser(url)
-            _store_cached_cookies(redis, domain, cookies)
+            # Solved through the same proxy the actual page/stream requests
+            # below will use — see _solve_challenge_with_browser's own note
+            # on why a mismatch here gets the cookies rejected.
+            cookies = _solve_challenge_with_browser(url, proxy=proxy)
+            _store_cached_cookies(redis, domain, proxy, cookies)
 
     try:
         rezka, content_type = _open_movie_page(url, proxies, headers, cookies)
@@ -425,9 +448,9 @@ def _open_rezka_session(url: str, proxy: str | None, bypass_antibot: bool, redis
             raise _page_diagnostic_error(exc.rezka, exc.cause) from exc.cause
         # Cached cookies didn't work — solve fresh once and retry before
         # giving up, instead of failing on a cache entry that just expired.
-        _clear_cached_cookies(redis, domain)
-        cookies = _solve_challenge_with_browser(url)
-        _store_cached_cookies(redis, domain, cookies)
+        _clear_cached_cookies(redis, domain, proxy)
+        cookies = _solve_challenge_with_browser(url, proxy=proxy)
+        _store_cached_cookies(redis, domain, proxy, cookies)
         try:
             rezka, content_type = _open_movie_page(url, proxies, headers, cookies)
             return rezka, content_type, False
@@ -519,7 +542,7 @@ def _get_stream_with_retry(
             raise RezkaResolveError(f"Не удалось получить поток видео: {exc}") from exc
 
         domain = urllib.parse.urlparse(url).hostname or ""
-        _clear_cached_cookies(redis, domain)
+        _clear_cached_cookies(redis, domain, proxy)
         rezka, _content_type, _used = _open_rezka_session(url, proxy, bypass_antibot, redis, force_fresh_cookies=True)
         try:
             return _call_get_stream(rezka, translator_id, season, episode), rezka
@@ -551,12 +574,20 @@ def resolve_rezka_stream(
     bypass_antibot, when True, drives a real headless browser through that
     challenge and reuses the cookies it earns for HdRezkaApi's own plain
     requests calls. Solving it takes 10-30+ seconds, so when redis is
-    given the resulting cookies are cached per-domain — most downloads
+    given the resulting cookies are cached per-domain+proxy — most downloads
     then skip the browser entirely. A cache hit that turns out to be
     stale (cookie expired/rotated server-side) is detected the same way
     a cold solve's result would be and triggers exactly one fresh solve
     before giving up, so a stale cache entry costs one retry, not a
     failure.
+
+    proxy, when given, is used consistently for the antibot solve, the
+    page fetch, and the getStream call — not just the caller's later CDN
+    download of the returned direct_url. Some rezka CDN mirrors issue
+    signed URLs that appear bound to the resolving IP: resolving direct and
+    then downloading through a different-IP proxy can 404 even though the
+    resolve itself succeeded. Passing the *same* proxy through resolve and
+    the subsequent download keeps both ends on one IP.
     """
     translator_id, season, episode = _parse_selection(url)
     rezka, content_type, used_cached_cookies = _open_rezka_session(url, proxy, bypass_antibot, redis)
