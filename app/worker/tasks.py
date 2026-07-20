@@ -353,13 +353,17 @@ def _resolve_proxies(repo: Repository, settings: Settings, url: str) -> list[str
     """Proxies to try, least-failed first. Falls back to YTDLP_PROXY when the
     admin-managed pool (DB) is empty, so an env-only setup keeps working.
 
-    Only used for YouTube: the pool exists to route around YouTube's
-    datacenter-IP anti-bot block specifically, and every proxy in a typical
-    free/cheap pool is unreliable enough (dead, wrong scheme, geo-blocked)
-    that routing unrelated sites through it too just adds failure modes
-    those sites never had a problem with in the first place.
+    Only used for YouTube and rezka.ag: the pool exists to route around
+    IP-based blocks/throttling — YouTube's datacenter-IP anti-bot check,
+    and rezka's resolved CDN hosts (e.g. stream.voidboost.cc) timing out
+    outright for some VPS IP ranges (seen in production: every attempt
+    times out at 90s, direct, so it isn't a transient blip a longer
+    timeout alone can fix). Every proxy in a typical free/cheap pool is
+    unreliable enough (dead, wrong scheme, geo-blocked) that routing sites
+    without this specific problem through it too just adds failure modes
+    those sites never had in the first place — hence not "every URL".
     """
-    if detect_platform(url) != YOUTUBE:
+    if detect_platform(url) != YOUTUBE and not is_rezka_url(url):
         return []
     db_proxies = repo.get_enabled_proxy_urls()
     if db_proxies:

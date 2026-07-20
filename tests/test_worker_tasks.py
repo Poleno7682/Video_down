@@ -191,12 +191,18 @@ class TestResolveProxies:
         settings = _make_settings(ytdlp_proxy="")
         assert _resolve_proxies(repo, settings, self._YT_URL) == []
 
-    def test_empty_for_non_youtube_url_even_with_pool_configured(self):
+    def test_empty_for_unrelated_platform_even_with_pool_configured(self):
         repo = MagicMock()
         repo.get_enabled_proxy_urls.return_value = ["socks5h://a:1080"]
         settings = _make_settings(ytdlp_proxy="socks5h://env:1080")
-        assert _resolve_proxies(repo, settings, "https://rezka.ag/films/x-1997.html") == []
+        assert _resolve_proxies(repo, settings, "https://vimeo.com/12345") == []
         repo.get_enabled_proxy_urls.assert_not_called()
+
+    def test_uses_pool_for_rezka_url(self):
+        repo = MagicMock()
+        repo.get_enabled_proxy_urls.return_value = ["socks5h://a:1080"]
+        settings = _make_settings(ytdlp_proxy="socks5h://env:1080")
+        assert _resolve_proxies(repo, settings, "https://rezka.ag/films/x/807-x-1997.html") == ["socks5h://a:1080"]
 
 
 class TestRecordProxyResult:
