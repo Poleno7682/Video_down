@@ -40,6 +40,30 @@ def test_check_proxy_raises_on_scheme_mismatch():
             check_proxy("socks5h://actually-http:1080")
 
 
+def test_check_proxy_raises_on_https_scheme_mismatch_wrong_version():
+    mock_ydl = MagicMock()
+    mock_ydl.__enter__ = MagicMock(return_value=mock_ydl)
+    mock_ydl.__exit__ = MagicMock(return_value=False)
+    mock_ydl.extract_info.side_effect = Exception(
+        "SSLError(SSLError(1, '[SSL: WRONG_VERSION_NUMBER] wrong version number (_ssl.c:1010)'))"
+    )
+    with patch("app.utils.proxy_check.YoutubeDL", return_value=mock_ydl):
+        with pytest.raises(ProxyCheckError, match="без TLS"):
+            check_proxy("https://actually-http:8888")
+
+
+def test_check_proxy_raises_on_https_scheme_mismatch_cert_mismatch():
+    mock_ydl = MagicMock()
+    mock_ydl.__enter__ = MagicMock(return_value=mock_ydl)
+    mock_ydl.__exit__ = MagicMock(return_value=False)
+    mock_ydl.extract_info.side_effect = Exception(
+        "certificate verify failed: IP address mismatch, certificate is not valid for '1.2.3.4'."
+    )
+    with patch("app.utils.proxy_check.YoutubeDL", return_value=mock_ydl):
+        with pytest.raises(ProxyCheckError, match="без TLS"):
+            check_proxy("https://actually-http:443")
+
+
 def test_check_proxy_raises_on_generic_failure():
     mock_ydl = MagicMock()
     mock_ydl.__enter__ = MagicMock(return_value=mock_ydl)

@@ -18,7 +18,21 @@ _ANTI_BOT_MARKERS = (
 # a SOCKS5 handshake reply (0x05 is the SOCKS5 version byte; 0x48 is ASCII
 # 'H', the start of "HTTP/1.1..."). It means the proxy is actually
 # HTTP(S)-only but was added as SOCKS5 — a scheme mismatch, not a dead proxy.
-_SCHEME_MISMATCH_MARKERS = ("expected 05 got 48", "expected 05, got 48")
+_SOCKS5_MISMATCH_MARKERS = ("expected 05 got 48", "expected 05, got 48")
+
+# A proxy URL's scheme picks how *we* connect to the proxy (plain TCP vs. a
+# TLS handshake to the proxy itself), independent of what the proxy then
+# does with the request — separate from SOCKS5 vs HTTP(S). Most proxy-list
+# providers hand out plain HTTP proxies; adding one as https:// makes the
+# client try a TLS handshake against a server speaking plain HTTP, which
+# surfaces as one of these (wrong TLS version byte, or a cert that obviously
+# doesn't match the proxy's bare IP since it was never meant to serve TLS).
+_HTTPS_MISMATCH_MARKERS = (
+    "wrong_version_number",
+    "wrong version number",
+    "certificate is not valid for",
+    "your proxy appears to only use http and not https",
+)
 
 
 class ProxyCheckError(RuntimeError):
@@ -49,9 +63,14 @@ def check_proxy(proxy_url: str, timeout: int = 20) -> None:
             raise ProxyCheckError(
                 "YouTube заблокировал этот прокси (Sign in to confirm you're not a bot)."
             ) from exc
-        if any(marker in text for marker in _SCHEME_MISMATCH_MARKERS):
+        if any(marker in text for marker in _SOCKS5_MISMATCH_MARKERS):
             raise ProxyCheckError(
                 "Похоже, это не SOCKS5-прокси (сервер ответил по HTTP). "
-                "Попробуйте добавить его как HTTPS."
+                "Попробуйте добавить его как HTTP или HTTPS."
+            ) from exc
+        if any(marker in text for marker in _HTTPS_MISMATCH_MARKERS):
+            raise ProxyCheckError(
+                "Похоже, это обычный HTTP-прокси без TLS, а он был добавлен как HTTPS. "
+                "Попробуйте добавить его как HTTP."
             ) from exc
         raise ProxyCheckError(f"Прокси не отвечает или соединение не удалось: {exc}") from exc

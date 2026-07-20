@@ -36,11 +36,20 @@ def limits_keyboard(effective_values: dict[str, int]) -> InlineKeyboardMarkup:
 
 def proxy_scheme_keyboard() -> InlineKeyboardMarkup:
     """Asks the admin to pick a scheme before entering the proxy itself —
-    needed because the plain IP:PORT[...] formats don't carry a scheme."""
+    needed because the plain IP:PORT[...] formats don't carry a scheme.
+
+    HTTP and HTTPS are genuinely different here, not just a label: in a
+    proxy URL the scheme picks how *we* connect to the proxy itself
+    (plain TCP vs. a TLS handshake to the proxy), independent of what the
+    proxy then does with the request. Most proxy-list providers hand out
+    plain HTTP proxies — picking HTTPS for one of those fails with
+    SSL/wrong-version errors, not because the proxy is bad.
+    """
     builder = InlineKeyboardBuilder()
     builder.button(text="🧦 SOCKS5", callback_data="proxy:scheme:socks5h")
+    builder.button(text="🔌 HTTP", callback_data="proxy:scheme:http")
     builder.button(text="🔒 HTTPS", callback_data="proxy:scheme:https")
-    builder.adjust(2)
+    builder.adjust(3)
     return builder.as_markup()
 
 

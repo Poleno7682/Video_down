@@ -32,9 +32,10 @@ def test_proxy_scheme_keyboard_returns_markup():
     assert isinstance(proxy_scheme_keyboard(), InlineKeyboardMarkup)
 
 
-def test_proxy_scheme_keyboard_has_socks5_and_https():
+def test_proxy_scheme_keyboard_has_socks5_http_and_https():
     kb = proxy_scheme_keyboard()
     buttons = [btn for row in kb.inline_keyboard for btn in row]
     callback_data = {b.callback_data for b in buttons}
     assert "proxy:scheme:socks5h" in callback_data
+    assert "proxy:scheme:http" in callback_data
     assert "proxy:scheme:https" in callback_data
