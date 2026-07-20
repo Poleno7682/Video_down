@@ -375,7 +375,17 @@ def get_rezka_content_info(
     download. Goes through the same antibot bypass as resolve_rezka_stream.
     """
     rezka, content_type = _open_rezka_session(url, None, bypass_antibot, redis)
-    translators = {tr_id: info["name"] for tr_id, info in rezka.translators.items()}
+    try:
+        translators = {tr_id: info["name"] for tr_id, info in rezka.translators.items()}
+    except Exception as exc:
+        # Seen in production on a franchise-style URL (a show's ".../<id>-
+        # <slug>-latest/<n>-<translator-slug>.html" page) whose translator
+        # list markup HdRezkaApi's own .translators parser doesn't expect —
+        # surfacing this as a clear message beats a raw KeyError/AttributeError.
+        raise RezkaResolveError(
+            f"Не удалось получить список озвучек для этой страницы rezka: {exc}. "
+            "Попробуйте прислать основную ссылку на тайтл, без дополнительных сегментов в адресе."
+        ) from exc
 
     if content_type == Movie:
         return RezkaContentInfo(title=rezka.name, is_series=False, translators=translators)

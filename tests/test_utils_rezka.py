@@ -438,3 +438,22 @@ def test_get_rezka_content_info_raises_on_unknown_type():
     with patch("app.utils.rezka.HdRezkaApi", return_value=mock_api):
         with pytest.raises(RezkaResolveError, match="Неизвестный тип"):
             get_rezka_content_info("https://rezka.ag/films/x/1-y-2020.html")
+
+
+def test_get_rezka_content_info_reports_unparseable_translator_markup():
+    """Regression guard: production hit a raw KeyError on a franchise-style
+    URL (.../2136-rik-i-morti-2013-latest/66-syenduk.html) whose translator
+    list markup HdRezkaApi's own .translators parser doesn't expect."""
+    from HdRezkaApi.types import Movie
+
+    class _FakeApi:
+        ok = True
+        type = Movie()
+
+        @property
+        def translators(self):
+            raise KeyError("data-translator_id")
+
+    with patch("app.utils.rezka.HdRezkaApi", return_value=_FakeApi()):
+        with pytest.raises(RezkaResolveError, match="список озвучек"):
+            get_rezka_content_info("https://rezka.ag/cartoons/comedy/2136-x-2013-latest/66-y.html")
