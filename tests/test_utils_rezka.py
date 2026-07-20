@@ -508,6 +508,35 @@ def test_sanitize_translators_list_noop_when_no_container():
     _sanitize_translators_list(fake)  # must not raise
 
 
+def test_sanitize_translators_list_leaves_old_style_markup_untouched():
+    """Regression guard: production hit this on a 1994 title — every child
+    of #translators-list only had style="float: left;", no
+    data-translator_id at all (an older markup format, not "one decorative
+    wrapper amid real entries"). Blindly removing all of them would leave
+    an empty, useless translator list — must leave the DOM as-is instead."""
+    from bs4 import BeautifulSoup
+
+    from app.utils.rezka import _sanitize_translators_list
+
+    soup = BeautifulSoup(
+        '<div id="translators-list">'
+        '<li style="float: left;">Дубляж</li>'
+        '<li style="float: left;">Кириллица</li>'
+        "</div>",
+        "html.parser",
+    )
+
+    class _FakeApi:
+        pass
+
+    fake = _FakeApi()
+    fake.soup = soup
+    _sanitize_translators_list(fake)
+
+    children = soup.find(id="translators-list").find_all(recursive=False)
+    assert len(children) == 2
+
+
 def test_sanitize_translators_list_swallows_soup_access_errors():
     from app.utils.rezka import _sanitize_translators_list
 

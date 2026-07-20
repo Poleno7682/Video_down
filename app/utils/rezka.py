@@ -264,10 +264,31 @@ def _sanitize_translators_list(rezka) -> None:
         return
     if not container:
         return
+
     children = list(container.find_all(recursive=False))
-    removed = 0
+    if not children:
+        return
+    with_id = [c for c in children if "data-translator_id" in getattr(c, "attrs", {})]
+
+    if not with_id:
+        # None of them have it — a different (likely older) markup this
+        # site uses for some titles, not a "decorative wrapper amid real
+        # entries" case. Don't blindly wipe the whole list on a guess;
+        # log a sample of the actual HTML so the real shape can be
+        # special-cased properly instead of destroying data.
+        sample = "".join(str(c) for c in children[:3])
+        logger.info(
+            "rezka translators-list: no children have data-translator_id at all "
+            "(%d children) — leaving as-is. Sample HTML: %s",
+            len(children), sample[:1500],
+        )
+        return
+
+    if len(with_id) == len(children):
+        return  # already clean, nothing to do
+
     for child in children:
-        if "data-translator_id" not in getattr(child, "attrs", {}):
+        if child not in with_id:
             logger.info(
                 "rezka translators-list: dropping child without data-translator_id: <%s %s> text=%r",
                 getattr(child, "name", "?"),
@@ -275,10 +296,9 @@ def _sanitize_translators_list(rezka) -> None:
                 child.get_text(strip=True)[:60] if hasattr(child, "get_text") else "",
             )
             child.decompose()
-            removed += 1
     logger.info(
         "rezka translators-list: kept %d/%d direct children (removed %d)",
-        len(children) - removed, len(children), removed,
+        len(with_id), len(children), len(children) - len(with_id),
     )
 
 
