@@ -10,6 +10,11 @@ yt-dlp[default,curl-cffi]>=2026.1.1
 # a yt-dlp extractor) to resolve a direct stream URL, then that URL is
 # downloaded like any other. See app/utils/rezka.py.
 HdRezkaApi==11.2.3
+# Headless browser used only when REZKA_ANTIBOT_BYPASS=true, to drive
+# rezka.ag's Anubis proof-of-work JS challenge to completion (see
+# app/utils/rezka.py). The actual Chromium binary is installed separately
+# in the Dockerfile via `playwright install chromium`.
+playwright==1.61.0
 alembic==1.14.0
 pydantic==2.10.4
 pydantic-settings==2.7.0

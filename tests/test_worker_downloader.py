@@ -426,7 +426,7 @@ def test_download_video_resolves_rezka_url_to_direct_stream():
         settings.download_dir = Path(tmp)
         settings.default_quality = "720p"
         settings.use_cookies = False
-        settings.flaresolverr_url = ""
+        settings.rezka_antibot_bypass = False
 
         fixed_hex = "aabbccdd11223344aabbccdd11223344"
         work_subdir = Path(tmp) / "active" / fixed_hex
@@ -459,7 +459,7 @@ def test_download_video_resolves_rezka_url_to_direct_stream():
 
         mock_resolve.assert_called_once_with(
             "https://rezka.ag/films/detective/807-advokat-dyavola-1997.html", "720p",
-            proxy=None, flaresolverr_url=None,
+            proxy=None, bypass_antibot=False,
         )
         assert captured_urls == ["https://cdn.example/video.mp4"]
         opts_used = mock_ydl_cls.call_args[0][0]

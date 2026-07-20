@@ -5,7 +5,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from app.utils.rezka import RezkaResolveError, is_rezka_url, resolve_rezka_stream
-from app.utils.rezka import _solve_challenge
+from app.utils.rezka import _solve_challenge_with_browser
 
 
 def test_is_rezka_url_matches_films():
@@ -128,67 +128,67 @@ def test_resolve_rezka_stream_passes_proxy_through():
 
 
 # ---------------------------------------------------------------------------
-# _solve_challenge (FlareSolverr)
+# _solve_challenge_with_browser (Playwright)
 # ---------------------------------------------------------------------------
 
-def _mock_flaresolverr_response(status_code=200, json_data=None):
-    resp = MagicMock()
-    resp.status_code = status_code
-    resp.raise_for_status = MagicMock()
-    resp.json.return_value = json_data or {}
-    return resp
+def _mock_sync_playwright(cookies):
+    mock_page = MagicMock()
+    mock_context = MagicMock()
+    mock_context.new_page.return_value = mock_page
+    mock_context.cookies.return_value = cookies
+    mock_browser = MagicMock()
+    mock_browser.new_context.return_value = mock_context
+    mock_p = MagicMock()
+    mock_p.chromium.launch.return_value = mock_browser
+    mock_cm = MagicMock()
+    mock_cm.__enter__.return_value = mock_p
+    mock_cm.__exit__.return_value = False
+    return mock_cm, mock_page, mock_browser
 
 
-def test_solve_challenge_extracts_cookies_and_user_agent():
-    payload = {
-        "status": "ok",
-        "solution": {
-            "cookies": [
-                {"name": "__ddg1", "value": "abc123", "domain": "rezka.ag"},
-                {"name": "session", "value": "xyz", "domain": "rezka.ag"},
-            ],
-            "userAgent": "Mozilla/5.0 (solved-by-flaresolverr)",
-        },
-    }
-    with patch("app.utils.rezka.requests.post", return_value=_mock_flaresolverr_response(json_data=payload)):
-        cookies, user_agent = _solve_challenge("https://rezka.ag/films/x/1-y-2020.html", "http://flaresolverr:8191/v1")
-    assert cookies == {"__ddg1": "abc123", "session": "xyz"}
-    assert user_agent == "Mozilla/5.0 (solved-by-flaresolverr)"
+def test_solve_challenge_with_browser_extracts_cookies():
+    mock_cm, mock_page, mock_browser = _mock_sync_playwright(
+        [{"name": "within_since", "value": "abc123"}, {"name": "auth", "value": "xyz"}]
+    )
+    with patch("playwright.sync_api.sync_playwright", return_value=mock_cm):
+        cookies = _solve_challenge_with_browser("https://rezka.ag/films/x/1-y-2020.html")
+    assert cookies == {"within_since": "abc123", "auth": "xyz"}
+    mock_page.goto.assert_called_once()
+    mock_browser.close.assert_called_once()
 
 
-def test_solve_challenge_raises_on_non_ok_status():
-    payload = {"status": "error", "message": "Challenge not solved"}
-    with patch("app.utils.rezka.requests.post", return_value=_mock_flaresolverr_response(json_data=payload)):
-        with pytest.raises(RezkaResolveError, match="не смог пройти проверку"):
-            _solve_challenge("https://rezka.ag/films/x/1-y-2020.html", "http://flaresolverr:8191/v1")
+def test_solve_challenge_with_browser_raises_on_timeout():
+    from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
+
+    mock_cm, mock_page, mock_browser = _mock_sync_playwright([])
+    mock_page.wait_for_function.side_effect = PlaywrightTimeoutError("timeout")
+    with patch("playwright.sync_api.sync_playwright", return_value=mock_cm):
+        with pytest.raises(RezkaResolveError, match="антибот-проверку"):
+            _solve_challenge_with_browser("https://rezka.ag/films/x/1-y-2020.html")
+    mock_browser.close.assert_called_once()
 
 
-def test_solve_challenge_raises_when_flaresolverr_unreachable():
-    with patch("app.utils.rezka.requests.post", side_effect=ConnectionError("refused")):
-        with pytest.raises(RezkaResolveError, match="Не удалось связаться с FlareSolverr"):
-            _solve_challenge("https://rezka.ag/films/x/1-y-2020.html", "http://flaresolverr:8191/v1")
+def test_solve_challenge_with_browser_raises_on_generic_error():
+    mock_cm, mock_page, mock_browser = _mock_sync_playwright([])
+    mock_page.goto.side_effect = RuntimeError("browser crashed")
+    with patch("playwright.sync_api.sync_playwright", return_value=mock_cm):
+        with pytest.raises(RezkaResolveError, match="Ошибка headless-браузера"):
+            _solve_challenge_with_browser("https://rezka.ag/films/x/1-y-2020.html")
 
 
-def test_resolve_rezka_stream_uses_flaresolverr_cookies_and_user_agent():
+def test_resolve_rezka_stream_uses_browser_cookies_when_bypass_enabled():
     mock_api = _mock_movie_api({"720p": ["u720"]})
     with patch("app.utils.rezka.HdRezkaApi", return_value=mock_api) as mock_cls, \
-         patch(
-             "app.utils.rezka._solve_challenge",
-             return_value=({"ddg": "solved"}, "Mozilla/5.0 (solved-ua)"),
-         ) as mock_solve:
-        resolve_rezka_stream(
-            "https://rezka.ag/films/x/1-y-2020.html", "720p",
-            flaresolverr_url="http://flaresolverr:8191/v1",
-        )
-    mock_solve.assert_called_once_with("https://rezka.ag/films/x/1-y-2020.html", "http://flaresolverr:8191/v1")
+         patch("app.utils.rezka._solve_challenge_with_browser", return_value={"a": "1"}) as mock_solve:
+        resolve_rezka_stream("https://rezka.ag/films/x/1-y-2020.html", "720p", bypass_antibot=True)
+    mock_solve.assert_called_once_with("https://rezka.ag/films/x/1-y-2020.html")
     _, kwargs = mock_cls.call_args
-    assert kwargs["cookies"] == {"ddg": "solved"}
-    assert kwargs["headers"]["User-Agent"] == "Mozilla/5.0 (solved-ua)"
+    assert kwargs["cookies"] == {"a": "1"}
 
 
-def test_resolve_rezka_stream_skips_flaresolverr_when_not_configured():
+def test_resolve_rezka_stream_skips_browser_when_bypass_disabled():
     mock_api = _mock_movie_api({"720p": ["u720"]})
     with patch("app.utils.rezka.HdRezkaApi", return_value=mock_api), \
-         patch("app.utils.rezka._solve_challenge") as mock_solve:
+         patch("app.utils.rezka._solve_challenge_with_browser") as mock_solve:
         resolve_rezka_stream("https://rezka.ag/films/x/1-y-2020.html", "720p")
     mock_solve.assert_not_called()

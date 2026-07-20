@@ -164,7 +164,7 @@ class TestSettings:
         )
         assert s.ytdlp_proxy == "socks5h://user:pass@host:1080"
 
-    def test_default_flaresolverr_url_empty(self):
+    def test_default_rezka_antibot_bypass_disabled(self):
         s = Settings(
             BOT_TOKEN="1:t",
             WEBHOOK_BASE_URL="https://x.com",
@@ -174,9 +174,9 @@ class TestSettings:
             CELERY_BROKER_URL="redis://x",
             CELERY_RESULT_BACKEND="redis://x",
         )
-        assert s.flaresolverr_url == ""
+        assert s.rezka_antibot_bypass is False
 
-    def test_flaresolverr_url_can_be_set(self):
+    def test_rezka_antibot_bypass_can_be_enabled(self):
         s = Settings(
             BOT_TOKEN="1:t",
             WEBHOOK_BASE_URL="https://x.com",
@@ -185,9 +185,9 @@ class TestSettings:
             REDIS_URL="redis://x",
             CELERY_BROKER_URL="redis://x",
             CELERY_RESULT_BACKEND="redis://x",
-            FLARESOLVERR_URL="http://flaresolverr:8191/v1",
+            REZKA_ANTIBOT_BYPASS="true",
         )
-        assert s.flaresolverr_url == "http://flaresolverr:8191/v1"
+        assert s.rezka_antibot_bypass is True
 
 
 class TestGetSettings:

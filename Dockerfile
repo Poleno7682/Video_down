@@ -20,6 +20,11 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -U pip \
     && pip install --no-cache-dir -r requirements.txt
 
+# Chromium + its OS-level deps for app.utils.rezka's Anubis-challenge
+# bypass (REZKA_ANTIBOT_BYPASS=true). Only ever launched for rezka.ag
+# downloads with that flag on; harmless (just unused disk) otherwise.
+RUN playwright install --with-deps chromium
+
 COPY app ./app
 COPY scripts ./scripts
 COPY alembic ./alembic

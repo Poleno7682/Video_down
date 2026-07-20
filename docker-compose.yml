@@ -103,20 +103,6 @@ services:
     networks:
       - internal
 
-  flaresolverr:
-    image: ghcr.io/flaresolverr/flaresolverr:latest
-    container_name: video_bot_flaresolverr
-    restart: unless-stopped
-    # Opt-in: only needed when FLARESOLVERR_URL is set in .env — solves the
-    # DDoS-Guard JS challenge on rezka.ag/hdrezka.* with a real headless
-    # browser so app.utils.rezka's plain HTTP requests can get past it.
-    #   docker compose --profile flaresolverr up -d
-    profiles: ["flaresolverr"]
-    environment:
-      LOG_LEVEL: info
-    networks:
-      - internal
-
   nginx:
     image: nginx:1.27-alpine
     container_name: video_bot_nginx
