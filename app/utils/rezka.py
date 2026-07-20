@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
 import urllib.parse
 from dataclasses import dataclass
 
 from HdRezkaApi import HdRezkaApi
 from HdRezkaApi.types import Movie, TVSeries
+
+logger = logging.getLogger(__name__)
 
 # Query params appended to the base rezka URL (after normalize_url, which
 # only strips known tracking params) to carry the admin/user's translator
@@ -261,9 +264,22 @@ def _sanitize_translators_list(rezka) -> None:
         return
     if not container:
         return
-    for child in list(container.find_all(recursive=False)):
+    children = list(container.find_all(recursive=False))
+    removed = 0
+    for child in children:
         if "data-translator_id" not in getattr(child, "attrs", {}):
+            logger.info(
+                "rezka translators-list: dropping child without data-translator_id: <%s %s> text=%r",
+                getattr(child, "name", "?"),
+                dict(getattr(child, "attrs", {}) or {}),
+                child.get_text(strip=True)[:60] if hasattr(child, "get_text") else "",
+            )
             child.decompose()
+            removed += 1
+    logger.info(
+        "rezka translators-list: kept %d/%d direct children (removed %d)",
+        len(children) - removed, len(children), removed,
+    )
 
 
 def _open_movie_page(url: str, proxies: dict, headers: dict, cookies: dict):
