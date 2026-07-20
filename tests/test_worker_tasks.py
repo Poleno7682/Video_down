@@ -206,11 +206,32 @@ class TestResolveProxies:
         assert _resolve_proxies(repo, settings, "https://vimeo.com/12345") == []
         repo.get_enabled_proxy_urls.assert_not_called()
 
-    def test_uses_pool_for_rezka_url(self):
+    def test_rezka_ignores_pool_and_env_proxy_entirely(self):
+        """rezka never uses the shared YouTube pool/YTDLP_PROXY — only its
+        own dedicated REZKA_VPN_PROXY_URL, or nothing at all."""
+        repo = MagicMock()
+        repo.get_enabled_proxy_urls.return_value = ["socks5h://a:1080", "socks5h://b:1080"]
+        settings = _make_settings(ytdlp_proxy="socks5h://env:1080")
+        assert _resolve_proxies(repo, settings, "https://rezka.ag/films/x/807-x-1997.html") == []
+        repo.get_enabled_proxy_urls.assert_not_called()
+
+    def test_rezka_uses_only_vpn_proxy_when_configured(self):
+        repo = MagicMock()
+        repo.get_enabled_proxy_urls.return_value = ["socks5h://a:1080", "socks5h://b:1080"]
+        settings = _make_settings(ytdlp_proxy="socks5h://env:1080", rezka_vpn_proxy_url="http://vpn:8888")
+        assert _resolve_proxies(repo, settings, "https://rezka.ag/films/x/807-x-1997.html") == ["http://vpn:8888"]
+        repo.get_enabled_proxy_urls.assert_not_called()
+
+    def test_rezka_empty_when_vpn_proxy_unset(self):
+        repo = MagicMock()
+        settings = _make_settings(rezka_vpn_proxy_url="")
+        assert _resolve_proxies(repo, settings, "https://rezka.ag/films/x/807-x-1997.html") == []
+
+    def test_vpn_proxy_setting_does_not_affect_youtube_pool(self):
         repo = MagicMock()
         repo.get_enabled_proxy_urls.return_value = ["socks5h://a:1080"]
-        settings = _make_settings(ytdlp_proxy="socks5h://env:1080")
-        assert _resolve_proxies(repo, settings, "https://rezka.ag/films/x/807-x-1997.html") == ["socks5h://a:1080"]
+        settings = _make_settings(rezka_vpn_proxy_url="http://vpn:8888")
+        assert _resolve_proxies(repo, settings, self._YT_URL) == ["socks5h://a:1080"]
 
 
 class TestRecordProxyResult:
@@ -280,6 +301,7 @@ def _make_settings(**kwargs):
     s.max_file_mb = 50
     s.delete_local_file_after_telegram_cache = True
     s.ytdlp_proxy = ""
+    s.rezka_vpn_proxy_url = ""
     for k, v in kwargs.items():
         setattr(s, k, v)
     return s
@@ -559,6 +581,16 @@ class TestProcessDownloadRequest:
         mock_download.assert_not_called()
         statuses = {c[0][1] for c in repo.update_request_status.call_args_list}
         assert DownloadStatus.failed in statuses
+
+    def test_rezka_url_skips_livestream_precheck(self):
+        """rezka is VOD-only and its page URLs aren't yt-dlp-supported, so
+        the generic-extractor precheck can only ever fail on them — skip it
+        entirely rather than burning the whole proxy pool for nothing."""
+        req = _make_req(normalized_url="https://rezka.ag/films/x/1-y-2020.html?rezka_tr=56")
+        with _task_ctx(req=req) as (repo, _, _sender):
+            with patch("app.worker.tasks.is_active_livestream") as mock_live:
+                process_download_request.apply(args=[1])
+        mock_live.assert_not_called()
 
     def test_corrupt_media_marks_failed(self):
         from app.worker.downloader import MediaValidationError

@@ -363,22 +363,23 @@ def _resolve_proxies(repo: Repository, settings: Settings, url: str) -> list[str
     """Proxies to try, least-failed first. Falls back to YTDLP_PROXY when the
     admin-managed pool (DB) is empty, so an env-only setup keeps working.
 
-    Only used for YouTube and rezka.ag: the pool exists to route around
-    IP-based blocks/throttling — YouTube's datacenter-IP anti-bot check,
-    and rezka's resolved CDN hosts (e.g. stream.voidboost.cc) timing out
-    outright for some VPS IP ranges (seen in production: every attempt
-    times out at 90s, direct, so it isn't a transient blip a longer
-    timeout alone can fix). Every proxy in a typical free/cheap pool is
-    unreliable enough (dead, wrong scheme, geo-blocked) that routing sites
-    without this specific problem through it too just adds failure modes
-    those sites never had in the first place — hence not "every URL".
+    Only used for YouTube and rezka.ag, and each uses a different route:
+
+    - YouTube: the shared free/cheap pool (DB-managed, falling back to
+      YTDLP_PROXY when empty) — routes around its datacenter-IP anti-bot
+      check. Every proxy in that pool is unreliable enough (dead, wrong
+      scheme, geo-blocked) that routing rezka through it too just adds
+      failure modes it never had — hence rezka doesn't use it at all.
+    - rezka: only REZKA_VPN_PROXY_URL (the local `vpn` container), a single
+      dedicated route, tried after direct has already failed — instead of
+      first burning through the whole unrelated YouTube pool.
     """
-    if detect_platform(url) != YOUTUBE and not is_rezka_url(url):
+    if is_rezka_url(url):
+        return [settings.rezka_vpn_proxy_url] if settings.rezka_vpn_proxy_url else []
+    if detect_platform(url) != YOUTUBE:
         return []
     db_proxies = repo.get_enabled_proxy_urls()
-    if db_proxies:
-        return db_proxies
-    return [settings.ytdlp_proxy] if settings.ytdlp_proxy else []
+    return db_proxies if db_proxies else ([settings.ytdlp_proxy] if settings.ytdlp_proxy else [])
 
 
 def _record_proxy_result(repo: Repository, request_id: int) -> Callable[[str | None, bool], None]:
@@ -409,8 +410,15 @@ def _reject_active_livestream(
     """Reject the request if the URL points at an ongoing livestream.
 
     Returns True when the request may proceed.
+
+    Skipped entirely for rezka: it's a VOD-only site (no live streams), and
+    its page URLs aren't a yt-dlp-supported extractor to begin with — the
+    generic-extractor precheck below can only ever fail on it with
+    "Unsupported URL", regardless of proxy, so running it would just burn
+    ~30-90s cycling the whole proxy pool for a foregone conclusion on every
+    single rezka request.
     """
-    if not is_active_livestream(normalized_url, proxies, on_proxy_result):
+    if is_rezka_url(normalized_url) or not is_active_livestream(normalized_url, proxies, on_proxy_result):
         return True
     repo.update_request_status(
         request_id,

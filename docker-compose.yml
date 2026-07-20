@@ -34,6 +34,37 @@ services:
       timeout: 3s
       retries: 5
 
+  vpn:
+    image: qmcgaw/gluetun
+    container_name: video_bot_vpn
+    restart: unless-stopped
+    # Opt-in: only needed when REZKA_VPN_PROXY_URL is set in .env (a
+    # dedicated last-resort route for rezka once direct + the whole proxy
+    # pool have failed — see app.worker.tasks._resolve_proxies). Start it
+    # alongside the rest with:
+    #   docker compose --profile rezka-vpn up -d
+    profiles: ["rezka-vpn"]
+    cap_add:
+      - NET_ADMIN
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    environment:
+      VPN_SERVICE_PROVIDER: ${VPN_SERVICE_PROVIDER:-custom}
+      VPN_TYPE: openvpn
+      OPENVPN_CUSTOM_CONFIG: /gluetun/vpn.ovpn
+      OPENVPN_USER: ${VPN_OPENVPN_USER}
+      OPENVPN_PASSWORD: ${VPN_OPENVPN_PASSWORD}
+      # Local HTTP proxy on 8888, reachable by the worker as
+      # http://vpn:8888 — set REZKA_VPN_PROXY_URL to that in .env.
+      HTTPPROXY: "on"
+      HTTPPROXY_LISTENING_ADDRESS: ":8888"
+    volumes:
+      # Your provider's .ovpn config file — see README/.env.example for
+      # where to get one and how to fill in VPN_OPENVPN_USER/PASSWORD.
+      - ./vpn/vpn.ovpn:/gluetun/vpn.ovpn:ro
+    networks:
+      - internal
+
   bot:
     build: .
     container_name: video_bot_webhook

@@ -63,6 +63,12 @@ class Settings(BaseSettings):
     # to confirm you're not a bot"). Empty = no proxy, yt-dlp connects
     # directly. socks5h (vs. socks5) resolves DNS through the proxy too.
     ytdlp_proxy: str = Field(default="", alias="YTDLP_PROXY")
+    # Dedicated last-resort proxy for rezka only, routed through the local
+    # `vpn` docker-compose service (an OpenVPN client container) rather than
+    # the shared free/cheap YTDLP_PROXY pool — used only once direct and
+    # every pool proxy have already failed for a rezka request. Empty =
+    # feature off, matching every other proxy setting here.
+    rezka_vpn_proxy_url: str = Field(default="", alias="REZKA_VPN_PROXY_URL")
     # rezka.ag/hdrezka.* sit behind an Anubis proof-of-work JS challenge a
     # plain HTTP request can never pass — solving it requires actually
     # running the client-side JS, so this drives a real headless Chromium
