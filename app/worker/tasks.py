@@ -356,13 +356,15 @@ def _resolve_proxies(repo: Repository, settings: Settings) -> list[str]:
     return [settings.ytdlp_proxy] if settings.ytdlp_proxy else []
 
 
-def _record_proxy_result(repo: Repository) -> Callable[[str | None, bool], None]:
+def _record_proxy_result(repo: Repository, request_id: int) -> Callable[[str | None, bool], None]:
     def _record(proxy: str | None, success: bool) -> None:
         if not proxy:
             return
         if success:
+            logger.info("request=%s: proxy=%s succeeded", request_id, proxy)
             repo.record_proxy_success(proxy)
         else:
+            logger.info("request=%s: proxy=%s failed, trying next", request_id, proxy)
             repo.record_proxy_failure(proxy)
 
     return _record
@@ -566,7 +568,7 @@ def process_download_request(self, request_id: int) -> None:
     normalized_url = req.normalized_url
 
     proxies = _resolve_proxies(repo, settings)
-    on_proxy_result = _record_proxy_result(repo)
+    on_proxy_result = _record_proxy_result(repo, request_id)
 
     max_duration = get_limit("max_download_duration_seconds", settings, redis)
     if not _check_user_rate_limit(

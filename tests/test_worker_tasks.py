@@ -176,18 +176,18 @@ class TestResolveProxies:
 class TestRecordProxyResult:
     def test_records_success(self):
         repo = MagicMock()
-        _record_proxy_result(repo)("socks5h://a:1080", True)
+        _record_proxy_result(repo, 1)("socks5h://a:1080", True)
         repo.record_proxy_success.assert_called_once_with("socks5h://a:1080")
         repo.record_proxy_failure.assert_not_called()
 
     def test_records_failure(self):
         repo = MagicMock()
-        _record_proxy_result(repo)("socks5h://a:1080", False)
+        _record_proxy_result(repo, 1)("socks5h://a:1080", False)
         repo.record_proxy_failure.assert_called_once_with("socks5h://a:1080")
 
     def test_ignores_direct_attempt(self):
         repo = MagicMock()
-        _record_proxy_result(repo)(None, False)
+        _record_proxy_result(repo, 1)(None, False)
         repo.record_proxy_success.assert_not_called()
         repo.record_proxy_failure.assert_not_called()
 

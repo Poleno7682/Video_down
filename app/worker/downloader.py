@@ -207,6 +207,7 @@ def is_active_livestream(
             continue
         if on_proxy_result:
             on_proxy_result(proxy, True)
+        logger.info("Livestream pre-check succeeded via proxy=%s for %s", proxy or "direct", url)
         if not isinstance(info, dict):
             return False
         return info.get("is_live") is True or str(info.get("live_status") or "").lower() == "is_live"
@@ -706,6 +707,10 @@ def download_video(
                 continue
             if on_proxy_result:
                 on_proxy_result(proxy, True)
+            logger.info(
+                "Download succeeded via proxy=%s (attempt %d/%d) for %s",
+                proxy or "direct", idx + 1, len(proxy_list), url,
+            )
             break
         else:
             raise last_exc
