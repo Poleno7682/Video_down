@@ -6,6 +6,10 @@ SQLAlchemy==2.0.36
 psycopg2-binary==2.9.10
 python-dotenv==1.0.1
 yt-dlp[default,curl-cffi]>=2026.1.1
+# Actively-maintained rezka.ag/hdrezka.* API client — used directly (not as
+# a yt-dlp extractor) to resolve a direct stream URL, then that URL is
+# downloaded like any other. See app/utils/rezka.py.
+HdRezkaApi==11.2.3
 alembic==1.14.0
 pydantic==2.10.4
 pydantic-settings==2.7.0

@@ -7,6 +7,7 @@ import select
 import shutil
 import subprocess
 import time
+import urllib.parse
 import uuid
 from pathlib import Path
 from typing import Callable
@@ -18,6 +19,7 @@ from app.core.config import Settings
 from app.utils.codecs import RISKY_TELEGRAM_VIDEO_CODECS
 from app.utils.platforms import PLATFORM_COOKIE_SETTING, detect_platform
 from app.utils.quality import format_selector, normalize_quality
+from app.utils.rezka import RezkaResolveError, is_rezka_url, resolve_rezka_stream
 
 logger = logging.getLogger(__name__)
 
@@ -685,6 +687,26 @@ def download_video(
         if cookie_file is None:
             cookie_file = cookie_file_for_url(url, settings)
 
+        # rezka.ag/hdrezka.* have no yt-dlp extractor and their custom
+        # player can't be scraped generically — resolve the direct CDN
+        # stream URL via the HdRezkaApi client first, then download that
+        # URL exactly like any other direct link. The CDN checks
+        # Referer/Origin against the page's own site, so those get forced
+        # into every attempt below.
+        extract_url = url
+        extra_headers: dict[str, str] | None = None
+        rezka_title: str | None = None
+        if is_rezka_url(url):
+            try:
+                extract_url, rezka_title = resolve_rezka_stream(
+                    url, quality, proxy=proxies[0] if proxies else None
+                )
+            except RezkaResolveError as exc:
+                raise DownloadError(str(exc)) from exc
+            page_origin = urllib.parse.urlparse(url)
+            origin = f"{page_origin.scheme}://{page_origin.hostname}"
+            extra_headers = {"Referer": origin + "/", "Origin": origin}
+
         # proxies is tried in order — a proxy that's blocked/down for this
         # request just falls through to the next one instead of failing the
         # whole download, since which datacenter IP range gets flagged by a
@@ -693,9 +715,11 @@ def download_video(
         info: dict | None = None
         last_exc: Exception | None = None
         for idx, proxy in enumerate(proxy_list):
-            opts = _build_ydl_opts(url, quality, work_dir, progress_hook, cookie_file, embed_subtitles, proxy)
+            opts = _build_ydl_opts(extract_url, quality, work_dir, progress_hook, cookie_file, embed_subtitles, proxy)
+            if extra_headers:
+                opts["http_headers"] = {**opts.get("http_headers", {}), **extra_headers}
             try:
-                info = _extract_with_retry(url, opts)
+                info = _extract_with_retry(extract_url, opts)
             except Exception as exc:
                 last_exc = exc
                 if on_proxy_result:
@@ -722,7 +746,13 @@ def download_video(
         # knowing about the per-download subdirectory.
         dest = settings.download_dir / "active" / file_path.name
         shutil.move(str(file_path), str(dest))
-        return dest, info or {}
+        info = info or {}
+        if rezka_title:
+            # The direct CDN URL's own yt-dlp-guessed title is a slug from
+            # the URL path, not the actual movie title — HdRezkaApi already
+            # scraped the real one off the page.
+            info["title"] = rezka_title
+        return dest, info
     finally:
         shutil.rmtree(work_dir, ignore_errors=True)
 
