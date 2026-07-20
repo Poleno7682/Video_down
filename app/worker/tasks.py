@@ -19,7 +19,7 @@ from app.services.redis_client import get_redis
 from app.services.runtime_config import get_limit
 from app.utils.caption import get_caption
 from app.utils.platforms import YOUTUBE, detect_platform
-from app.utils.rezka import is_rezka_url
+from app.utils.rezka import RezkaResolveError, is_rezka_url
 from app.worker.celery_app import celery_app
 from app.worker.downloader import (
     COMPRESSION_TIMEOUT,
@@ -74,6 +74,19 @@ _REZKA_STREAM_FAILURE = (
     "Обычно это значит, что именно эта озвучка сейчас недоступна на сайте — "
     "другие, как правило, работают. Попробуйте выбрать другую озвучку "
     "(отправьте ссылку заново) или повторите попытку позже."
+)
+
+# Distinct from _REZKA_STREAM_FAILURE: shown when the failure happened
+# *after* a translator/stream was already resolved successfully — i.e. the
+# site itself found a stream, but fetching its video bytes then failed
+# (CDN timeout, dead mirror, proxy rejecting the resolved link). Blaming
+# the translator choice here would be misleading, since another translator
+# would likely hit the very same CDN problem.
+_REZKA_CDN_FAILURE = (
+    "❌ Не удалось скачать видео с сервера Rezka — похоже, временная проблема "
+    "с сервером видео (CDN), а не с выбранной озвучкой.\n\n"
+    "Попробуйте повторить попытку через пару минут; если не поможет — "
+    "попробуйте другую озвучку (отправьте ссылку заново)."
 )
 
 _COOKIE_FAILURE = (
@@ -202,6 +215,7 @@ def _handle_task_failure(
     cookies_were_used: bool = False,
     cookie_refreshed: bool = False,
     is_rezka: bool = False,
+    is_rezka_resolve_error: bool = False,
 ) -> None:
     """Record the failure in the DB and send a Telegram notification.
 
@@ -230,8 +244,10 @@ def _handle_task_failure(
         message = _CORRUPT_MEDIA_FAILURE
     elif _is_cookie_error(exc) or _is_youtube_challenge_error(exc):
         message = _STALE_COOKIE_FAILURE if cookies_were_used else _COOKIE_FAILURE
-    elif is_rezka:
+    elif is_rezka_resolve_error:
         message = _REZKA_STREAM_FAILURE
+    elif is_rezka:
+        message = _REZKA_CDN_FAILURE
     else:
         message = _GENERIC_FAILURE
     sender.edit_status(chat_id, status_message_id, message)
@@ -681,11 +697,19 @@ def process_download_request(self, request_id: int) -> None:
             except Exception:
                 logger.exception("Cookie-refresh check failed for request %s", request_id)
 
+            is_rezka = is_rezka_url(normalized_url)
             _handle_task_failure(
                 sender, repo, request_id, chat_id, status_message_id, video_id, exc,
                 cookies_were_used=cookies_were_used,
                 cookie_refreshed=cookie_refreshed,
-                is_rezka=is_rezka_url(normalized_url),
+                is_rezka=is_rezka,
+                # Only the resolve step (translator/quality lookup on the
+                # rezka page itself) raises RezkaResolveError; downloader.py
+                # wraps it with `raise ... from exc`, so __cause__ tells
+                # apart "this translator has no stream" from a downstream
+                # CDN/network failure after resolution already succeeded —
+                # see _REZKA_STREAM_FAILURE vs _REZKA_CDN_FAILURE.
+                is_rezka_resolve_error=is_rezka and isinstance(exc.__cause__, RezkaResolveError),
             )
         raise
 

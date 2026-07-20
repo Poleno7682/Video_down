@@ -13,6 +13,7 @@ from app.worker.tasks import (
     _STALE_COOKIE_FAILURE,
     _GENERIC_FAILURE,
     _REZKA_STREAM_FAILURE,
+    _REZKA_CDN_FAILURE,
     _build_transcode_progress_hook,
     _is_cookie_error,
     _is_youtube_challenge_error,
@@ -125,12 +126,22 @@ class TestHandleTaskFailure:
         _handle_task_failure(sender, repo, 1, 100, 200, None, RuntimeError("disk full"))
         assert sender.edit_status.call_args[0][2] == _GENERIC_FAILURE
 
-    def test_rezka_error_shows_rezka_specific_message(self):
+    def test_rezka_resolve_error_shows_rezka_translator_message(self):
         repo = MagicMock()
         sender = MagicMock()
         exc = RuntimeError("Не удалось получить поток видео: Failed to fetch stream!")
-        _handle_task_failure(sender, repo, 1, 100, 200, None, exc, is_rezka=True)
+        _handle_task_failure(sender, repo, 1, 100, 200, None, exc, is_rezka=True, is_rezka_resolve_error=True)
         assert sender.edit_status.call_args[0][2] == _REZKA_STREAM_FAILURE
+
+    def test_rezka_non_resolve_error_shows_rezka_cdn_message(self):
+        """A rezka download that fails *after* the stream already resolved
+        (e.g. a CDN timeout) isn't the chosen translator's fault — must not
+        get the "try another voiceover" message."""
+        repo = MagicMock()
+        sender = MagicMock()
+        exc = RuntimeError("HTTPSConnectionPool(host='stream.voidboost.cc'): Read timed out.")
+        _handle_task_failure(sender, repo, 1, 100, 200, None, exc, is_rezka=True, is_rezka_resolve_error=False)
+        assert sender.edit_status.call_args[0][2] == _REZKA_CDN_FAILURE
 
     def test_db_write_failure_still_notifies_user(self):
         """If persisting the failure itself throws (DB still down), the
@@ -637,6 +648,40 @@ class TestProcessDownloadRequest:
                 with pytest.raises(RuntimeError, match="yt-dlp fail"):
                     process_download_request.apply(args=[1])
         mock_fail.assert_called_once()
+
+    def test_rezka_resolve_error_flagged_via_exception_cause(self):
+        """A DownloadError raised `from` a RezkaResolveError (downloader.py's
+        own wrapping of a resolve-stage failure) must be classified as a
+        translator/stream resolution problem."""
+        from app.utils.rezka import RezkaResolveError
+        from yt_dlp.utils import DownloadError
+
+        req = _make_req(normalized_url="https://rezka.ag/films/x/1-y-2020.html?rezka_tr=56")
+        cause = RezkaResolveError("Для этого перевода нет доступных потоков видео.")
+        exc = DownloadError(str(cause))
+        exc.__cause__ = cause
+        with _task_ctx(req=req) as (repo, _, _sender):
+            with patch("app.worker.downloader.download_video", side_effect=exc), \
+                 patch("app.worker.tasks._handle_task_failure") as mock_fail:
+                with pytest.raises(DownloadError):
+                    process_download_request.apply(args=[1])
+        assert mock_fail.call_args.kwargs["is_rezka"] is True
+        assert mock_fail.call_args.kwargs["is_rezka_resolve_error"] is True
+
+    def test_rezka_cdn_error_not_flagged_as_resolve_error(self):
+        """A plain network/CDN failure on a rezka URL (no RezkaResolveError
+        in its cause chain — the stream itself already resolved fine) must
+        NOT be classified as a translator/stream resolution problem."""
+        req = _make_req(normalized_url="https://rezka.ag/films/x/1-y-2020.html?rezka_tr=56")
+        with _task_ctx(req=req) as (repo, _, _sender):
+            with patch(
+                "app.worker.downloader.download_video",
+                side_effect=RuntimeError("Read timed out."),
+            ), patch("app.worker.tasks._handle_task_failure") as mock_fail:
+                with pytest.raises(RuntimeError):
+                    process_download_request.apply(args=[1])
+        assert mock_fail.call_args.kwargs["is_rezka"] is True
+        assert mock_fail.call_args.kwargs["is_rezka_resolve_error"] is False
 
     def test_connection_error_with_retries_left_skips_permanent_failure(self):
         """A ConnectionError that Celery's autoretry_for is about to retry
