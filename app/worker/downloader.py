@@ -209,13 +209,14 @@ def is_active_livestream(
     Downloading an active stream either runs forever or produces a partial
     file, so we reject it before starting the real download.
 
-    proxies, if given, is tried in order until one of them completes the
-    check successfully (used to route around anti-bot IP blocks the same way
-    the real download does) — a failed proxy just moves on to the next one
-    rather than failing the whole pre-check. A final direct attempt is
-    always appended too, same reasoning as download_video's own proxy_list.
+    Direct (no proxy) is tried first — cheapest and, for most URLs, works —
+    then proxies in order until one of them completes the check
+    successfully (used to route around anti-bot IP blocks the same way the
+    real download does). A failed attempt just moves on to the next one
+    rather than failing the whole pre-check. Same order as download_video's
+    own proxy_list.
     """
-    proxy_list: list[str | None] = [*proxies, None] if proxies else [None]
+    proxy_list: list[str | None] = [None, *proxies] if proxies else [None]
     for proxy in proxy_list:
         opts = {
             "quiet": True,
@@ -745,15 +746,16 @@ def download_video(
             origin = f"{page_origin.scheme}://{page_origin.hostname}"
             extra_headers = {"Referer": origin + "/", "Origin": origin}
 
-        # proxies is tried in order — a proxy that's blocked/down for this
-        # request just falls through to the next one instead of failing the
-        # whole download, since which datacenter IP range gets flagged by a
-        # given site can vary proxy to proxy. A final direct (no proxy)
-        # attempt is always appended too: a free/cheap proxy pool is
-        # unreliable enough (dead, 403s, tunnel errors) that "every proxy
-        # failed" doesn't mean direct would too — seen in production on
-        # rezka, whose CDN (unlike YouTube) isn't blocked for every VPS.
-        proxy_list: list[str | None] = [*proxies, None] if proxies else [None]
+        # Direct (no proxy) is tried first: it's free, fast, and — seen in
+        # production on rezka, whose CDN (unlike YouTube) isn't blocked for
+        # every VPS — often just works, where a free/cheap proxy pool can
+        # burn minutes cycling through dead/403/tunnel-error proxies before
+        # reaching the same result. Proxies are tried afterwards, in order,
+        # for URLs direct doesn't work for (e.g. YouTube's datacenter-IP
+        # anti-bot check) — a proxy that's blocked/down for this request
+        # just falls through to the next one, since which datacenter IP
+        # range gets flagged by a given site can vary proxy to proxy.
+        proxy_list: list[str | None] = [None, *proxies] if proxies else [None]
         info: dict | None = None
         last_exc: Exception | None = None
         for idx, proxy in enumerate(proxy_list):

@@ -69,6 +69,13 @@ _GENERIC_FAILURE = (
     "устаревшие cookies, блокировка VPS или изменение защиты сайта."
 )
 
+_REZKA_STREAM_FAILURE = (
+    "❌ Не удалось получить поток видео с Rezka для выбранной озвучки.\n\n"
+    "Обычно это значит, что именно эта озвучка сейчас недоступна на сайте — "
+    "другие, как правило, работают. Попробуйте выбрать другую озвучку "
+    "(отправьте ссылку заново) или повторите попытку позже."
+)
+
 _COOKIE_FAILURE = (
     "❌ YouTube требует ваши cookies (защита от ботов).\n\n"
     "Экспортируйте cookies в формате Netscape (cookies.txt) из браузера, где вы вошли "
@@ -194,6 +201,7 @@ def _handle_task_failure(
     *,
     cookies_were_used: bool = False,
     cookie_refreshed: bool = False,
+    is_rezka: bool = False,
 ) -> None:
     """Record the failure in the DB and send a Telegram notification.
 
@@ -222,6 +230,8 @@ def _handle_task_failure(
         message = _CORRUPT_MEDIA_FAILURE
     elif _is_cookie_error(exc) or _is_youtube_challenge_error(exc):
         message = _STALE_COOKIE_FAILURE if cookies_were_used else _COOKIE_FAILURE
+    elif is_rezka:
+        message = _REZKA_STREAM_FAILURE
     else:
         message = _GENERIC_FAILURE
     sender.edit_status(chat_id, status_message_id, message)
@@ -667,6 +677,7 @@ def process_download_request(self, request_id: int) -> None:
                 sender, repo, request_id, chat_id, status_message_id, video_id, exc,
                 cookies_were_used=cookies_were_used,
                 cookie_refreshed=cookie_refreshed,
+                is_rezka=is_rezka_url(normalized_url),
             )
         raise
 

@@ -12,6 +12,7 @@ from app.worker.tasks import (
     _COOKIE_FAILURE,
     _STALE_COOKIE_FAILURE,
     _GENERIC_FAILURE,
+    _REZKA_STREAM_FAILURE,
     _build_transcode_progress_hook,
     _is_cookie_error,
     _is_youtube_challenge_error,
@@ -123,6 +124,13 @@ class TestHandleTaskFailure:
         sender = MagicMock()
         _handle_task_failure(sender, repo, 1, 100, 200, None, RuntimeError("disk full"))
         assert sender.edit_status.call_args[0][2] == _GENERIC_FAILURE
+
+    def test_rezka_error_shows_rezka_specific_message(self):
+        repo = MagicMock()
+        sender = MagicMock()
+        exc = RuntimeError("Не удалось получить поток видео: Failed to fetch stream!")
+        _handle_task_failure(sender, repo, 1, 100, 200, None, exc, is_rezka=True)
+        assert sender.edit_status.call_args[0][2] == _REZKA_STREAM_FAILURE
 
     def test_db_write_failure_still_notifies_user(self):
         """If persisting the failure itself throws (DB still down), the

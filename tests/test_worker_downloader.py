@@ -314,7 +314,8 @@ def test_download_video_passes_proxies_to_ydl_opts():
         mock_ydl = MagicMock()
         mock_ydl.__enter__ = MagicMock(return_value=mock_ydl)
         mock_ydl.__exit__ = MagicMock(return_value=False)
-        mock_ydl.extract_info.side_effect = fake_extract_info
+        # Direct is tried first now, so it must fail before the proxy gets a turn.
+        mock_ydl.extract_info.side_effect = [DownloadError("blocked"), fake_extract_info(None, True)]
 
         mock_uuid = MagicMock()
         mock_uuid.hex = fixed_hex
@@ -348,7 +349,9 @@ def test_download_video_falls_over_to_second_proxy_on_failure():
         mock_ydl = MagicMock()
         mock_ydl.__enter__ = MagicMock(return_value=mock_ydl)
         mock_ydl.__exit__ = MagicMock(return_value=False)
-        mock_ydl.extract_info.side_effect = [DownloadError("blocked"), fake_extract_info(None, True)]
+        mock_ydl.extract_info.side_effect = [
+            DownloadError("blocked"), DownloadError("blocked"), fake_extract_info(None, True),
+        ]
 
         mock_uuid = MagicMock()
         mock_uuid.hex = fixed_hex
@@ -362,9 +365,9 @@ def test_download_video_falls_over_to_second_proxy_on_failure():
                 on_proxy_result=lambda proxy, success: results.append((proxy, success)),
             )
 
-        proxies_tried = [call.args[0]["proxy"] for call in mock_ydl_cls.call_args_list]
-        assert proxies_tried == ["socks5h://bad:1080", "socks5h://good:1080"]
-        assert results == [("socks5h://bad:1080", False), ("socks5h://good:1080", True)]
+        proxies_tried = [call.args[0].get("proxy") for call in mock_ydl_cls.call_args_list]
+        assert proxies_tried == [None, "socks5h://bad:1080", "socks5h://good:1080"]
+        assert results == [(None, False), ("socks5h://bad:1080", False), ("socks5h://good:1080", True)]
 
 
 def test_download_video_logs_which_proxy_succeeded(caplog):
@@ -385,7 +388,8 @@ def test_download_video_logs_which_proxy_succeeded(caplog):
         mock_ydl = MagicMock()
         mock_ydl.__enter__ = MagicMock(return_value=mock_ydl)
         mock_ydl.__exit__ = MagicMock(return_value=False)
-        mock_ydl.extract_info.side_effect = fake_extract_info
+        # Direct is tried first now, so it must fail before the proxy gets a turn.
+        mock_ydl.extract_info.side_effect = [DownloadError("blocked"), fake_extract_info(None, True)]
 
         mock_uuid = MagicMock()
         mock_uuid.hex = fixed_hex
@@ -421,13 +425,11 @@ def test_download_video_raises_when_all_proxies_fail():
             )
 
 
-def test_download_video_tries_direct_after_all_proxies_fail():
-    """Regression guard: a free/cheap proxy pool can be unreliable enough
-    (dead, 403s, tunnel errors) that every proxy fails even though a plain
-    direct request would succeed — seen in production on rezka's CDN,
-    which (unlike YouTube) isn't blocked for every VPS. A direct attempt
-    must still happen after the whole proxy list is exhausted, not just
-    when no proxies were configured at all."""
+def test_download_video_falls_over_to_proxies_after_direct_fails():
+    """Regression guard: direct is tried first (cheapest, and usually just
+    works — seen in production on rezka's CDN, which unlike YouTube isn't
+    blocked for every VPS), but when it fails, every configured proxy must
+    still be tried in order before giving up."""
     with tempfile.TemporaryDirectory() as tmp:
         settings = MagicMock()
         settings.download_dir = Path(tmp)
@@ -460,10 +462,10 @@ def test_download_video_tries_direct_after_all_proxies_fail():
             )
 
         opts_tried = [call.args[0].get("proxy") for call in mock_ydl_cls.call_args_list]
-        assert opts_tried == ["socks5h://a:1080", "socks5h://b:1080", None]
+        assert opts_tried == [None, "socks5h://a:1080", "socks5h://b:1080"]
 
 
-def test_download_video_raises_when_direct_fallback_also_fails():
+def test_download_video_raises_when_direct_and_all_proxies_fail():
     with tempfile.TemporaryDirectory() as tmp:
         settings = MagicMock()
         settings.download_dir = Path(tmp)
@@ -483,7 +485,7 @@ def test_download_video_raises_when_direct_fallback_also_fails():
             )
 
         opts_tried = [call.args[0].get("proxy") for call in mock_ydl_cls.call_args_list]
-        assert opts_tried == ["socks5h://a:1080", "socks5h://b:1080", None]
+        assert opts_tried == [None, "socks5h://a:1080", "socks5h://b:1080"]
 
 
 def test_download_video_resolves_rezka_url_to_direct_stream():
@@ -727,7 +729,8 @@ def test_is_active_livestream_passes_proxy_to_ydl_opts():
     mock_ydl = MagicMock()
     mock_ydl.__enter__ = MagicMock(return_value=mock_ydl)
     mock_ydl.__exit__ = MagicMock(return_value=False)
-    mock_ydl.extract_info.return_value = {"is_live": False}
+    # Direct is tried first now, so it must fail before the proxy gets a turn.
+    mock_ydl.extract_info.side_effect = [Exception("blocked"), {"is_live": False}]
     with patch("app.worker.downloader.YoutubeDL", return_value=mock_ydl) as mock_ydl_cls:
         is_active_livestream("https://x.test/live", proxies=["socks5h://host:1080"])
     opts_used = mock_ydl_cls.call_args[0][0]
@@ -738,15 +741,15 @@ def test_is_active_livestream_falls_over_to_next_proxy():
     mock_ydl = MagicMock()
     mock_ydl.__enter__ = MagicMock(return_value=mock_ydl)
     mock_ydl.__exit__ = MagicMock(return_value=False)
-    mock_ydl.extract_info.side_effect = [Exception("blocked"), {"is_live": True}]
+    mock_ydl.extract_info.side_effect = [Exception("blocked"), Exception("blocked"), {"is_live": True}]
     with patch("app.worker.downloader.YoutubeDL", return_value=mock_ydl) as mock_ydl_cls:
         result = is_active_livestream("https://x.test/live", proxies=["socks5h://bad:1080", "socks5h://good:1080"])
     assert result is True
-    proxies_tried = [call.args[0]["proxy"] for call in mock_ydl_cls.call_args_list]
-    assert proxies_tried == ["socks5h://bad:1080", "socks5h://good:1080"]
+    proxies_tried = [call.args[0].get("proxy") for call in mock_ydl_cls.call_args_list]
+    assert proxies_tried == [None, "socks5h://bad:1080", "socks5h://good:1080"]
 
 
-def test_is_active_livestream_tries_direct_after_all_proxies_fail():
+def test_is_active_livestream_falls_over_to_proxies_after_direct_fails():
     mock_ydl = MagicMock()
     mock_ydl.__enter__ = MagicMock(return_value=mock_ydl)
     mock_ydl.__exit__ = MagicMock(return_value=False)
@@ -755,14 +758,15 @@ def test_is_active_livestream_tries_direct_after_all_proxies_fail():
         result = is_active_livestream("https://x.test/live", proxies=["socks5h://bad:1080"])
     assert result is True
     proxies_tried = [call.args[0].get("proxy") for call in mock_ydl_cls.call_args_list]
-    assert proxies_tried == ["socks5h://bad:1080", None]
+    assert proxies_tried == [None, "socks5h://bad:1080"]
 
 
 def test_is_active_livestream_logs_which_proxy_succeeded(caplog):
     mock_ydl = MagicMock()
     mock_ydl.__enter__ = MagicMock(return_value=mock_ydl)
     mock_ydl.__exit__ = MagicMock(return_value=False)
-    mock_ydl.extract_info.return_value = {"is_live": False}
+    # Direct is tried first now, so it must fail before the proxy gets a turn.
+    mock_ydl.extract_info.side_effect = [Exception("blocked"), {"is_live": False}]
     with caplog.at_level(logging.INFO, logger="app.worker.downloader"), \
          patch("app.worker.downloader.YoutubeDL", return_value=mock_ydl):
         is_active_livestream("https://x.test/live", proxies=["socks5h://good:1080"])
