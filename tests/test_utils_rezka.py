@@ -157,6 +157,21 @@ def test_solve_challenge_with_browser_extracts_cookies():
     mock_browser.close.assert_called_once()
 
 
+def test_solve_challenge_with_browser_ignores_networkidle_timeout():
+    """Regression guard: production hit a TimeoutError on
+    wait_for_load_state("networkidle") even though the challenge had
+    already passed (the title-change check succeeded first) — some sites
+    never go network-idle (analytics/ads keep polling). That must not
+    fail the whole bypass; cookies should still come back."""
+    from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
+
+    mock_cm, mock_page, mock_browser = _mock_sync_playwright([{"name": "a", "value": "1"}])
+    mock_page.wait_for_load_state.side_effect = PlaywrightTimeoutError("networkidle never fired")
+    with patch("playwright.sync_api.sync_playwright", return_value=mock_cm):
+        cookies = _solve_challenge_with_browser("https://rezka.ag/films/x/1-y-2020.html")
+    assert cookies == {"a": "1"}
+
+
 def test_solve_challenge_with_browser_raises_on_timeout():
     from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 

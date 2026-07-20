@@ -79,7 +79,16 @@ def _solve_challenge_with_browser(url: str, timeout_ms: int = _CHALLENGE_TIMEOUT
                     arg=_CHALLENGE_TITLE,
                     timeout=timeout_ms,
                 )
-                page.wait_for_load_state("networkidle", timeout=5_000)
+                # Best-effort only: some sites keep a background connection
+                # open forever (analytics, ads) so "network idle" never
+                # actually fires. The title change above already confirms
+                # the challenge passed and the real page loaded — a
+                # timeout here just means we grab cookies a beat earlier,
+                # not that anything failed.
+                try:
+                    page.wait_for_load_state("networkidle", timeout=5_000)
+                except PlaywrightTimeoutError:
+                    pass
                 return {c["name"]: c["value"] for c in context.cookies()}
             finally:
                 browser.close()
