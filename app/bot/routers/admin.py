@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import html
 import logging
 import time
 
@@ -296,7 +297,7 @@ async def list_proxies(message: Message) -> None:
         return
 
     lines = [
-        f"• <code>{p.id}</code> — <code>{p.url}</code>"
+        f"• <code>{p.id}</code> — <code>{html.escape(p.url)}</code>"
         + (f" ⚠️ сбоев подряд: {p.failure_count}" if p.failure_count else " ✅")
         for p in proxies
     ]
@@ -360,6 +361,56 @@ async def _check_and_add_proxy(
     with get_session() as session:
         proxy = ProxyRepository(session).add_proxy(proxy_url, added_by=admin_id)
     return proxy.url, "добавлен", False
+
+
+_MAX_PROXY_REPORT_CHARS = 3500  # safety margin under Telegram's 4096 message limit
+
+
+async def _send_proxy_batch_report(
+    status_msg: Message,
+    original_message: Message,
+    added: list[str],
+    duplicates: list[str],
+    failed: list[tuple[str, str]],
+    total: int,
+    truncated: bool,
+) -> None:
+    """Build and send the final per-batch report.
+
+    Builds by whole line (never truncates mid-string) so a long failure list
+    can't cut an HTML tag in half and make Telegram silently reject the
+    edit — every raw proxy string is also escaped since it's admin-controlled
+    free text, not something we generated ourselves.
+    """
+    lines = [f"✅ Добавлено: {len(added)}/{total}", f"⏭ Уже были в базе: {len(duplicates)}"]
+    if failed:
+        lines.append("\n❌ Не добавлены:")
+        shown = 0
+        budget = _MAX_PROXY_REPORT_CHARS - sum(len(l) for l in lines)
+        for raw, reason in failed:
+            entry = f"  • <code>{html.escape(raw)}</code> — {html.escape(reason)}"
+            if len(entry) + 1 > budget:
+                break
+            lines.append(entry)
+            budget -= len(entry) + 1
+            shown += 1
+        if shown < len(failed):
+            lines.append(f"  ...и ещё {len(failed) - shown}")
+    if truncated:
+        lines.append(
+            f"\n⚠️ В файле больше {_MAX_PROXY_LINES_PER_FILE} строк — "
+            f"обработаны только первые {_MAX_PROXY_LINES_PER_FILE}."
+        )
+    report_text = "\n".join(lines)
+
+    try:
+        await status_msg.edit_text(report_text)
+    except Exception:
+        logger.exception("Failed to edit final proxy report message")
+        try:
+            await original_message.answer(report_text)
+        except Exception:
+            logger.exception("Fallback proxy report message also failed to send")
 
 
 @router.message(_ProxyAwaitingFilter(), F.document)
@@ -446,17 +497,7 @@ async def handle_proxy_file(message: Message, bot: Bot) -> None:
             failed.append((raw, note))
 
     clear_proxy_awaiting(admin_id, redis)
-
-    _MAX_LISTED = 30
-    report = [f"✅ Добавлено: {len(added)}/{len(lines)}", f"⏭ Уже были в базе: {len(duplicates)}"]
-    if failed:
-        report.append("\n❌ Не добавлены:")
-        report += [f"  • <code>{raw}</code> — {reason}" for raw, reason in failed[:_MAX_LISTED]]
-        if len(failed) > _MAX_LISTED:
-            report.append(f"  ...и ещё {len(failed) - _MAX_LISTED}")
-    if truncated:
-        report.append(f"\n⚠️ В файле больше {_MAX_PROXY_LINES_PER_FILE} строк — обработаны только первые {_MAX_PROXY_LINES_PER_FILE}.")
-    await status_msg.edit_text("\n".join(report)[:4000])
+    await _send_proxy_batch_report(status_msg, message, added, duplicates, failed, len(lines), truncated)
 
 
 @router.message(_ProxyAwaitingFilter(), F.text)
@@ -483,11 +524,13 @@ async def handle_proxy_input(message: Message) -> None:
         await status_msg.edit_text("⏭ Этот прокси уже есть в базе — пропущен.")
         return
     if not added_url:
-        await status_msg.edit_text(f"❌ Прокси не добавлен: {note}\n\nПопробуйте другой или /cancel.")
+        await status_msg.edit_text(
+            f"❌ Прокси не добавлен: {html.escape(note)}\n\nПопробуйте другой или /cancel."
+        )
         return
 
     clear_proxy_awaiting(admin_id, redis)
-    await status_msg.edit_text(f"✅ Прокси проверен и добавлен: <code>{added_url}</code>")
+    await status_msg.edit_text(f"✅ Прокси проверен и добавлен: <code>{html.escape(added_url)}</code>")
 
 
 # ---------------------------------------------------------------------------
