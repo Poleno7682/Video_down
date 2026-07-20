@@ -15,7 +15,7 @@ from app.services.redis_client import get_redis
 from app.services.runtime_config import get_limit
 from app.utils.caption import get_caption
 from app.utils.quality import normalize_quality
-from app.utils.rezka import is_rezka_url
+from app.utils.rezka import canonicalize_rezka_url, is_rezka_url
 from app.utils.url_tools import extract_url, is_valid_url, normalize_url, url_hash
 from app.worker.tasks import process_download_request
 
@@ -167,10 +167,13 @@ async def _process_url_message(message: Message, text: str, reply_on_no_url: boo
     if is_rezka_url(normalized):
         # rezka.ag needs a translator (and, for series, season/episode)
         # picked via inline buttons before there's even a URL worth
-        # queuing — see app.bot.routers.rezka_flow.
+        # queuing — see app.bot.routers.rezka_flow. canonicalize_rezka_url
+        # strips any extra sub-segment (e.g. a translator-specific link
+        # someone shared) back to the title's own page first.
         from app.bot.routers.rezka_flow import start_rezka_flow
 
-        await start_rezka_flow(message, raw_url, normalized, quality_value)
+        canonical = canonicalize_rezka_url(normalized)
+        await start_rezka_flow(message, raw_url, canonical, quality_value)
         return
 
     await enqueue_download(message, user_id, message.chat.id, message.message_id, raw_url, normalized, quality_value)

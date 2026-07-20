@@ -64,6 +64,33 @@ def is_rezka_url(url: str) -> bool:
     return bool(_URL_RE.match(url))
 
 
+_TITLE_SEGMENT_RE = re.compile(r'^\d+-[^/]+$')
+
+
+def canonicalize_rezka_url(url: str) -> str:
+    """Strip any extra path segment appended after the title's own
+    <id>-<slug>[-suffix] segment, e.g.:
+
+        .../2136-rik-i-morti-2013-latest/66-syenduk.html
+        -> .../2136-rik-i-morti-2013-latest.html
+
+    Some rezka.ag pages (seen on multi-season "franchise" titles like Rick
+    and Morty) get shared with a trailing translator/voiceover sub-segment.
+    HdRezkaApi's own url.split(".html")[0] + ".html" normalization doesn't
+    catch this shape (there's only one ".html" in the whole URL — it's the
+    filename, not an earlier segment to truncate at) and the translator
+    list markup it parses isn't even present on that sub-page, so this
+    needs to happen on our side before HdRezkaApi ever sees the URL.
+    """
+    parsed = urllib.parse.urlparse(url)
+    segments = parsed.path.split("/")
+    for i, segment in enumerate(segments[:-1]):
+        if _TITLE_SEGMENT_RE.match(segment):
+            new_path = "/".join(segments[: i + 1]) + ".html"
+            return urllib.parse.urlunparse(parsed._replace(path=new_path))
+    return url
+
+
 def _closest_quality(available: list[str], quality: str) -> str:
     if quality in available:
         return quality

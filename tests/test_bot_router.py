@@ -857,6 +857,33 @@ async def test_process_url_message_rezka_url_starts_rezka_flow_instead_of_queuei
     repo.create_request.assert_not_called()
 
 
+@pytest.mark.asyncio
+async def test_process_url_message_canonicalizes_rezka_url_before_flow():
+    """A rezka.ag link with an extra translator sub-segment must be
+    stripped back to the title's own page before rezka_flow ever sees it —
+    see app.utils.rezka.canonicalize_rezka_url."""
+    raw = "https://rezka.ag/cartoons/comedy/2136-rik-i-morti-2013-latest/66-syenduk.html"
+    message = _make_message(text=raw)
+    settings = _make_settings()
+    redis = _make_redis_mock()
+    repo = MagicMock()
+    session = _make_session(repo)
+    limiter = MagicMock()
+    limiter.hit_or_ban.return_value = (True, 0)
+
+    with patch("app.bot.routers.url_handler.get_settings", return_value=settings), \
+         patch("app.bot.routers.url_handler.get_redis", return_value=redis), \
+         patch("app.bot.routers.url_handler.RateLimiter", return_value=limiter), \
+         patch("app.bot.routers.url_handler.get_session", return_value=session), \
+         patch("app.bot.routers.url_handler.UserRepository", return_value=repo), \
+         patch("app.bot.routers.rezka_flow.start_rezka_flow", new=AsyncMock()) as mock_start:
+        await _process_url_message(message, raw, True)
+
+    mock_start.assert_awaited_once()
+    canonical_arg = mock_start.call_args[0][2]
+    assert canonical_arg == "https://rezka.ag/cartoons/comedy/2136-rik-i-morti-2013-latest.html"
+
+
 # ---------------------------------------------------------------------------
 # Coverage gap tests
 # ---------------------------------------------------------------------------

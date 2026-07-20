@@ -8,6 +8,7 @@ import pytest
 from app.utils.rezka import (
     RezkaResolveError,
     build_selection_url,
+    canonicalize_rezka_url,
     get_rezka_content_info,
     is_rezka_url,
     resolve_rezka_stream,
@@ -25,6 +26,30 @@ def test_is_rezka_url_matches_hdrezka_domain():
 
 def test_is_rezka_url_rejects_unrelated_url():
     assert not is_rezka_url("https://www.youtube.com/watch?v=dQw4w9WgXcQ")
+
+
+# ---------------------------------------------------------------------------
+# canonicalize_rezka_url
+# ---------------------------------------------------------------------------
+
+def test_canonicalize_rezka_url_strips_extra_segment():
+    """Regression guard: production hit a raw KeyError trying to parse
+    translators off a franchise-style sub-page — the fix is to never send
+    HdRezkaApi that sub-page URL in the first place."""
+    url = canonicalize_rezka_url(
+        "https://rezka.ag/cartoons/comedy/2136-rik-i-morti-2013-latest/66-syenduk.html"
+    )
+    assert url == "https://rezka.ag/cartoons/comedy/2136-rik-i-morti-2013-latest.html"
+
+
+def test_canonicalize_rezka_url_leaves_normal_url_unchanged():
+    url = "https://rezka.ag/films/detective/807-advokat-dyavola-1997.html"
+    assert canonicalize_rezka_url(url) == url
+
+
+def test_canonicalize_rezka_url_leaves_series_url_unchanged():
+    url = "https://rezka.ag/series/drama/12345-some-show-2020.html"
+    assert canonicalize_rezka_url(url) == url
 
 
 def _mock_movie_api(videos: dict[str, list[str]], name: str = "Advocate of the Devil"):
