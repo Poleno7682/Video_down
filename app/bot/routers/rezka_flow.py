@@ -42,6 +42,7 @@ async def start_rezka_flow(message: Message, raw_url: str, normalized_url: str, 
             get_rezka_content_info, normalized_url, settings.rezka_antibot_bypass, redis,
         )
     except RezkaResolveError as exc:
+        logger.info("rezka content info failed for %s: %s", normalized_url, exc)
         await status_msg.edit_text(f"❌ {exc}")
         return
     except Exception:
