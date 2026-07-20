@@ -464,7 +464,22 @@ def resolve_rezka_stream(
         raise RezkaResolveError("Для этого перевода нет доступных потоков видео.")
 
     target_quality = _closest_quality(available, quality)
-    return stream.videos[target_quality][0], rezka.name
+    title = _title_with_translator(rezka, translator_id)
+    return stream.videos[target_quality][0], title
+
+
+def _title_with_translator(rezka, translator_id: int | None) -> str:
+    """"<Title>, <Translator>" for the caption, e.g. "Форрест Гамп, Дубляж" —
+    falls back to the bare title if the translator name can't be resolved
+    (translator_id unset because there was only one to begin with, or
+    rezka.translators itself fails for a page whose markup neither
+    _sanitize_translators_list nor HdRezkaApi's own auto-detect handles)."""
+    try:
+        translators = rezka.translators
+        name = translators[translator_id]["name"] if translator_id is not None else next(iter(translators.values()))["name"]
+    except Exception:
+        return rezka.name
+    return f"{rezka.name}, {name}" if name else rezka.name
 
 
 @dataclass

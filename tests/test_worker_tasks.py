@@ -56,6 +56,23 @@ class TestGetCaption:
         f.write_text("A" * 2000, encoding="utf-8")
         assert len(get_caption(self._settings(f))) == 1024
 
+    def test_title_prepended_on_its_own_line(self, tmp_path):
+        f = tmp_path / "caption.txt"
+        f.write_text("Спасибо за использование @fbtt_download_bot", encoding="utf-8")
+        assert get_caption(self._settings(f), "Форрест Гамп, Дубляж") == (
+            "Форрест Гамп, Дубляж\nСпасибо за использование @fbtt_download_bot"
+        )
+
+    def test_no_title_leaves_caption_unchanged(self, tmp_path):
+        f = tmp_path / "caption.txt"
+        f.write_text("Спасибо за использование @fbtt_download_bot", encoding="utf-8")
+        assert get_caption(self._settings(f), None) == "Спасибо за использование @fbtt_download_bot"
+
+    def test_title_plus_caption_still_truncated_to_telegram_limit(self, tmp_path):
+        f = tmp_path / "caption.txt"
+        f.write_text("A" * 2000, encoding="utf-8")
+        assert len(get_caption(self._settings(f), "Title")) == 1024
+
 
 # ---------------------------------------------------------------------------
 # _handle_task_failure
@@ -354,6 +371,42 @@ class TestProcessDownloadRequest:
         with _task_ctx(ready_video=ready) as (repo, limiter, sender):
             process_download_request.apply(args=[1])
         sender.send_cached.assert_called_once()
+
+    def test_cache_hit_caption_has_no_title_for_non_rezka_url(self):
+        ready = MagicMock()
+        ready.telegram_file_id = "fid"
+        ready.telegram_file_type = TelegramFileType.video
+        ready.title = "Some Title"
+        with _task_ctx(ready_video=ready) as (repo, limiter, sender):
+            process_download_request.apply(args=[1])
+        caption = sender.send_cached.call_args[0][3]
+        assert "Some Title" not in caption
+
+    def test_cache_hit_caption_includes_title_for_rezka_url(self):
+        ready = MagicMock()
+        ready.telegram_file_id = "fid"
+        ready.telegram_file_type = TelegramFileType.video
+        ready.title = "Форрест Гамп, Дубляж"
+        req = _make_req(normalized_url="https://rezka.ag/films/x/1-y-2020.html?rezka_tr=56")
+        with _task_ctx(req=req, ready_video=ready) as (repo, limiter, sender):
+            process_download_request.apply(args=[1])
+        caption = sender.send_cached.call_args[0][3]
+        assert caption.startswith("Форрест Гамп, Дубляж\n")
+
+    def test_download_caption_includes_title_for_rezka_url(self):
+        req = _make_req(normalized_url="https://rezka.ag/films/x/1-y-2020.html?rezka_tr=56")
+        dl_result = (MagicMock(spec=Path, **{"stat.return_value.st_size": 10 * 1024 * 1024}), {"title": "Форрест Гамп, Дубляж"})
+        with _task_ctx(req=req, download_result=dl_result) as (repo, limiter, sender):
+            process_download_request.apply(args=[1])
+        caption = sender.send_file.call_args[0][2]
+        assert caption.startswith("Форрест Гамп, Дубляж\n")
+
+    def test_download_caption_has_no_title_for_non_rezka_url(self):
+        dl_result = (MagicMock(spec=Path, **{"stat.return_value.st_size": 10 * 1024 * 1024}), {"title": "Some YouTube Title"})
+        with _task_ctx(download_result=dl_result) as (repo, limiter, sender):
+            process_download_request.apply(args=[1])
+        caption = sender.send_file.call_args[0][2]
+        assert "Some YouTube Title" not in caption
 
     def test_video_lock_not_acquired_sets_rate_limited(self):
         with _task_ctx(lock_acquired=False) as (repo, _, _sender):

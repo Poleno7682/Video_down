@@ -71,6 +71,7 @@ def _mock_movie_api(videos: dict[str, list[str]], name: str = "Advocate of the D
     mock_api.ok = True
     mock_api.type = Movie()
     mock_api.name = name
+    mock_api.translators = {}
     mock_api.getStream.return_value = mock_stream
     return mock_api
 
@@ -381,6 +382,7 @@ def _mock_series_api(episodes_info, videos, name="Some Show"):
     mock_api.ok = True
     mock_api.type = TVSeries()
     mock_api.name = name
+    mock_api.translators = {}
     mock_api.episodesInfo = episodes_info
     mock_api.getStream.return_value = mock_stream
     return mock_api
@@ -419,6 +421,31 @@ def test_resolve_rezka_stream_series_calls_getstream_with_season_episode_transla
     mock_api.getStream.assert_called_once_with(season=2, episode=5, translation=56)
     assert resolved_url == "u720"
     assert title == "Some Show"
+
+
+def test_resolve_rezka_stream_appends_translator_name_to_title():
+    mock_api = _mock_movie_api({"720p": ["u720"]}, name="Форрест Гамп")
+    mock_api.translators = {56: {"name": "Дубляж", "premium": False}}
+    url = build_selection_url("https://rezka.ag/films/x/1-y-2020.html", 56)
+    with patch("app.utils.rezka.HdRezkaApi", return_value=mock_api):
+        _, title = resolve_rezka_stream(url, "720p")
+    assert title == "Форрест Гамп, Дубляж"
+
+
+def test_resolve_rezka_stream_uses_only_translator_name_when_id_not_selected():
+    mock_api = _mock_movie_api({"720p": ["u720"]}, name="Форрест Гамп")
+    mock_api.translators = {56: {"name": "Дубляж", "premium": False}}
+    with patch("app.utils.rezka.HdRezkaApi", return_value=mock_api):
+        _, title = resolve_rezka_stream("https://rezka.ag/films/x/1-y-2020.html", "720p")
+    assert title == "Форрест Гамп, Дубляж"
+
+
+def test_resolve_rezka_stream_falls_back_to_bare_title_when_translators_unavailable():
+    mock_api = _mock_movie_api({"720p": ["u720"]}, name="Форрест Гамп")
+    mock_api.translators = {}
+    with patch("app.utils.rezka.HdRezkaApi", return_value=mock_api):
+        _, title = resolve_rezka_stream("https://rezka.ag/films/x/1-y-2020.html", "720p")
+    assert title == "Форрест Гамп"
 
 
 # ---------------------------------------------------------------------------

@@ -19,6 +19,7 @@ from app.services.redis_client import get_redis
 from app.services.runtime_config import get_limit
 from app.utils.caption import get_caption
 from app.utils.platforms import YOUTUBE, detect_platform
+from app.utils.rezka import is_rezka_url
 from app.worker.celery_app import celery_app
 from app.worker.downloader import (
     COMPRESSION_TIMEOUT,
@@ -239,7 +240,8 @@ def _try_serve_from_cache(
         return False
     repo.update_request_status(request_id, DownloadStatus.sending)
     sender.edit_status(req.chat_id, req.status_message_id, "⚡ Нашёл готовый Telegram file_id. Отправляю...")
-    sender.send_cached(req.chat_id, ready_video.telegram_file_id, ready_video.telegram_file_type, get_caption(settings))
+    caption_title = ready_video.title if is_rezka_url(req.normalized_url) else None
+    sender.send_cached(req.chat_id, ready_video.telegram_file_id, ready_video.telegram_file_type, get_caption(settings, caption_title))
     repo.update_request_status(request_id, DownloadStatus.done, finished=True)
     sender.edit_status(req.chat_id, req.status_message_id, "✅ Отправлено из кэша.")
     return True
@@ -520,9 +522,10 @@ def _upload_and_cache(
     sender.edit_status(req.chat_id, req.status_message_id, f"✅ Скачано {size_mb:.1f} MB. Отправляю...")
 
     title = info.get("title") if isinstance(info, dict) else None
+    caption_title = title if is_rezka_url(req.normalized_url) else None
     width, height, duration = probe_video_dimensions(file_path)
     file_id, file_unique_id, file_type = sender.send_file(
-        req.chat_id, file_path, get_caption(settings), width=width, height=height, duration=duration
+        req.chat_id, file_path, get_caption(settings, caption_title), width=width, height=height, duration=duration
     )
 
     if req.video_id:

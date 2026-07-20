@@ -30,8 +30,8 @@ _ANSWER_METHOD_BY_FILE_TYPE = {
 }
 
 
-async def send_cached_file(message: Message, file_id: str, file_type: str) -> None:
-    caption = get_caption(get_settings())
+async def send_cached_file(message: Message, file_id: str, file_type: str, title: str | None = None) -> None:
+    caption = get_caption(get_settings(), title)
     method_name = _ANSWER_METHOD_BY_FILE_TYPE.get(file_type, "answer_document")
     await getattr(message, method_name)(file_id, caption=caption)
 
@@ -78,8 +78,11 @@ async def enqueue_download(
 
         ready_video = video_repo.get_ready_video(h, quality_value)
         if ready_video and ready_video.telegram_file_id and ready_video.telegram_file_type:
+            caption_title = ready_video.title if is_rezka_url(normalized) else None
             try:
-                await send_cached_file(message, ready_video.telegram_file_id, ready_video.telegram_file_type.value)
+                await send_cached_file(
+                    message, ready_video.telegram_file_id, ready_video.telegram_file_type.value, caption_title
+                )
                 return
             except TelegramBadRequest:
                 logger.warning(

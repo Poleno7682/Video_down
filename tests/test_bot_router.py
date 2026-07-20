@@ -1,13 +1,13 @@
 from __future__ import annotations
 
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import ANY, AsyncMock, MagicMock, patch
 
 import pytest
 from aiogram.exceptions import TelegramBadRequest
 
 from app.bot.access import _check_access
 from app.bot.routers.user import HELP_TEXT
-from app.bot.routers.url_handler import _process_url_message, send_cached_file
+from app.bot.routers.url_handler import _process_url_message, enqueue_download, send_cached_file
 from app.db.models import DownloadStatus, TelegramFileType
 
 
@@ -111,6 +111,15 @@ async def test_send_cached_file_document():
     with patch("app.bot.routers.url_handler.get_caption", return_value="CAP"):
         await send_cached_file(message, "fid", "document")
     message.answer_document.assert_awaited_once_with("fid", caption="CAP")
+
+
+@pytest.mark.asyncio
+async def test_send_cached_file_passes_title_through_to_get_caption():
+    message = MagicMock()
+    message.answer_video = AsyncMock()
+    with patch("app.bot.routers.url_handler.get_caption", return_value="CAP") as mock_caption:
+        await send_cached_file(message, "fid", "video", "Форрест Гамп, Дубляж")
+    mock_caption.assert_called_once_with(ANY, "Форрест Гамп, Дубляж")
 
 
 # ---------------------------------------------------------------------------
@@ -682,6 +691,82 @@ async def test_process_url_message_cache_hit_success():
 
     mock_send.assert_awaited_once()
     repo.get_or_create_video.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_enqueue_download_cache_hit_includes_title_for_rezka_url():
+    message = _make_message()
+    settings = _make_settings()
+    redis = _make_redis_mock()
+
+    file_type_mock = MagicMock()
+    file_type_mock.value = "video"
+
+    ready_video = MagicMock()
+    ready_video.telegram_file_id = "cached_fid"
+    ready_video.telegram_file_type = file_type_mock
+    ready_video.title = "Форрест Гамп, Дубляж"
+
+    repo = MagicMock()
+    repo.count_user_today_requests.return_value = 0
+    repo.count_user_active_requests.return_value = 0
+    repo.count_global_active_requests.return_value = 0
+    repo.get_ready_video.return_value = ready_video
+
+    session = _make_session(repo)
+
+    with patch("app.bot.routers.url_handler.get_settings", return_value=settings), \
+         patch("app.bot.routers.url_handler.get_redis", return_value=redis), \
+         patch("app.bot.routers.url_handler.get_session", return_value=session), \
+         patch("app.bot.routers.url_handler.RequestRepository", return_value=repo), \
+         patch("app.bot.routers.url_handler.VideoRepository", return_value=repo), \
+         patch("app.bot.routers.url_handler.get_caption", return_value="CAP") as mock_caption:
+        await enqueue_download(
+            message, 1, 1, 1,
+            "https://rezka.ag/films/x/1-y-2020.html",
+            "https://rezka.ag/films/x/1-y-2020.html?rezka_tr=56",
+            "720p",
+        )
+
+    mock_caption.assert_called_once_with(ANY, "Форрест Гамп, Дубляж")
+
+
+@pytest.mark.asyncio
+async def test_enqueue_download_cache_hit_no_title_for_non_rezka_url():
+    message = _make_message()
+    settings = _make_settings()
+    redis = _make_redis_mock()
+
+    file_type_mock = MagicMock()
+    file_type_mock.value = "video"
+
+    ready_video = MagicMock()
+    ready_video.telegram_file_id = "cached_fid"
+    ready_video.telegram_file_type = file_type_mock
+    ready_video.title = "Some YouTube Title"
+
+    repo = MagicMock()
+    repo.count_user_today_requests.return_value = 0
+    repo.count_user_active_requests.return_value = 0
+    repo.count_global_active_requests.return_value = 0
+    repo.get_ready_video.return_value = ready_video
+
+    session = _make_session(repo)
+
+    with patch("app.bot.routers.url_handler.get_settings", return_value=settings), \
+         patch("app.bot.routers.url_handler.get_redis", return_value=redis), \
+         patch("app.bot.routers.url_handler.get_session", return_value=session), \
+         patch("app.bot.routers.url_handler.RequestRepository", return_value=repo), \
+         patch("app.bot.routers.url_handler.VideoRepository", return_value=repo), \
+         patch("app.bot.routers.url_handler.get_caption", return_value="CAP") as mock_caption:
+        await enqueue_download(
+            message, 1, 1, 1,
+            "https://youtube.com/watch?v=x",
+            "https://youtube.com/watch?v=x",
+            "720p",
+        )
+
+    mock_caption.assert_called_once_with(ANY, None)
 
 
 @pytest.mark.asyncio
