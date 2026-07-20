@@ -275,18 +275,46 @@ def _sanitize_translators_list(rezka) -> None:
     with_id = [c for c in children if "data-translator_id" in getattr(c, "attrs", {})]
 
     if not with_id:
-        # None of them have it — a different (likely older) markup this
-        # site uses for some titles, not a "decorative wrapper amid real
-        # entries" case. Don't blindly wipe the whole list on a guess;
-        # log a sample of the actual HTML so the real shape can be
-        # special-cased properly instead of destroying data.
-        sample = "".join(str(c) for c in children[:3])
-        logger.info(
-            "rezka translators-list: no children have data-translator_id at all "
-            "(%d children) — leaving as-is. Sample HTML: %s",
-            len(children), sample[:1500],
-        )
-        return
+        # None of the direct children carry it themselves — seen in two
+        # different shapes: (a) a genuinely older markup with nothing to
+        # recover (e.g. plain "<li>StudioName</li>"), and (b) a variant
+        # (e.g. rezka.ag's multi-season "umbrella" pages) where the
+        # attribute lives on a nested <a data-translator_id="..." ...>
+        # instead of the <li> itself. HdRezkaApi's own parser only ever
+        # looks at the direct child's own .attrs (and, right after,
+        # child['class'] for the premium flag), so for case (b) we hoist
+        # the attribute — and a "class" attr if missing — onto the <li>
+        # itself so its unmodified loop works as-is.
+        hoisted = []
+        for child in children:
+            if not hasattr(child, "find"):
+                continue
+            nested = child.find(attrs={"data-translator_id": True})
+            if nested is None:
+                continue
+            child["data-translator_id"] = nested["data-translator_id"]
+            if "class" not in child.attrs:
+                child["class"] = []
+            hoisted.append(child)
+
+        if hoisted:
+            logger.info(
+                "rezka translators-list: hoisted data-translator_id from a nested tag "
+                "onto %d/%d direct children",
+                len(hoisted), len(children),
+            )
+            with_id = hoisted
+        else:
+            # Nothing to recover — don't blindly wipe the whole list on a
+            # guess; log a sample of the actual HTML so the real shape can
+            # be special-cased properly instead of destroying data.
+            sample = "".join(str(c) for c in children[:3])
+            logger.info(
+                "rezka translators-list: no children have data-translator_id at all "
+                "(%d children) — leaving as-is. Sample HTML: %s",
+                len(children), sample[:1500],
+            )
+            return
 
     if len(with_id) == len(children):
         return  # already clean, nothing to do

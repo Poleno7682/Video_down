@@ -546,6 +546,44 @@ def test_sanitize_translators_list_leaves_old_style_markup_untouched():
     assert len(children) == 2
 
 
+def test_sanitize_translators_list_hoists_nested_translator_id():
+    """Regression guard: production hit this on rezka.ag's multi-season
+    "umbrella" pages (e.g. Rick and Morty) — data-translator_id lives on a
+    nested <a> inside each <li>, not on the <li> itself. HdRezkaApi's own
+    parser only ever inspects the direct child's own attrs, so it must be
+    hoisted onto the <li> (plus a "class" attr, since HdRezkaApi also does
+    child['class'] right after) instead of being left/removed."""
+    from bs4 import BeautifulSoup
+
+    from app.utils.rezka import _sanitize_translators_list
+
+    soup = BeautifulSoup(
+        '<div id="translators-list">'
+        '<li style="float: left;"><a class="b-translator__items" '
+        'data-translator_id="355" href="https://rezka.ag/x/355.html" '
+        'title="HDrezka Studio (18+)">HDrezka Studio (18+)</a></li>'
+        '<li style="float: left;"><a class="b-translator__items" '
+        'data-translator_id="623" href="https://rezka.ag/x/623.html" '
+        'title="1win Studio">1win Studio</a></li>'
+        "</div>",
+        "html.parser",
+    )
+
+    class _FakeApi:
+        pass
+
+    fake = _FakeApi()
+    fake.soup = soup
+    _sanitize_translators_list(fake)
+
+    children = soup.find(id="translators-list").find_all(recursive=False)
+    assert len(children) == 2
+    assert children[0]["data-translator_id"] == "355"
+    assert children[1]["data-translator_id"] == "623"
+    assert children[0]["class"] == []
+    assert children[1]["class"] == []
+
+
 def test_sanitize_translators_list_swallows_soup_access_errors():
     from app.utils.rezka import _sanitize_translators_list
 
