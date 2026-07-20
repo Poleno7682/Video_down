@@ -350,6 +350,20 @@ def _open_movie_page(url: str, proxies: dict, headers: dict, cookies: dict):
         content_type = rezka.type
     except Exception as exc:
         raise _NotMoviePageError(rezka, exc) from exc
+    # HdRezkaApi's own page-fetch (self.page, a plain requests.get) never
+    # merges any Set-Cookie the server issues on that GET back into
+    # self.cookies — only what we passed in at construction. Seen in
+    # production: the passed-in (cached, hours-old) antibot cookies still
+    # pass the page's own anti-bot/title checks just fine, but the later
+    # getStream() AJAX call then fails with the site's own "Session expired,
+    # please refresh" because it's missing a session cookie the GET's
+    # response just rotated. Merging it in here fixes that for the rest of
+    # this rezka instance's lifetime (getStream, translators, etc. all read
+    # self.cookies fresh on every call).
+    try:
+        rezka.cookies = {**rezka.cookies, **rezka.page.cookies.get_dict()}
+    except Exception:
+        pass
     _sanitize_translators_list(rezka)
     return rezka, content_type
 

@@ -13,7 +13,7 @@ from app.utils.rezka import (
     is_rezka_url,
     resolve_rezka_stream,
 )
-from app.utils.rezka import _display_title, _parse_selection, _solve_challenge_with_browser
+from app.utils.rezka import _display_title, _open_movie_page, _parse_selection, _solve_challenge_with_browser
 
 
 def test_is_rezka_url_matches_films():
@@ -727,6 +727,52 @@ def test_sanitize_translators_list_hoists_nested_translator_id():
     assert children[1]["data-translator_id"] == "623"
     assert children[0]["class"] == []
     assert children[1]["class"] == []
+
+
+def test_open_movie_page_merges_session_cookie_from_page_response():
+    """Regression guard: production hit HdRezkaApi's own getStream() AJAX
+    call failing with the site's "Session expired" message even though the
+    page itself opened fine with the (cached, hours-old) antibot cookies —
+    HdRezkaApi's page-fetch never merges any Set-Cookie the GET response
+    issues back into self.cookies, only what's passed in at construction.
+    _open_movie_page must merge it in itself so getStream() sees it too."""
+    from HdRezkaApi.types import Movie
+
+    mock_api = MagicMock()
+    mock_api.ok = True
+    mock_api.type = Movie()
+    mock_api.cookies = {"antibot": "stale-but-valid"}
+    mock_api.page.cookies.get_dict.return_value = {"PHPSESSID": "fresh-session"}
+    mock_api.soup.find.return_value = None  # translators-list absent, sanitize is a no-op
+
+    with patch("app.utils.rezka.HdRezkaApi", return_value=mock_api):
+        rezka, _ = _open_movie_page("https://rezka.ag/films/x/1-y-2020.html", {}, {}, {})
+
+    assert rezka.cookies == {"antibot": "stale-but-valid", "PHPSESSID": "fresh-session"}
+
+
+def test_open_movie_page_swallows_cookie_merge_errors():
+    from HdRezkaApi.types import Movie
+
+    class _FakeSoup:
+        def find(self, *args, **kwargs):
+            return None
+
+    class _FakeApi:
+        ok = True
+        type = Movie()
+        cookies = {"antibot": "stale-but-valid"}
+        soup = _FakeSoup()
+
+        @property
+        def page(self):
+            raise RuntimeError("boom")
+
+    with patch("app.utils.rezka.HdRezkaApi", return_value=_FakeApi()):
+        rezka, content_type = _open_movie_page("https://rezka.ag/films/x/1-y-2020.html", {}, {}, {})
+
+    assert content_type == Movie()
+    assert rezka.cookies == {"antibot": "stale-but-valid"}
 
 
 def test_sanitize_translators_list_swallows_soup_access_errors():
