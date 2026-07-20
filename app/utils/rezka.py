@@ -3,9 +3,21 @@ from __future__ import annotations
 import json
 import re
 import urllib.parse
+from dataclasses import dataclass
 
 from HdRezkaApi import HdRezkaApi
-from HdRezkaApi.types import Movie
+from HdRezkaApi.types import Movie, TVSeries
+
+# Query params appended to the base rezka URL (after normalize_url, which
+# only strips known tracking params) to carry the admin/user's translator
+# (voiceover) + season/episode choice from the bot's inline-keyboard flow
+# through to the worker — and, since they change the URL, naturally give
+# each distinct selection its own url_hash in the existing Video/
+# DownloadRequest cache, so re-requesting the exact same episode+voiceover
+# is served from Telegram's cached file_id without downloading again.
+_PARAM_TRANSLATOR = "rezka_tr"
+_PARAM_SEASON = "rezka_s"
+_PARAM_EPISODE = "rezka_e"
 
 _URL_RE = re.compile(r'^https?://h?d?rezka(?:-ua)?\..*/\d+-[^/]+-\d+(?:-.*)?\.html', re.IGNORECASE)
 
@@ -59,6 +71,59 @@ def _closest_quality(available: list[str], quality: str) -> str:
         if candidate in available:
             return candidate
     return available[0]
+
+
+def build_selection_url(
+    base_url: str,
+    translator_id: int | None,
+    season: int | None = None,
+    episode: int | None = None,
+) -> str:
+    """Append the chosen translator/season/episode to base_url as query
+    params. HdRezkaApi strips everything after ".html" itself when it
+    builds its own requests, so this is purely our own encoding — see the
+    module-level comment on the _PARAM_* constants for why."""
+    params = {}
+    if translator_id is not None:
+        params[_PARAM_TRANSLATOR] = translator_id
+    if season is not None:
+        params[_PARAM_SEASON] = season
+    if episode is not None:
+        params[_PARAM_EPISODE] = episode
+    if not params:
+        return base_url
+    separator = "&" if "?" in base_url else "?"
+    return base_url + separator + urllib.parse.urlencode(params)
+
+
+def _parse_selection(url: str) -> tuple[int | None, int | None, int | None]:
+    query = urllib.parse.parse_qs(urllib.parse.urlparse(url).query)
+
+    def _first_int(key: str) -> int | None:
+        values = query.get(key)
+        return int(values[0]) if values else None
+
+    return _first_int(_PARAM_TRANSLATOR), _first_int(_PARAM_SEASON), _first_int(_PARAM_EPISODE)
+
+
+def seasons_for_translator(episodes_info: list[dict], translator_id: int) -> list[int]:
+    seasons = set()
+    for season_entry in episodes_info:
+        for ep in season_entry["episodes"]:
+            if any(tr["translator_id"] == translator_id for tr in ep["translations"]):
+                seasons.add(season_entry["season"])
+    return sorted(seasons)
+
+
+def episodes_for_translator_season(episodes_info: list[dict], translator_id: int, season: int) -> list[int]:
+    for season_entry in episodes_info:
+        if season_entry["season"] != season:
+            continue
+        return sorted(
+            ep["episode"] for ep in season_entry["episodes"]
+            if any(tr["translator_id"] == translator_id for tr in ep["translations"])
+        )
+    return []
 
 
 def _cache_key(domain: str) -> str:
@@ -184,32 +249,14 @@ def _page_diagnostic_error(rezka, exc: Exception) -> RezkaResolveError:
     return RezkaResolveError(f"Страница rezka не похожа на страницу фильма{hint}: {exc}")
 
 
-def resolve_rezka_stream(
-    url: str,
-    quality: str,
-    proxy: str | None = None,
-    bypass_antibot: bool = False,
-    redis=None,
-) -> tuple[str, str]:
-    """Resolve a rezka.ag/hdrezka.* movie page to a direct video URL.
+def _open_rezka_session(url: str, proxy: str | None, bypass_antibot: bool, redis):
+    """Open url via HdRezkaApi, transparently handling the antibot bypass +
+    cookie cache + one stale-cache retry. Returns (rezka_api, content_type).
 
-    Returns (direct_url, title). Picks the first/priority translator
-    (voiceover) automatically — the worker runs unattended so there's no
-    way to ask which one to use. Only movies are supported: a TV series
-    page needs a season/episode the bot has no UI to collect, so it fails
-    with a clear message instead of guessing.
-
-    rezka.ag sits behind an Anubis proof-of-work JS challenge ("Проверяем,
-    что вы не бот!") that a plain HTTP request can never pass on its own.
-    bypass_antibot, when True, drives a real headless browser through that
-    challenge and reuses the cookies it earns for HdRezkaApi's own plain
-    requests calls. Solving it takes 10-30+ seconds, so when redis is
-    given the resulting cookies are cached per-domain — most downloads
-    then skip the browser entirely. A cache hit that turns out to be
-    stale (cookie expired/rotated server-side) is detected the same way
-    a cold solve's result would be and triggers exactly one fresh solve
-    before giving up, so a stale cache entry costs one retry, not a
-    failure.
+    Shared by resolve_rezka_stream (getting the actual video stream) and
+    get_rezka_content_info (listing translators/seasons/episodes for the
+    bot's inline-keyboard flow) — both need the exact same "get past the
+    challenge" dance first.
     """
     headers = dict(_HEADERS)
     proxies = {"http": proxy, "https": proxy} if proxy else {}
@@ -226,7 +273,7 @@ def resolve_rezka_stream(
             _store_cached_cookies(redis, domain, cookies)
 
     try:
-        rezka, content_type = _open_movie_page(url, proxies, headers, cookies)
+        return _open_movie_page(url, proxies, headers, cookies)
     except _NotMoviePageError as exc:
         if not (bypass_antibot and used_cached_cookies):
             raise _page_diagnostic_error(exc.rezka, exc.cause) from exc.cause
@@ -236,19 +283,60 @@ def resolve_rezka_stream(
         cookies = _solve_challenge_with_browser(url)
         _store_cached_cookies(redis, domain, cookies)
         try:
-            rezka, content_type = _open_movie_page(url, proxies, headers, cookies)
+            return _open_movie_page(url, proxies, headers, cookies)
         except _NotMoviePageError as exc2:
             raise _page_diagnostic_error(exc2.rezka, exc2.cause) from exc2.cause
 
-    if content_type != Movie:
-        raise RezkaResolveError(
-            "Сериалы с rezka.ag пока не поддерживаются — нужно выбрать сезон и серию."
-        )
 
-    try:
-        stream = rezka.getStream()
-    except Exception as exc:
-        raise RezkaResolveError(f"Не удалось получить поток видео: {exc}") from exc
+def resolve_rezka_stream(
+    url: str,
+    quality: str,
+    proxy: str | None = None,
+    bypass_antibot: bool = False,
+    redis=None,
+) -> tuple[str, str]:
+    """Resolve a rezka.ag/hdrezka.* page to a direct video URL.
+
+    Returns (direct_url, title). url may carry a translator/season/episode
+    selection appended by build_selection_url() (see the bot's inline-
+    keyboard flow in app.bot.routers.rezka_flow) — without one, the first/
+    priority translator is used automatically and a series page fails with
+    a clear message, since there'd be no season/episode to pick.
+
+    rezka.ag sits behind an Anubis proof-of-work JS challenge ("Проверяем,
+    что вы не бот!") that a plain HTTP request can never pass on its own.
+    bypass_antibot, when True, drives a real headless browser through that
+    challenge and reuses the cookies it earns for HdRezkaApi's own plain
+    requests calls. Solving it takes 10-30+ seconds, so when redis is
+    given the resulting cookies are cached per-domain — most downloads
+    then skip the browser entirely. A cache hit that turns out to be
+    stale (cookie expired/rotated server-side) is detected the same way
+    a cold solve's result would be and triggers exactly one fresh solve
+    before giving up, so a stale cache entry costs one retry, not a
+    failure.
+    """
+    translator_id, season, episode = _parse_selection(url)
+    rezka, content_type = _open_rezka_session(url, proxy, bypass_antibot, redis)
+
+    if content_type == Movie:
+        if season is not None or episode is not None:
+            raise RezkaResolveError("Это фильм, а не сериал — сезон/серия не применимы.")
+        try:
+            stream = rezka.getStream(translation=translator_id) if translator_id is not None else rezka.getStream()
+        except Exception as exc:
+            raise RezkaResolveError(f"Не удалось получить поток видео: {exc}") from exc
+    elif content_type == TVSeries:
+        if season is None or episode is None:
+            raise RezkaResolveError(
+                "Сериалы с rezka.ag требуют выбора сезона и серии — используйте /-ссылку через бота, "
+                "а не пересылайте её напрямую."
+            )
+        try:
+            stream = rezka.getStream(season=season, episode=episode, translation=translator_id)
+        except Exception as exc:
+            raise RezkaResolveError(f"Не удалось получить поток видео: {exc}") from exc
+    else:
+        raise RezkaResolveError("Неизвестный тип контента на странице rezka.")
 
     available = list(stream.videos.keys())
     if not available:
@@ -256,3 +344,47 @@ def resolve_rezka_stream(
 
     target_quality = _closest_quality(available, quality)
     return stream.videos[target_quality][0], rezka.name
+
+
+@dataclass
+class RezkaContentInfo:
+    title: str
+    is_series: bool
+    # translator_id -> display name (voiceover/studio), in HdRezkaApi's own
+    # priority order.
+    translators: dict[int, str]
+    # Only set when is_series — HdRezkaApi's raw episodesInfo structure:
+    # [{"season": int, "episodes": [{"episode": int, "translations": [...]}]}]
+    episodes_info: list[dict] | None = None
+
+    def seasons_for_translator(self, translator_id: int) -> list[int]:
+        return seasons_for_translator(self.episodes_info or [], translator_id)
+
+    def episodes_for(self, translator_id: int, season: int) -> list[int]:
+        return episodes_for_translator_season(self.episodes_info or [], translator_id, season)
+
+
+def get_rezka_content_info(
+    url: str,
+    bypass_antibot: bool = False,
+    redis=None,
+) -> RezkaContentInfo:
+    """Fetch a rezka.ag/hdrezka.* page's translators (and, for a series,
+    its season/episode listing) — the data the bot's inline-keyboard flow
+    needs before it can even ask the user which voiceover/episode to
+    download. Goes through the same antibot bypass as resolve_rezka_stream.
+    """
+    rezka, content_type = _open_rezka_session(url, None, bypass_antibot, redis)
+    translators = {tr_id: info["name"] for tr_id, info in rezka.translators.items()}
+
+    if content_type == Movie:
+        return RezkaContentInfo(title=rezka.name, is_series=False, translators=translators)
+    if content_type == TVSeries:
+        try:
+            episodes_info = rezka.episodesInfo
+        except Exception as exc:
+            raise RezkaResolveError(f"Не удалось получить список серий: {exc}") from exc
+        return RezkaContentInfo(
+            title=rezka.name, is_series=True, translators=translators, episodes_info=episodes_info
+        )
+    raise RezkaResolveError("Неизвестный тип контента на странице rezka.")

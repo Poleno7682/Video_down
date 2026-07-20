@@ -828,6 +828,35 @@ async def test_process_url_message_uses_user_quality_preference():
     assert repo.create_request.call_args[1]["quality"] == "1080p"
 
 
+@pytest.mark.asyncio
+async def test_process_url_message_rezka_url_starts_rezka_flow_instead_of_queueing():
+    """rezka.ag needs a translator/season/episode picked via inline buttons
+    first (app.bot.routers.rezka_flow) — it must never fall through to the
+    plain immediate-queue path the way every other site does."""
+    message = _make_message(text="https://rezka.ag/films/detective/807-x-1997.html")
+    settings = _make_settings()
+    redis = _make_redis_mock()
+    repo = MagicMock()
+    session = _make_session(repo)
+    limiter = MagicMock()
+    limiter.hit_or_ban.return_value = (True, 0)
+
+    with patch("app.bot.routers.url_handler.get_settings", return_value=settings), \
+         patch("app.bot.routers.url_handler.get_redis", return_value=redis), \
+         patch("app.bot.routers.url_handler.RateLimiter", return_value=limiter), \
+         patch("app.bot.routers.url_handler.get_session", return_value=session), \
+         patch("app.bot.routers.url_handler.UserRepository", return_value=repo), \
+         patch("app.bot.routers.url_handler.process_download_request") as mock_task, \
+         patch("app.bot.routers.rezka_flow.start_rezka_flow", new=AsyncMock()) as mock_start:
+        await _process_url_message(
+            message, "https://rezka.ag/films/detective/807-x-1997.html", True,
+        )
+
+    mock_start.assert_awaited_once()
+    mock_task.delay.assert_not_called()
+    repo.create_request.assert_not_called()
+
+
 # ---------------------------------------------------------------------------
 # Coverage gap tests
 # ---------------------------------------------------------------------------

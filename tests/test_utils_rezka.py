@@ -5,8 +5,14 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from app.utils.rezka import RezkaResolveError, is_rezka_url, resolve_rezka_stream
-from app.utils.rezka import _solve_challenge_with_browser
+from app.utils.rezka import (
+    RezkaResolveError,
+    build_selection_url,
+    get_rezka_content_info,
+    is_rezka_url,
+    resolve_rezka_stream,
+)
+from app.utils.rezka import _parse_selection, _solve_challenge_with_browser
 
 
 def test_is_rezka_url_matches_films():
@@ -296,3 +302,139 @@ def test_resolve_rezka_stream_does_not_retry_when_cookies_were_freshly_solved():
             )
     mock_solve.assert_called_once()
     assert mock_cls.call_count == 1
+
+
+# ---------------------------------------------------------------------------
+# build_selection_url / _parse_selection
+# ---------------------------------------------------------------------------
+
+def test_build_selection_url_translator_only():
+    url = build_selection_url("https://rezka.ag/films/x/1-y-2020.html", 56)
+    assert url == "https://rezka.ag/films/x/1-y-2020.html?rezka_tr=56"
+
+
+def test_build_selection_url_full_series_selection():
+    url = build_selection_url("https://rezka.ag/series/x/1-y-2020.html", 56, 2, 5)
+    parsed = _parse_selection(url)
+    assert parsed == (56, 2, 5)
+
+
+def test_build_selection_url_no_selection_returns_base_url_unchanged():
+    url = build_selection_url("https://rezka.ag/films/x/1-y-2020.html", None)
+    assert url == "https://rezka.ag/films/x/1-y-2020.html"
+
+
+def test_parse_selection_missing_params_returns_none():
+    assert _parse_selection("https://rezka.ag/films/x/1-y-2020.html") == (None, None, None)
+
+
+def test_parse_selection_roundtrips_through_build():
+    url = build_selection_url("https://rezka.ag/series/x/1-y-2020.html?other=1", 99, 3, 12)
+    assert _parse_selection(url) == (99, 3, 12)
+
+
+# ---------------------------------------------------------------------------
+# resolve_rezka_stream: translator / season / episode selection
+# ---------------------------------------------------------------------------
+
+def _mock_series_api(episodes_info, videos, name="Some Show"):
+    from HdRezkaApi.types import TVSeries
+
+    mock_stream = MagicMock()
+    mock_stream.videos = videos
+
+    mock_api = MagicMock()
+    mock_api.ok = True
+    mock_api.type = TVSeries()
+    mock_api.name = name
+    mock_api.episodesInfo = episodes_info
+    mock_api.getStream.return_value = mock_stream
+    return mock_api
+
+
+def test_resolve_rezka_stream_passes_translator_id_to_movie_getstream():
+    mock_api = _mock_movie_api({"720p": ["u720"]})
+    with patch("app.utils.rezka.HdRezkaApi", return_value=mock_api):
+        resolve_rezka_stream(
+            build_selection_url("https://rezka.ag/films/x/1-y-2020.html", 56), "720p",
+        )
+    mock_api.getStream.assert_called_once_with(translation=56)
+
+
+def test_resolve_rezka_stream_movie_with_season_param_rejected():
+    mock_api = _mock_movie_api({"720p": ["u720"]})
+    with patch("app.utils.rezka.HdRezkaApi", return_value=mock_api):
+        with pytest.raises(RezkaResolveError, match="а не сериал"):
+            resolve_rezka_stream(
+                build_selection_url("https://rezka.ag/films/x/1-y-2020.html", 56, 1, 1), "720p",
+            )
+
+
+def test_resolve_rezka_stream_series_without_selection_raises():
+    mock_api = _mock_series_api([], {})
+    with patch("app.utils.rezka.HdRezkaApi", return_value=mock_api):
+        with pytest.raises(RezkaResolveError, match="Сериалы"):
+            resolve_rezka_stream("https://rezka.ag/series/x/1-y-2020.html", "720p")
+
+
+def test_resolve_rezka_stream_series_calls_getstream_with_season_episode_translator():
+    mock_api = _mock_series_api([], {"720p": ["u720"]})
+    url = build_selection_url("https://rezka.ag/series/x/1-y-2020.html", 56, 2, 5)
+    with patch("app.utils.rezka.HdRezkaApi", return_value=mock_api):
+        resolved_url, title = resolve_rezka_stream(url, "720p")
+    mock_api.getStream.assert_called_once_with(season=2, episode=5, translation=56)
+    assert resolved_url == "u720"
+    assert title == "Some Show"
+
+
+# ---------------------------------------------------------------------------
+# get_rezka_content_info
+# ---------------------------------------------------------------------------
+
+def test_get_rezka_content_info_movie():
+    mock_api = _mock_movie_api({"720p": ["u720"]}, name="A Movie")
+    mock_api.translators = {56: {"name": "Дубляж", "premium": False}, 99: {"name": "Оригинал", "premium": False}}
+    with patch("app.utils.rezka.HdRezkaApi", return_value=mock_api):
+        info = get_rezka_content_info("https://rezka.ag/films/x/1-y-2020.html")
+    assert info.title == "A Movie"
+    assert info.is_series is False
+    assert info.translators == {56: "Дубляж", 99: "Оригинал"}
+    assert info.episodes_info is None
+
+
+def test_get_rezka_content_info_series():
+    episodes_info = [
+        {
+            "season": 1,
+            "episodes": [
+                {"episode": 1, "translations": [{"translator_id": 56, "translator_name": "Дубляж"}]},
+                {"episode": 2, "translations": [{"translator_id": 56, "translator_name": "Дубляж"}]},
+            ],
+        },
+        {
+            "season": 2,
+            "episodes": [
+                {"episode": 1, "translations": [{"translator_id": 99, "translator_name": "Оригинал"}]},
+            ],
+        },
+    ]
+    mock_api = _mock_series_api(episodes_info, {}, name="A Show")
+    mock_api.translators = {56: {"name": "Дубляж", "premium": False}, 99: {"name": "Оригинал", "premium": False}}
+    with patch("app.utils.rezka.HdRezkaApi", return_value=mock_api):
+        info = get_rezka_content_info("https://rezka.ag/series/x/1-y-2020.html")
+
+    assert info.is_series is True
+    assert info.seasons_for_translator(56) == [1]
+    assert info.seasons_for_translator(99) == [2]
+    assert info.episodes_for(56, 1) == [1, 2]
+    assert info.episodes_for(99, 2) == [1]
+    assert info.episodes_for(56, 2) == []
+
+
+def test_get_rezka_content_info_raises_on_unknown_type():
+    mock_api = MagicMock()
+    mock_api.ok = True
+    mock_api.type = MagicMock(name="unknown")
+    with patch("app.utils.rezka.HdRezkaApi", return_value=mock_api):
+        with pytest.raises(RezkaResolveError, match="Неизвестный тип"):
+            get_rezka_content_info("https://rezka.ag/films/x/1-y-2020.html")
