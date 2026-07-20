@@ -699,7 +699,9 @@ def download_video(
         if is_rezka_url(url):
             try:
                 extract_url, rezka_title = resolve_rezka_stream(
-                    url, quality, proxy=proxies[0] if proxies else None
+                    url, quality,
+                    proxy=proxies[0] if proxies else None,
+                    flaresolverr_url=settings.flaresolverr_url or None,
                 )
             except RezkaResolveError as exc:
                 raise DownloadError(str(exc)) from exc

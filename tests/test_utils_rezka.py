@@ -5,6 +5,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from app.utils.rezka import RezkaResolveError, is_rezka_url, resolve_rezka_stream
+from app.utils.rezka import _solve_challenge
 
 
 def test_is_rezka_url_matches_films():
@@ -124,3 +125,70 @@ def test_resolve_rezka_stream_passes_proxy_through():
         resolve_rezka_stream("https://rezka.ag/films/x/1-y-2020.html", "720p", proxy="http://p:8080")
     _, kwargs = mock_cls.call_args
     assert kwargs["proxy"] == {"http": "http://p:8080", "https": "http://p:8080"}
+
+
+# ---------------------------------------------------------------------------
+# _solve_challenge (FlareSolverr)
+# ---------------------------------------------------------------------------
+
+def _mock_flaresolverr_response(status_code=200, json_data=None):
+    resp = MagicMock()
+    resp.status_code = status_code
+    resp.raise_for_status = MagicMock()
+    resp.json.return_value = json_data or {}
+    return resp
+
+
+def test_solve_challenge_extracts_cookies_and_user_agent():
+    payload = {
+        "status": "ok",
+        "solution": {
+            "cookies": [
+                {"name": "__ddg1", "value": "abc123", "domain": "rezka.ag"},
+                {"name": "session", "value": "xyz", "domain": "rezka.ag"},
+            ],
+            "userAgent": "Mozilla/5.0 (solved-by-flaresolverr)",
+        },
+    }
+    with patch("app.utils.rezka.requests.post", return_value=_mock_flaresolverr_response(json_data=payload)):
+        cookies, user_agent = _solve_challenge("https://rezka.ag/films/x/1-y-2020.html", "http://flaresolverr:8191/v1")
+    assert cookies == {"__ddg1": "abc123", "session": "xyz"}
+    assert user_agent == "Mozilla/5.0 (solved-by-flaresolverr)"
+
+
+def test_solve_challenge_raises_on_non_ok_status():
+    payload = {"status": "error", "message": "Challenge not solved"}
+    with patch("app.utils.rezka.requests.post", return_value=_mock_flaresolverr_response(json_data=payload)):
+        with pytest.raises(RezkaResolveError, match="не смог пройти проверку"):
+            _solve_challenge("https://rezka.ag/films/x/1-y-2020.html", "http://flaresolverr:8191/v1")
+
+
+def test_solve_challenge_raises_when_flaresolverr_unreachable():
+    with patch("app.utils.rezka.requests.post", side_effect=ConnectionError("refused")):
+        with pytest.raises(RezkaResolveError, match="Не удалось связаться с FlareSolverr"):
+            _solve_challenge("https://rezka.ag/films/x/1-y-2020.html", "http://flaresolverr:8191/v1")
+
+
+def test_resolve_rezka_stream_uses_flaresolverr_cookies_and_user_agent():
+    mock_api = _mock_movie_api({"720p": ["u720"]})
+    with patch("app.utils.rezka.HdRezkaApi", return_value=mock_api) as mock_cls, \
+         patch(
+             "app.utils.rezka._solve_challenge",
+             return_value=({"ddg": "solved"}, "Mozilla/5.0 (solved-ua)"),
+         ) as mock_solve:
+        resolve_rezka_stream(
+            "https://rezka.ag/films/x/1-y-2020.html", "720p",
+            flaresolverr_url="http://flaresolverr:8191/v1",
+        )
+    mock_solve.assert_called_once_with("https://rezka.ag/films/x/1-y-2020.html", "http://flaresolverr:8191/v1")
+    _, kwargs = mock_cls.call_args
+    assert kwargs["cookies"] == {"ddg": "solved"}
+    assert kwargs["headers"]["User-Agent"] == "Mozilla/5.0 (solved-ua)"
+
+
+def test_resolve_rezka_stream_skips_flaresolverr_when_not_configured():
+    mock_api = _mock_movie_api({"720p": ["u720"]})
+    with patch("app.utils.rezka.HdRezkaApi", return_value=mock_api), \
+         patch("app.utils.rezka._solve_challenge") as mock_solve:
+        resolve_rezka_stream("https://rezka.ag/films/x/1-y-2020.html", "720p")
+    mock_solve.assert_not_called()

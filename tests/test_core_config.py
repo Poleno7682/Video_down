@@ -164,6 +164,31 @@ class TestSettings:
         )
         assert s.ytdlp_proxy == "socks5h://user:pass@host:1080"
 
+    def test_default_flaresolverr_url_empty(self):
+        s = Settings(
+            BOT_TOKEN="1:t",
+            WEBHOOK_BASE_URL="https://x.com",
+            WEBHOOK_SECRET="s",
+            DATABASE_URL="postgresql://x",
+            REDIS_URL="redis://x",
+            CELERY_BROKER_URL="redis://x",
+            CELERY_RESULT_BACKEND="redis://x",
+        )
+        assert s.flaresolverr_url == ""
+
+    def test_flaresolverr_url_can_be_set(self):
+        s = Settings(
+            BOT_TOKEN="1:t",
+            WEBHOOK_BASE_URL="https://x.com",
+            WEBHOOK_SECRET="s",
+            DATABASE_URL="postgresql://x",
+            REDIS_URL="redis://x",
+            CELERY_BROKER_URL="redis://x",
+            CELERY_RESULT_BACKEND="redis://x",
+            FLARESOLVERR_URL="http://flaresolverr:8191/v1",
+        )
+        assert s.flaresolverr_url == "http://flaresolverr:8191/v1"
+
 
 class TestGetSettings:
     def test_returns_settings_instance(self):

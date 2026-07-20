@@ -63,6 +63,14 @@ class Settings(BaseSettings):
     # to confirm you're not a bot"). Empty = no proxy, yt-dlp connects
     # directly. socks5h (vs. socks5) resolves DNS through the proxy too.
     ytdlp_proxy: str = Field(default="", alias="YTDLP_PROXY")
+    # rezka.ag/hdrezka.* sit behind a DDoS-Guard JS challenge a plain HTTP
+    # request can never pass. Point this at a FlareSolverr instance
+    # (https://github.com/FlareSolverr/FlareSolverr, e.g.
+    # http://flaresolverr:8191/v1 — see the flaresolverr service in
+    # docker-compose.yml, profile "flaresolverr") to solve it with a real
+    # headless browser before every rezka download. Empty = rezka.ag
+    # downloads will fail with a clear "anti-bot page" error instead.
+    flaresolverr_url: str = Field(default="", alias="FLARESOLVERR_URL")
     download_timeout_seconds: int = Field(default=900, alias="DOWNLOAD_TIMEOUT_SECONDS")
     max_active_downloads_per_user: int = Field(default=1, alias="MAX_ACTIVE_DOWNLOADS_PER_USER")
     max_download_duration_seconds: int = Field(default=1800, alias="MAX_DOWNLOAD_DURATION_SECONDS")
