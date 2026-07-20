@@ -385,14 +385,23 @@ def _page_diagnostic_error(rezka, exc: Exception) -> RezkaResolveError:
     return RezkaResolveError(f"Страница rezka не похожа на страницу фильма{hint}: {exc}")
 
 
-def _open_rezka_session(url: str, proxy: str | None, bypass_antibot: bool, redis):
+def _open_rezka_session(url: str, proxy: str | None, bypass_antibot: bool, redis, force_fresh_cookies: bool = False):
     """Open url via HdRezkaApi, transparently handling the antibot bypass +
-    cookie cache + one stale-cache retry. Returns (rezka_api, content_type).
+    cookie cache + one stale-cache retry. Returns (rezka_api, content_type,
+    used_cached_cookies) — the last one tells callers whether it's worth
+    retrying a *later* failure (e.g. getStream's own AJAX call, which the
+    page-open step here can't see) with a freshly solved session; see
+    resolve_rezka_stream's own retry around getStream.
 
     Shared by resolve_rezka_stream (getting the actual video stream) and
     get_rezka_content_info (listing translators/seasons/episodes for the
     bot's inline-keyboard flow) — both need the exact same "get past the
     challenge" dance first.
+
+    force_fresh_cookies skips the cache lookup and always solves a new
+    session, used when a caller already knows the cached one it just used
+    turned out stale in a way this function's own retry can't see (e.g. a
+    getStream "session expired" failure discovered after this returned).
     """
     headers = dict(_HEADERS)
     proxies = {"http": proxy, "https": proxy} if proxy else {}
@@ -401,7 +410,7 @@ def _open_rezka_session(url: str, proxy: str | None, bypass_antibot: bool, redis
     cookies: dict[str, str] = {}
     used_cached_cookies = False
     if bypass_antibot:
-        cached = _load_cached_cookies(redis, domain)
+        cached = None if force_fresh_cookies else _load_cached_cookies(redis, domain)
         if cached:
             cookies, used_cached_cookies = cached, True
         else:
@@ -409,7 +418,8 @@ def _open_rezka_session(url: str, proxy: str | None, bypass_antibot: bool, redis
             _store_cached_cookies(redis, domain, cookies)
 
     try:
-        return _open_movie_page(url, proxies, headers, cookies)
+        rezka, content_type = _open_movie_page(url, proxies, headers, cookies)
+        return rezka, content_type, used_cached_cookies
     except _NotMoviePageError as exc:
         if not (bypass_antibot and used_cached_cookies):
             raise _page_diagnostic_error(exc.rezka, exc.cause) from exc.cause
@@ -419,26 +429,38 @@ def _open_rezka_session(url: str, proxy: str | None, bypass_antibot: bool, redis
         cookies = _solve_challenge_with_browser(url)
         _store_cached_cookies(redis, domain, cookies)
         try:
-            return _open_movie_page(url, proxies, headers, cookies)
+            rezka, content_type = _open_movie_page(url, proxies, headers, cookies)
+            return rezka, content_type, False
         except _NotMoviePageError as exc2:
             raise _page_diagnostic_error(exc2.rezka, exc2.cause) from exc2.cause
 
 
 _STREAM_FETCH_TIMEOUT_SECONDS = 15
 
+# Substring of the site's own Russian "session expired" message
+# ("Время сессии истекло. Пожалуйста, обновите страницу и повторите
+# попытку") seen in production in _diagnose_fetch_failure's logged
+# response — worth one retry with a freshly solved antibot session,
+# same as a stale cached cookie failing the page-open step outright.
+_SESSION_EXPIRED_MARKER = "сесси"
 
-def _diagnose_fetch_failure(rezka, translator_id: int | None, season: int | None, episode: int | None) -> None:
+
+def _diagnose_fetch_failure(
+    rezka, translator_id: int | None, season: int | None, episode: int | None
+) -> dict | None:
     """HdRezkaApi's own FetchFailed carries no detail at all — just "Failed
     to fetch stream!" — when /ajax/get_cdn_series/ answers with success=false
-    (e.g. a premium-only translator with no logged-in account, or the
-    antibot challenge reappearing for this specific endpoint). Re-issue the
-    same request ourselves purely to log the raw response so the next
-    production log actually shows why, instead of just the generic message.
-    Best-effort only: any failure here is swallowed, since this exists to
-    aid diagnosis, not to affect the actual (already-failed) request.
+    (e.g. a premium-only translator with no logged-in account, a stale
+    session, or the antibot challenge reappearing for this specific
+    endpoint). Re-issue the same request ourselves both to log the raw
+    response (so the next production log shows why) and to return the
+    parsed body so callers can decide whether it's worth retrying.
+    Best-effort only: any failure here is swallowed and None returned,
+    since this exists to aid diagnosis, not to affect the actual
+    (already-failed) request.
     """
     if translator_id is None:
-        return
+        return None
     try:
         data = {
             "id": rezka.id,
@@ -454,8 +476,56 @@ def _diagnose_fetch_failure(rezka, translator_id: int | None, season: int | None
             timeout=_STREAM_FETCH_TIMEOUT_SECONDS,
         )
         logger.info("rezka get_cdn_series diagnostic response (%d): %s", r.status_code, r.text[:500])
+        return r.json()
     except Exception as diag_exc:
         logger.info("rezka get_cdn_series diagnostic request itself failed: %s", diag_exc)
+        return None
+
+
+def _is_session_expired_response(diag: dict | None) -> bool:
+    if not diag:
+        return False
+    message = str(diag.get("message") or "")
+    return _SESSION_EXPIRED_MARKER in message.lower()
+
+
+def _call_get_stream(rezka, translator_id: int | None, season: int | None, episode: int | None):
+    if season is None:
+        return rezka.getStream(translation=translator_id) if translator_id is not None else rezka.getStream()
+    return rezka.getStream(season=season, episode=episode, translation=translator_id)
+
+
+def _get_stream_with_retry(
+    rezka, used_cached_cookies: bool, url: str, proxy: str | None, bypass_antibot: bool, redis,
+    translator_id: int | None, season: int | None, episode: int | None,
+):
+    """Call getStream(), retrying exactly once with a freshly solved antibot
+    session if it fails in a way that looks like a stale cached session —
+    seen in production: the page itself opens fine with cached (hours-old)
+    antibot cookies (title/markup checks pass), but the site's own
+    /ajax/get_cdn_series/ endpoint separately rejects them with its own
+    "Session expired, please refresh" once the underlying session has
+    actually expired server-side, which _open_rezka_session's own retry
+    (built around the page-open step) can't see.
+
+    Returns (stream, rezka) — rezka is the one actually used for the
+    successful call, since a retry opens a new instance.
+    """
+    try:
+        return _call_get_stream(rezka, translator_id, season, episode), rezka
+    except Exception as exc:
+        diag = _diagnose_fetch_failure(rezka, translator_id, season, episode)
+        if not (bypass_antibot and used_cached_cookies and _is_session_expired_response(diag)):
+            raise RezkaResolveError(f"Не удалось получить поток видео: {exc}") from exc
+
+        domain = urllib.parse.urlparse(url).hostname or ""
+        _clear_cached_cookies(redis, domain)
+        rezka, _content_type, _used = _open_rezka_session(url, proxy, bypass_antibot, redis, force_fresh_cookies=True)
+        try:
+            return _call_get_stream(rezka, translator_id, season, episode), rezka
+        except Exception as exc2:
+            _diagnose_fetch_failure(rezka, translator_id, season, episode)
+            raise RezkaResolveError(f"Не удалось получить поток видео: {exc2}") from exc2
 
 
 def resolve_rezka_stream(
@@ -489,29 +559,23 @@ def resolve_rezka_stream(
     failure.
     """
     translator_id, season, episode = _parse_selection(url)
-    rezka, content_type = _open_rezka_session(url, proxy, bypass_antibot, redis)
+    rezka, content_type, used_cached_cookies = _open_rezka_session(url, proxy, bypass_antibot, redis)
 
     if content_type == Movie:
         if season is not None or episode is not None:
             raise RezkaResolveError("Это фильм, а не сериал — сезон/серия не применимы.")
-        try:
-            stream = rezka.getStream(translation=translator_id) if translator_id is not None else rezka.getStream()
-        except Exception as exc:
-            _diagnose_fetch_failure(rezka, translator_id, None, None)
-            raise RezkaResolveError(f"Не удалось получить поток видео: {exc}") from exc
     elif content_type == TVSeries:
         if season is None or episode is None:
             raise RezkaResolveError(
                 "Сериалы с rezka.ag требуют выбора сезона и серии — используйте /-ссылку через бота, "
                 "а не пересылайте её напрямую."
             )
-        try:
-            stream = rezka.getStream(season=season, episode=episode, translation=translator_id)
-        except Exception as exc:
-            _diagnose_fetch_failure(rezka, translator_id, season, episode)
-            raise RezkaResolveError(f"Не удалось получить поток видео: {exc}") from exc
     else:
         raise RezkaResolveError("Неизвестный тип контента на странице rezka.")
+
+    stream, rezka = _get_stream_with_retry(
+        rezka, used_cached_cookies, url, proxy, bypass_antibot, redis, translator_id, season, episode,
+    )
 
     available = list(stream.videos.keys())
     if not available:
@@ -580,7 +644,7 @@ def get_rezka_content_info(
     needs before it can even ask the user which voiceover/episode to
     download. Goes through the same antibot bypass as resolve_rezka_stream.
     """
-    rezka, content_type = _open_rezka_session(url, None, bypass_antibot, redis)
+    rezka, content_type, _used_cached_cookies = _open_rezka_session(url, None, bypass_antibot, redis)
     try:
         translators = {tr_id: info["name"] for tr_id, info in rezka.translators.items()}
     except Exception as exc:

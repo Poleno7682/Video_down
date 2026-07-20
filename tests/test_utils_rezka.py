@@ -383,6 +383,73 @@ def test_resolve_rezka_stream_does_not_retry_when_cookies_were_freshly_solved():
     assert mock_cls.call_count == 1
 
 
+def test_resolve_rezka_stream_retries_get_stream_once_on_stale_session():
+    """Regression guard: production hit this exactly — the page itself
+    opened fine with cached (hours-old) antibot cookies, but rezka's own
+    /ajax/get_cdn_series/ endpoint separately rejected getStream() with its
+    own "Время сессии истекло" ("session expired") message. This is a
+    different failure point than the page-open retry above (which can't
+    see it at all, since the page opened successfully) — it needs its own
+    retry around getStream specifically."""
+    stale_api = _mock_movie_api({"720p": ["u720bad"]})
+    stale_api.id = 3356
+    stale_api.origin = "https://rezka.ag"
+    stale_api.HEADERS = {}
+    stale_api.proxy = {}
+    stale_api.cookies = {}
+    stale_api.getStream.side_effect = Exception("Failed to fetch stream!")
+
+    fresh_api = _mock_movie_api({"720p": ["u720good"]})
+
+    diag_response = MagicMock()
+    diag_response.status_code = 200
+    diag_response.json.return_value = {"success": False, "message": "Время сессии истекло"}
+
+    redis = MagicMock()
+    redis.get.return_value = json.dumps({"stale": "cookie"})
+
+    url = build_selection_url("https://rezka.ag/films/x/1-y-2020.html", 80)
+    with patch("app.utils.rezka.HdRezkaApi", side_effect=[stale_api, fresh_api]) as mock_cls, \
+         patch("app.utils.rezka.requests.post", return_value=diag_response), \
+         patch("app.utils.rezka._solve_challenge_with_browser", return_value={"fresh": "cookie"}) as mock_solve:
+        resolved_url, _ = resolve_rezka_stream(url, "720p", bypass_antibot=True, redis=redis)
+
+    assert resolved_url == "u720good"
+    mock_solve.assert_called_once()
+    redis.delete.assert_called_once_with("rezka_antibot_cookies:rezka.ag")
+    assert mock_cls.call_count == 2
+
+
+def test_resolve_rezka_stream_does_not_retry_get_stream_for_unrelated_failure():
+    """A FetchFailed that isn't a session-expired message (e.g. a
+    premium-only translator) shouldn't burn a browser solve retrying
+    something a fresh session wouldn't fix anyway."""
+    mock_api = _mock_movie_api({})
+    mock_api.id = 3356
+    mock_api.origin = "https://rezka.ag"
+    mock_api.HEADERS = {}
+    mock_api.proxy = {}
+    mock_api.cookies = {}
+    mock_api.getStream.side_effect = Exception("Failed to fetch stream!")
+
+    diag_response = MagicMock()
+    diag_response.status_code = 200
+    diag_response.json.return_value = {"success": False, "message": "Премиум доступ недоступен"}
+
+    redis = MagicMock()
+    redis.get.return_value = json.dumps({"cached": "cookie"})
+
+    url = build_selection_url("https://rezka.ag/films/x/1-y-2020.html", 80)
+    with patch("app.utils.rezka.HdRezkaApi", return_value=mock_api) as mock_cls, \
+         patch("app.utils.rezka.requests.post", return_value=diag_response), \
+         patch("app.utils.rezka._solve_challenge_with_browser") as mock_solve:
+        with pytest.raises(RezkaResolveError, match="Не удалось получить поток"):
+            resolve_rezka_stream(url, "720p", bypass_antibot=True, redis=redis)
+
+    mock_solve.assert_not_called()
+    assert mock_cls.call_count == 1
+
+
 # ---------------------------------------------------------------------------
 # build_selection_url / _parse_selection
 # ---------------------------------------------------------------------------
