@@ -724,10 +724,17 @@ def download_video(
         extra_headers: dict[str, str] | None = None
         rezka_title: str | None = None
         if is_rezka_url(url):
+            # Always fetched direct (no proxy), never through proxies below:
+            # the anti-bot cookies (cached or freshly solved) are earned by
+            # Playwright on this machine's own direct IP, and Anubis ties a
+            # solved challenge's cookies to the IP that solved it — routing
+            # this specific request through a different-IP proxy makes the
+            # cookies look stolen and the challenge reappears every time.
+            # proxies (if any) are still used below, for the actual CDN
+            # stream download, which has no such IP binding.
             try:
                 extract_url, rezka_title = resolve_rezka_stream(
                     url, quality,
-                    proxy=proxies[0] if proxies else None,
                     bypass_antibot=settings.rezka_antibot_bypass,
                     redis=redis,
                 )

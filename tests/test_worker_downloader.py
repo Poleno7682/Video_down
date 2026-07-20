@@ -460,7 +460,7 @@ def test_download_video_resolves_rezka_url_to_direct_stream():
 
         mock_resolve.assert_called_once_with(
             "https://rezka.ag/films/detective/807-advokat-dyavola-1997.html", "720p",
-            proxy=None, bypass_antibot=False, redis=None,
+            bypass_antibot=False, redis=None,
         )
         assert captured_urls == ["https://cdn.example/video.mp4"]
         opts_used = mock_ydl_cls.call_args[0][0]
@@ -468,6 +468,49 @@ def test_download_video_resolves_rezka_url_to_direct_stream():
         assert opts_used["http_headers"]["Origin"] == "https://rezka.ag"
         # HdRezkaApi's scraped title wins over yt-dlp's guess from the CDN URL slug.
         assert info["title"] == "Advocate of the Devil"
+
+
+def test_download_video_resolves_rezka_stream_without_proxy_even_when_proxies_given():
+    """Regression guard: routing the rezka.ag page-open request through a
+    proxy makes Anubis's solved-challenge cookies (earned on this machine's
+    own direct IP) look stolen, and the antibot interstitial reappears even
+    right after a successful solve. Only the later CDN download (of the
+    already-resolved direct stream URL) should ever use proxies."""
+    with tempfile.TemporaryDirectory() as tmp:
+        settings = MagicMock()
+        settings.download_dir = Path(tmp)
+        settings.default_quality = "720p"
+        settings.use_cookies = False
+        settings.rezka_antibot_bypass = True
+
+        fixed_hex = "abc123"
+        work_subdir = settings.download_dir / "active" / fixed_hex
+
+        def fake_extract_info(url, download):
+            work_subdir.mkdir(parents=True, exist_ok=True)
+            (work_subdir / "video.mp4").write_bytes(b"x" * 100)
+            return {"title": "url-slug-not-the-real-title"}
+
+        mock_ydl = MagicMock()
+        mock_ydl.__enter__ = MagicMock(return_value=mock_ydl)
+        mock_ydl.__exit__ = MagicMock(return_value=False)
+        mock_ydl.extract_info.side_effect = fake_extract_info
+
+        mock_uuid = MagicMock()
+        mock_uuid.hex = fixed_hex
+
+        with patch("app.worker.downloader.uuid.uuid4", return_value=mock_uuid), \
+             patch("app.worker.downloader.YoutubeDL", return_value=mock_ydl), \
+             patch(
+                 "app.worker.downloader.resolve_rezka_stream",
+                 return_value=("https://cdn.example/video.mp4", "Advocate of the Devil"),
+             ) as mock_resolve:
+            download_video(
+                "https://rezka.ag/films/detective/807-advokat-dyavola-1997.html", "720p", settings,
+                proxies=["socks5h://a:1080", "socks5h://b:1080"],
+            )
+
+        assert "proxy" not in mock_resolve.call_args.kwargs
 
 
 def test_download_video_raises_when_rezka_resolve_fails():
