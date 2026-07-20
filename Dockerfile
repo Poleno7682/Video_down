@@ -25,6 +25,9 @@ COPY scripts ./scripts
 COPY alembic ./alembic
 COPY alembic.ini ./alembic.ini
 COPY caption.txt ./caption.txt
+# yt-dlp auto-discovers extractor plugins under ./yt_dlp_plugins relative to
+# the process's cwd (WORKDIR /app here) — see yt_dlp_plugins/extractor/rezka.py.
+COPY yt_dlp_plugins ./yt_dlp_plugins
 
 RUN mkdir -p /app/downloads /app/cookies /app/logs
 
