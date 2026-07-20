@@ -22,7 +22,11 @@ _PARAM_TRANSLATOR = "rezka_tr"
 _PARAM_SEASON = "rezka_s"
 _PARAM_EPISODE = "rezka_e"
 
-_URL_RE = re.compile(r'^https?://h?d?rezka(?:-ua)?\..*/\d+-[^/]+-\d+(?:-.*)?\.html', re.IGNORECASE)
+# Matches rezka.ag/hdrezka.* and its many mirror domains (rezka-ua.*,
+# rezka-ag.net, etc. — seen in production) by just requiring "rezka"
+# somewhere in the hostname rather than a fixed prefix, since new mirrors
+# show up whenever the current one gets blocked in a given region.
+_URL_RE = re.compile(r'^https?://[^/]*rezka[^/]*\.[^/]+/.*/\d+-[^/]+-\d+(?:-.*)?\.html', re.IGNORECASE)
 
 # Preference order when the requested quality (e.g. "720p") isn't offered
 # for this title — highest available wins.

@@ -28,6 +28,15 @@ def test_is_rezka_url_rejects_unrelated_url():
     assert not is_rezka_url("https://www.youtube.com/watch?v=dQw4w9WgXcQ")
 
 
+def test_is_rezka_url_matches_mirror_domains():
+    """Regression guard: production used rezka-ag.net (a mirror domain,
+    presumably because rezka.ag was blocked in their region) — the old
+    strict-prefix regex only recognized rezka.ag/hdrezka.*/rezka-ua.* and
+    silently let this fall through to the plain (non-rezka) download path."""
+    assert is_rezka_url("https://rezka-ag.net/films/drama/763-forrest-gamp-1994.html")
+    assert is_rezka_url("https://rezka-ua.tv/films/x/1-y-2020.html")
+
+
 # ---------------------------------------------------------------------------
 # canonicalize_rezka_url
 # ---------------------------------------------------------------------------
