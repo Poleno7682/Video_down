@@ -676,6 +676,7 @@ def download_video(
     embed_subtitles: bool = False,
     proxies: list[str] | None = None,
     on_proxy_result: Callable[[str | None, bool], None] | None = None,
+    redis=None,
 ) -> tuple[Path, dict]:
     quality = normalize_quality(quality, settings.default_quality)
     # Each download gets its own subdirectory so concurrent workers cannot
@@ -702,6 +703,7 @@ def download_video(
                     url, quality,
                     proxy=proxies[0] if proxies else None,
                     bypass_antibot=settings.rezka_antibot_bypass,
+                    redis=redis,
                 )
             except RezkaResolveError as exc:
                 raise DownloadError(str(exc)) from exc
@@ -772,6 +774,7 @@ def prepare_media_for_telegram(
     on_transcode_progress: Callable[[float], None] | None = None,
     proxies: list[str] | None = None,
     on_proxy_result: Callable[[str | None, bool], None] | None = None,
+    redis=None,
 ) -> tuple[Path, dict, dict[str, str]]:
     """Facade over the yt-dlp+ffmpeg pipeline: download, validate, and make
     Telegram-compatible in one call.
@@ -796,6 +799,7 @@ def prepare_media_for_telegram(
         embed_subtitles=embed_subtitles,
         proxies=proxies,
         on_proxy_result=on_proxy_result,
+        redis=redis,
     )
     try:
         validate_media_file(file_path, quality)

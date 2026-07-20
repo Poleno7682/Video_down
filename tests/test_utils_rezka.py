@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -207,3 +208,91 @@ def test_resolve_rezka_stream_skips_browser_when_bypass_disabled():
          patch("app.utils.rezka._solve_challenge_with_browser") as mock_solve:
         resolve_rezka_stream("https://rezka.ag/films/x/1-y-2020.html", "720p")
     mock_solve.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Cookie caching (redis)
+# ---------------------------------------------------------------------------
+
+def test_resolve_rezka_stream_uses_cached_cookies_and_skips_browser():
+    mock_api = _mock_movie_api({"720p": ["u720"]})
+    redis = MagicMock()
+    redis.get.return_value = json.dumps({"cached": "cookie"})
+    with patch("app.utils.rezka.HdRezkaApi", return_value=mock_api) as mock_cls, \
+         patch("app.utils.rezka._solve_challenge_with_browser") as mock_solve:
+        resolve_rezka_stream(
+            "https://rezka.ag/films/x/1-y-2020.html", "720p", bypass_antibot=True, redis=redis,
+        )
+    mock_solve.assert_not_called()
+    _, kwargs = mock_cls.call_args
+    assert kwargs["cookies"] == {"cached": "cookie"}
+    redis.get.assert_called_once_with("rezka_antibot_cookies:rezka.ag")
+
+
+def test_resolve_rezka_stream_stores_freshly_solved_cookies_in_cache():
+    mock_api = _mock_movie_api({"720p": ["u720"]})
+    redis = MagicMock()
+    redis.get.return_value = None
+    with patch("app.utils.rezka.HdRezkaApi", return_value=mock_api), \
+         patch("app.utils.rezka._solve_challenge_with_browser", return_value={"fresh": "cookie"}) as mock_solve:
+        resolve_rezka_stream(
+            "https://rezka.ag/films/x/1-y-2020.html", "720p", bypass_antibot=True, redis=redis,
+        )
+    mock_solve.assert_called_once()
+    redis.setex.assert_called_once_with(
+        "rezka_antibot_cookies:rezka.ag", 6 * 3600, json.dumps({"fresh": "cookie"})
+    )
+
+
+def test_resolve_rezka_stream_retries_once_when_cached_cookies_are_stale():
+    """Regression guard for cache staleness: a cached cookie that no longer
+    works (expired/rotated server-side) must trigger exactly one fresh
+    solve-and-retry instead of failing outright."""
+    good_api = _mock_movie_api({"720p": ["u720"]})
+
+    class _StaleApi:
+        ok = True
+        soup = MagicMock()
+
+        @property
+        def type(self):
+            raise AttributeError("stale cookie")
+
+    redis = MagicMock()
+    redis.get.return_value = json.dumps({"stale": "cookie"})
+
+    with patch("app.utils.rezka.HdRezkaApi", side_effect=[_StaleApi(), good_api]) as mock_cls, \
+         patch("app.utils.rezka._solve_challenge_with_browser", return_value={"fresh": "cookie"}) as mock_solve:
+        url, _ = resolve_rezka_stream(
+            "https://rezka.ag/films/x/1-y-2020.html", "720p", bypass_antibot=True, redis=redis,
+        )
+
+    assert url == "u720"
+    mock_solve.assert_called_once()
+    redis.delete.assert_called_once_with("rezka_antibot_cookies:rezka.ag")
+    assert mock_cls.call_count == 2
+    assert mock_cls.call_args_list[1].kwargs["cookies"] == {"fresh": "cookie"}
+
+
+def test_resolve_rezka_stream_does_not_retry_when_cookies_were_freshly_solved():
+    """A cache MISS that still fails isn't a staleness problem — retrying
+    would just solve the same unsolvable challenge twice."""
+    class _BadApi:
+        ok = True
+        soup = MagicMock()
+
+        @property
+        def type(self):
+            raise AttributeError("still blocked")
+
+    redis = MagicMock()
+    redis.get.return_value = None
+
+    with patch("app.utils.rezka.HdRezkaApi", return_value=_BadApi()) as mock_cls, \
+         patch("app.utils.rezka._solve_challenge_with_browser", return_value={"fresh": "cookie"}) as mock_solve:
+        with pytest.raises(RezkaResolveError, match="не похожа на страницу фильма"):
+            resolve_rezka_stream(
+                "https://rezka.ag/films/x/1-y-2020.html", "720p", bypass_antibot=True, redis=redis,
+            )
+    mock_solve.assert_called_once()
+    assert mock_cls.call_count == 1

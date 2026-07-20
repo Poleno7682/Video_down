@@ -418,6 +418,7 @@ def _download_and_prepare_media(
     settings: Settings,
     proxies: list[str],
     on_proxy_result: Callable[[str | None, bool], None],
+    redis,
 ) -> tuple[Path, dict | None, Path | None, bool]:
     """Download the video, validate it, and make it Telegram-compatible.
 
@@ -447,6 +448,7 @@ def _download_and_prepare_media(
         on_transcode_progress=_build_transcode_progress_hook(sender, chat_id, status_message_id),
         proxies=proxies,
         on_proxy_result=on_proxy_result,
+        redis=redis,
     )
 
     return file_path, info, user_cookie_path, cookies_were_used
@@ -613,7 +615,7 @@ def process_download_request(self, request_id: int) -> None:
 
         file_path, info, user_cookie_path, cookies_were_used = _download_and_prepare_media(
             sender, repo, request_id, user_id, chat_id, status_message_id, normalized_url, quality, settings,
-            proxies, on_proxy_result,
+            proxies, on_proxy_result, redis,
         )
         current_media_path = file_path
 

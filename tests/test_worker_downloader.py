@@ -459,7 +459,7 @@ def test_download_video_resolves_rezka_url_to_direct_stream():
 
         mock_resolve.assert_called_once_with(
             "https://rezka.ag/films/detective/807-advokat-dyavola-1997.html", "720p",
-            proxy=None, bypass_antibot=False,
+            proxy=None, bypass_antibot=False, redis=None,
         )
         assert captured_urls == ["https://cdn.example/video.mp4"]
         opts_used = mock_ydl_cls.call_args[0][0]
@@ -1297,7 +1297,7 @@ class TestPrepareMediaForTelegram:
         mock_dl.assert_called_once_with(
             "https://youtube.com/watch?v=x", "720p", settings,
             progress_hook=None, cookie_file=None, embed_subtitles=False,
-            proxies=None, on_proxy_result=None,
+            proxies=None, on_proxy_result=None, redis=None,
         )
         mock_validate.assert_called_once_with(fake_file, "720p")
         mock_log.assert_called_once_with(fake_file, context="ctx")
