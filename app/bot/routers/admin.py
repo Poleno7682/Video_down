@@ -321,23 +321,45 @@ class _ProxyAwaitingFilter(BaseFilter):
         return bool(get_proxy_awaiting(message.from_user.id, get_redis()))
 
 
-async def _check_and_add_proxy(raw: str, scheme: str, admin_id: int) -> tuple[str | None, str]:
-    """Parse, probe, and save one proxy line. Returns (added_url_or_None, message)."""
+def _existing_proxy_urls() -> set[str]:
+    with get_session() as session:
+        return set(ProxyRepository(session).get_enabled_proxy_urls())
+
+
+async def _check_and_add_proxy(
+    raw: str,
+    scheme: str,
+    admin_id: int,
+    existing_urls: set[str],
+    dedup_lock: asyncio.Lock,
+) -> tuple[str | None, str, bool]:
+    """Parse, dedup, probe, and save one proxy line.
+
+    Returns (added_url_or_None, message, was_duplicate). existing_urls is
+    shared across a whole batch (and reserved under dedup_lock before the
+    slow probe) so an already-added proxy — or the same proxy appearing
+    twice in one file — is skipped instead of being re-checked/re-added.
+    """
     proxy_url = parse_proxy_input(raw, scheme)
     if not proxy_url:
-        return None, "не распознан формат"
+        return None, "не распознан формат", False
+
+    async with dedup_lock:
+        if proxy_url in existing_urls:
+            return None, "уже есть в базе — пропущен", True
+        existing_urls.add(proxy_url)
 
     try:
         await asyncio.to_thread(check_proxy, proxy_url)
     except ProxyCheckError as exc:
-        return None, str(exc)
+        return None, str(exc), False
     except Exception as exc:
         logger.warning("Unexpected error checking proxy %s: %s", proxy_url, exc)
-        return None, f"ошибка проверки: {exc}"
+        return None, f"ошибка проверки: {exc}", False
 
     with get_session() as session:
         proxy = ProxyRepository(session).add_proxy(proxy_url, added_by=admin_id)
-    return proxy.url, "добавлен"
+    return proxy.url, "добавлен", False
 
 
 @router.message(_ProxyAwaitingFilter(), F.document)
@@ -372,23 +394,29 @@ async def handle_proxy_file(message: Message, bot: Bot) -> None:
     total = len(lines)
     status_msg = await message.answer(
         f"🔍 Проверяю {total} прокси (до {_PROXY_CHECK_CONCURRENCY} одновременно)...\n"
-        f"✅ Прошли: 0 | ❌ Провалили: 0 | Осталось: {total}"
+        f"✅ Прошли: 0 | ⏭ Дубли: 0 | ❌ Провалили: 0 | Осталось: {total}"
     )
     semaphore = asyncio.Semaphore(_PROXY_CHECK_CONCURRENCY)
-    progress = {"passed": 0, "failed": 0}
+    existing_urls = _existing_proxy_urls()
+    dedup_lock = asyncio.Lock()
+    progress = {"passed": 0, "duplicate": 0, "failed": 0}
     progress_lock = asyncio.Lock()
     last_edit_at = 0.0
 
-    async def _bounded_check(raw: str) -> tuple[str, str | None, str]:
+    async def _bounded_check(raw: str) -> tuple[str, str | None, str, bool]:
         nonlocal last_edit_at
         async with semaphore:
-            added_url, note = await _check_and_add_proxy(raw, scheme, admin_id)
+            added_url, note, was_duplicate = await _check_and_add_proxy(
+                raw, scheme, admin_id, existing_urls, dedup_lock
+            )
         async with progress_lock:
             if added_url:
                 progress["passed"] += 1
+            elif was_duplicate:
+                progress["duplicate"] += 1
             else:
                 progress["failed"] += 1
-            done = progress["passed"] + progress["failed"]
+            done = progress["passed"] + progress["duplicate"] + progress["failed"]
             now = time.monotonic()
             # Throttle edits to avoid Telegram rate limits on a large batch;
             # always send the final one so the count ends up accurate.
@@ -397,32 +425,35 @@ async def handle_proxy_file(message: Message, bot: Bot) -> None:
                 try:
                     await status_msg.edit_text(
                         f"🔍 Проверяю {total} прокси (до {_PROXY_CHECK_CONCURRENCY} одновременно)...\n"
-                        f"✅ Прошли: {progress['passed']} | ❌ Провалили: {progress['failed']} | "
-                        f"Осталось: {total - done}"
+                        f"✅ Прошли: {progress['passed']} | ⏭ Дубли: {progress['duplicate']} | "
+                        f"❌ Провалили: {progress['failed']} | Осталось: {total - done}"
                     )
                 except Exception:
                     pass  # message unchanged since last edit, or edited/deleted by the user — not fatal
-        return raw, added_url, note
+        return raw, added_url, note, was_duplicate
 
     results = await asyncio.gather(*(_bounded_check(raw) for raw in lines))
 
     added: list[str] = []
+    duplicates: list[str] = []
     failed: list[tuple[str, str]] = []
-    for raw, added_url, note in results:
+    for raw, added_url, note, was_duplicate in results:
         if added_url:
             added.append(added_url)
+        elif was_duplicate:
+            duplicates.append(raw)
         else:
             failed.append((raw, note))
 
     clear_proxy_awaiting(admin_id, redis)
 
-    _MAX_FAILED_SHOWN = 30
-    report = [f"✅ Добавлено: {len(added)}/{len(lines)}"]
+    _MAX_LISTED = 30
+    report = [f"✅ Добавлено: {len(added)}/{len(lines)}", f"⏭ Уже были в базе: {len(duplicates)}"]
     if failed:
         report.append("\n❌ Не добавлены:")
-        report += [f"  • <code>{raw}</code> — {reason}" for raw, reason in failed[:_MAX_FAILED_SHOWN]]
-        if len(failed) > _MAX_FAILED_SHOWN:
-            report.append(f"  ...и ещё {len(failed) - _MAX_FAILED_SHOWN}")
+        report += [f"  • <code>{raw}</code> — {reason}" for raw, reason in failed[:_MAX_LISTED]]
+        if len(failed) > _MAX_LISTED:
+            report.append(f"  ...и ещё {len(failed) - _MAX_LISTED}")
     if truncated:
         report.append(f"\n⚠️ В файле больше {_MAX_PROXY_LINES_PER_FILE} строк — обработаны только первые {_MAX_PROXY_LINES_PER_FILE}.")
     await status_msg.edit_text("\n".join(report)[:4000])
@@ -443,7 +474,14 @@ async def handle_proxy_input(message: Message) -> None:
         return
 
     status_msg = await message.answer("🔍 Проверяю прокси на YouTube (Sign in to confirm you're not a bot)...")
-    added_url, note = await _check_and_add_proxy(text, scheme, admin_id)
+    existing_urls = _existing_proxy_urls()
+    added_url, note, was_duplicate = await _check_and_add_proxy(
+        text, scheme, admin_id, existing_urls, asyncio.Lock()
+    )
+    if was_duplicate:
+        clear_proxy_awaiting(admin_id, redis)
+        await status_msg.edit_text("⏭ Этот прокси уже есть в базе — пропущен.")
+        return
     if not added_url:
         await status_msg.edit_text(f"❌ Прокси не добавлен: {note}\n\nПопробуйте другой или /cancel.")
         return
