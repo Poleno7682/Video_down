@@ -13,7 +13,7 @@ from app.utils.rezka import (
     is_rezka_url,
     resolve_rezka_stream,
 )
-from app.utils.rezka import _parse_selection, _solve_challenge_with_browser
+from app.utils.rezka import _display_title, _parse_selection, _solve_challenge_with_browser
 
 
 def test_is_rezka_url_matches_films():
@@ -72,6 +72,7 @@ def _mock_movie_api(videos: dict[str, list[str]], name: str = "Advocate of the D
     mock_api.type = Movie()
     mock_api.name = name
     mock_api.translators = {}
+    mock_api.releaseYear = None
     mock_api.getStream.return_value = mock_stream
     return mock_api
 
@@ -383,6 +384,7 @@ def _mock_series_api(episodes_info, videos, name="Some Show"):
     mock_api.type = TVSeries()
     mock_api.name = name
     mock_api.translators = {}
+    mock_api.releaseYear = None
     mock_api.episodesInfo = episodes_info
     mock_api.getStream.return_value = mock_stream
     return mock_api
@@ -432,6 +434,31 @@ def test_resolve_rezka_stream_series_title_includes_translator_season_episode():
     assert title == "Рик и Морти, Сыендук, 1 сезон, 3 серия"
 
 
+def test_display_title_includes_year_when_available():
+    mock_api = MagicMock()
+    mock_api.name = "Форрест Гамп"
+    mock_api.releaseYear = 1994
+    assert _display_title(mock_api) == "Форрест Гамп (1994)"
+
+
+def test_display_title_omits_year_when_none():
+    mock_api = MagicMock()
+    mock_api.name = "Форрест Гамп"
+    mock_api.releaseYear = None
+    assert _display_title(mock_api) == "Форрест Гамп"
+
+
+def test_display_title_swallows_release_year_errors():
+    class _FakeApi:
+        name = "Форрест Гамп"
+
+        @property
+        def releaseYear(self):
+            raise AttributeError("boom")
+
+    assert _display_title(_FakeApi()) == "Форрест Гамп"
+
+
 def test_resolve_rezka_stream_appends_translator_name_to_title():
     mock_api = _mock_movie_api({"720p": ["u720"]}, name="Форрест Гамп")
     mock_api.translators = {56: {"name": "Дубляж", "premium": False}}
@@ -439,6 +466,36 @@ def test_resolve_rezka_stream_appends_translator_name_to_title():
     with patch("app.utils.rezka.HdRezkaApi", return_value=mock_api):
         _, title = resolve_rezka_stream(url, "720p")
     assert title == "Форрест Гамп, Дубляж"
+
+
+def test_resolve_rezka_stream_includes_release_year_in_title():
+    mock_api = _mock_movie_api({"720p": ["u720"]}, name="Форрест Гамп")
+    mock_api.translators = {56: {"name": "Дубляж", "premium": False}}
+    mock_api.releaseYear = 1994
+    url = build_selection_url("https://rezka.ag/films/x/1-y-2020.html", 56)
+    with patch("app.utils.rezka.HdRezkaApi", return_value=mock_api):
+        _, title = resolve_rezka_stream(url, "720p")
+    assert title == "Форрест Гамп (1994), Дубляж"
+
+
+def test_resolve_rezka_stream_omits_year_when_unavailable():
+    mock_api = _mock_movie_api({"720p": ["u720"]}, name="Форрест Гамп")
+    mock_api.translators = {56: {"name": "Дубляж", "premium": False}}
+    mock_api.releaseYear = None
+    url = build_selection_url("https://rezka.ag/films/x/1-y-2020.html", 56)
+    with patch("app.utils.rezka.HdRezkaApi", return_value=mock_api):
+        _, title = resolve_rezka_stream(url, "720p")
+    assert title == "Форрест Гамп, Дубляж"
+
+
+def test_resolve_rezka_stream_series_title_includes_year_before_translator():
+    mock_api = _mock_series_api([], {"720p": ["u720"]}, name="Рик и Морти")
+    mock_api.translators = {355: {"name": "Сыендук", "premium": False}}
+    mock_api.releaseYear = 2013
+    url = build_selection_url("https://rezka.ag/cartoons/x/1-y-2020.html", 355, 1, 3)
+    with patch("app.utils.rezka.HdRezkaApi", return_value=mock_api):
+        _, title = resolve_rezka_stream(url, "720p")
+    assert title == "Рик и Морти (2013), Сыендук, 1 сезон, 3 серия"
 
 
 def test_resolve_rezka_stream_uses_only_translator_name_when_id_not_selected():
@@ -470,6 +527,15 @@ def test_get_rezka_content_info_movie():
     assert info.is_series is False
     assert info.translators == {56: "Дубляж", 99: "Оригинал"}
     assert info.episodes_info is None
+
+
+def test_get_rezka_content_info_movie_title_includes_release_year():
+    mock_api = _mock_movie_api({"720p": ["u720"]}, name="A Movie")
+    mock_api.translators = {56: {"name": "Дубляж", "premium": False}}
+    mock_api.releaseYear = 1999
+    with patch("app.utils.rezka.HdRezkaApi", return_value=mock_api):
+        info = get_rezka_content_info("https://rezka.ag/films/x/1-y-2020.html")
+    assert info.title == "A Movie (1999)"
 
 
 def test_get_rezka_content_info_series():

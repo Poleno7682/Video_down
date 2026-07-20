@@ -473,18 +473,32 @@ def resolve_rezka_stream(
     return stream.videos[target_quality][0], title
 
 
+def _display_title(rezka) -> str:
+    """"<Title> (<Year>)", e.g. "Форрест Гамп (1994)" — just the bare title
+    if HdRezkaApi couldn't find a release year on the page (releaseYear is
+    itself best-effort, scraped from a "/year/<N>/" link that isn't always
+    present)."""
+    try:
+        year = rezka.releaseYear
+    except Exception:
+        year = None
+    return f"{rezka.name} ({year})" if year else rezka.name
+
+
 def _title_with_translator(rezka, translator_id: int | None) -> str:
-    """"<Title>, <Translator>" for the caption, e.g. "Форрест Гамп, Дубляж" —
-    falls back to the bare title if the translator name can't be resolved
-    (translator_id unset because there was only one to begin with, or
-    rezka.translators itself fails for a page whose markup neither
-    _sanitize_translators_list nor HdRezkaApi's own auto-detect handles)."""
+    """"<Title> (<Year>), <Translator>" for the caption, e.g. "Форрест Гамп
+    (1994), Дубляж" — falls back to the bare (year-suffixed) title if the
+    translator name can't be resolved (translator_id unset because there
+    was only one to begin with, or rezka.translators itself fails for a
+    page whose markup neither _sanitize_translators_list nor HdRezkaApi's
+    own auto-detect handles)."""
+    title = _display_title(rezka)
     try:
         translators = rezka.translators
         name = translators[translator_id]["name"] if translator_id is not None else next(iter(translators.values()))["name"]
     except Exception:
-        return rezka.name
-    return f"{rezka.name}, {name}" if name else rezka.name
+        return title
+    return f"{title}, {name}" if name else title
 
 
 @dataclass
@@ -529,13 +543,13 @@ def get_rezka_content_info(
         ) from exc
 
     if content_type == Movie:
-        return RezkaContentInfo(title=rezka.name, is_series=False, translators=translators)
+        return RezkaContentInfo(title=_display_title(rezka), is_series=False, translators=translators)
     if content_type == TVSeries:
         try:
             episodes_info = rezka.episodesInfo
         except Exception as exc:
             raise RezkaResolveError(f"Не удалось получить список серий: {exc}") from exc
         return RezkaContentInfo(
-            title=rezka.name, is_series=True, translators=translators, episodes_info=episodes_info
+            title=_display_title(rezka), is_series=True, translators=translators, episodes_info=episodes_info
         )
     raise RezkaResolveError("Неизвестный тип контента на странице rezka.")
