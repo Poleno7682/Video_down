@@ -19,6 +19,7 @@ import time
 import urllib.parse
 
 from yt_dlp.utils import (
+    ExtractorError,
     get_elements_by_attribute,
     get_elements_html_by_attribute,
     extract_attributes,
@@ -159,8 +160,7 @@ class RezkaIE(InfoExtractor):
         )
         scriptData = re.compile(self._SCRIPT_REGEX).search(webpage)
         if not scriptData:
-            self.report_error("Cant find scriptData")
-            return {}
+            raise ExtractorError("Cant find scriptData", video_id=video_id, expected=True)
         video_type = scriptData.group(1)
         scriptTxt = "[" + re.sub(r", '([^']*)',", r', "\1",', scriptData.group(2)) + "]"
         scriptData = dict(zip(self._DICT_HEADERS, json.loads(scriptTxt)))
@@ -196,8 +196,7 @@ class RezkaIE(InfoExtractor):
                     self.report_warning(f"Could not fetch episode list for translator {trInfo.get('translator_id')}")
 
         if not trDict:
-            self.report_error("No matching translator found")
-            return {}
+            raise ExtractorError("No matching translator found", video_id=video_id, expected=True)
 
         translator_id = requested_translator if requested_translator in trDict else next(iter(trDict))
         selected = trDict[translator_id]
