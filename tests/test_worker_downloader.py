@@ -18,6 +18,7 @@ from app.worker.downloader import (
     _embed_subtitles_if_present,
     _extract_with_retry,
     _is_access_retry_error,
+    _is_timeout_retry_error,
     _probe_duration_seconds,
     _probe_stream_types,
     _probe_codec_names,
@@ -569,6 +570,36 @@ def test_extract_with_retry_retries_with_browser_headers_on_403():
     retry_opts = mock_cls.call_args_list[1][0][0]
     assert retry_opts["geo_bypass"] is True
     assert "User-Agent" in retry_opts["http_headers"]
+
+
+def test_is_timeout_retry_error_read_timed_out():
+    assert _is_timeout_retry_error(RuntimeError("Read timed out. (read timeout=30.0)")) is True
+
+
+def test_is_timeout_retry_error_unrelated():
+    assert _is_timeout_retry_error(RuntimeError("HTTP Error 403: Forbidden")) is False
+
+
+def test_extract_with_retry_retries_with_longer_timeout_on_read_timeout():
+    first_ydl = MagicMock()
+    first_ydl.__enter__ = MagicMock(return_value=first_ydl)
+    first_ydl.__exit__ = MagicMock(return_value=False)
+    first_ydl.extract_info.side_effect = DownloadError(
+        "Unable to download webpage: HTTPSConnectionPool(host='stream.voidboost.cc', port=443): "
+        "Read timed out. (read timeout=30.0)"
+    )
+
+    second_ydl = MagicMock()
+    second_ydl.__enter__ = MagicMock(return_value=second_ydl)
+    second_ydl.__exit__ = MagicMock(return_value=False)
+    second_ydl.extract_info.return_value = {"title": "retried"}
+
+    with patch("app.worker.downloader.YoutubeDL", side_effect=[first_ydl, second_ydl]) as mock_cls:
+        result = _extract_with_retry("https://x.test/v", {"format": "best", "socket_timeout": 30})
+
+    assert result == {"title": "retried"}
+    retry_opts = mock_cls.call_args_list[1][0][0]
+    assert retry_opts["socket_timeout"] == 90
 
 
 # ---------------------------------------------------------------------------

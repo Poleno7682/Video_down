@@ -47,6 +47,18 @@ _ACCESS_RETRY_MARKERS = (
     "not available in your country",
 )
 
+# A slow/throttled CDN (seen on rezka.ag's resolved stream hosts, e.g.
+# voidboost.cc) can simply take longer than socket_timeout to answer the
+# very first request without there being anything actually wrong with the
+# link — worth one retry with a longer timeout before giving up, same as
+# the access-error retry below but for a different failure shape.
+_TIMEOUT_RETRY_MARKERS = (
+    "read timed out",
+    "timed out",
+    "connection timed out",
+)
+_TIMEOUT_RETRY_SOCKET_TIMEOUT = 90
+
 _BROWSER_RETRY_HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -157,18 +169,32 @@ def _is_access_retry_error(exc: Exception) -> bool:
     return any(marker in text for marker in _ACCESS_RETRY_MARKERS)
 
 
+def _is_timeout_retry_error(exc: Exception) -> bool:
+    text = str(exc).lower()
+    return any(marker in text for marker in _TIMEOUT_RETRY_MARKERS)
+
+
 def _extract_with_retry(url: str, opts: dict) -> dict:
-    """Download via yt-dlp, retrying once with browser-like headers on 403/410/429/geo errors."""
+    """Download via yt-dlp, retrying once with browser-like headers on 403/410/429/geo
+    errors, or once with a longer socket timeout on a read/connection timeout."""
     try:
         with YoutubeDL(opts) as ydl:
             return ydl.extract_info(url, download=True) or {}
     except DownloadError as exc:
-        if not _is_access_retry_error(exc):
+        if _is_access_retry_error(exc):
+            logger.info("Access error for %s, retrying with browser-like headers", url)
+            retry_opts = dict(opts)
+            retry_opts["http_headers"] = {**opts.get("http_headers", {}), **_BROWSER_RETRY_HEADERS}
+            retry_opts["geo_bypass"] = True
+        elif _is_timeout_retry_error(exc):
+            logger.info(
+                "Timeout for %s, retrying with a longer socket timeout (%ds)",
+                url, _TIMEOUT_RETRY_SOCKET_TIMEOUT,
+            )
+            retry_opts = dict(opts)
+            retry_opts["socket_timeout"] = _TIMEOUT_RETRY_SOCKET_TIMEOUT
+        else:
             raise
-        logger.info("Access error for %s, retrying with browser-like headers", url)
-        retry_opts = dict(opts)
-        retry_opts["http_headers"] = {**opts.get("http_headers", {}), **_BROWSER_RETRY_HEADERS}
-        retry_opts["geo_bypass"] = True
         with YoutubeDL(retry_opts) as ydl:
             return ydl.extract_info(url, download=True) or {}
 
