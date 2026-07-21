@@ -9,8 +9,7 @@ from typing import Callable, Protocol
 from sqlalchemy.exc import OperationalError
 
 from app.core.config import Settings, get_settings
-from app.db.models import DownloadRequest, DownloadStatus, UserGoogleToken
-from app.db.repository import CookieRepository, Repository
+from app.db.models import DownloadRequest, DownloadStatus, TelegramFileType, UserGoogleToken, Video
 from app.db.session import ScopedRepository
 from app.services.cleanup import cleanup_stale_downloads as _cleanup_stale_downloads
 from app.services.google_oauth import generate_youtube_cookies, refresh_access_token
@@ -18,8 +17,10 @@ from app.services.rate_limiter import RateLimiter
 from app.services.redis_client import get_redis
 from app.services.runtime_config import get_limit
 from app.utils.caption import get_caption
-from app.utils.platforms import YOUTUBE, detect_platform
-from app.utils.rezka import RezkaResolveError, is_rezka_url
+from app.utils.platforms import FACEBOOK, INSTAGRAM, TIKTOK, YOUTUBE, detect_platform
+from app.utils.proxy_check import ANTI_BOT_MARKERS
+from app.utils.rezka import RezkaResolveError
+from app.utils.site_behavior import site_behavior
 from app.worker.celery_app import celery_app
 from app.worker.downloader import (
     COMPRESSION_TIMEOUT,
@@ -38,11 +39,10 @@ from app.worker.telegram_sender import TelegramSender, get_default_sender
 logger = logging.getLogger(__name__)
 
 # Substrings that indicate yt-dlp needs (fresh) cookies / hit an anti-bot wall.
-_COOKIE_ERROR_MARKERS = (
-    "sign in to confirm",
-    "confirm you're not a bot",
-    "confirm you are not a bot",
-    "confirm you’re not a bot",  # typographic apostrophe from yt-dlp
+# Starts from the same base anti-bot markers app.utils.proxy_check uses to
+# vet a proxy on /addproxy, extended with markers specific to cookie/auth
+# failures during an actual download.
+_COOKIE_ERROR_MARKERS = ANTI_BOT_MARKERS + (
     "--cookies",
     "cookies-from-browser",
     "login required",
@@ -89,19 +89,40 @@ _REZKA_CDN_FAILURE = (
     "попробуйте другую озвучку (отправьте ссылку заново)."
 )
 
-_COOKIE_FAILURE = (
-    "❌ YouTube требует ваши cookies (защита от ботов).\n\n"
-    "Экспортируйте cookies в формате Netscape (cookies.txt) из браузера, где вы вошли "
-    "в аккаунт, и пришлите файл боту под именем <code>youtube.txt</code>.\n"
-    "Подробнее: /cookies"
-)
+# Proper-case brand names for the cookie-failure messages below. Only
+# platforms detect_platform() can return (and that the /cookies upload flow
+# accepts, see app.bot.routers.cookies) belong here — anything else falls
+# back to _GENERIC_FAILURE rather than naming a platform we can't be sure of.
+_PLATFORM_DISPLAY_NAMES: dict[str, str] = {
+    YOUTUBE: "YouTube",
+    INSTAGRAM: "Instagram",
+    TIKTOK: "TikTok",
+    FACEBOOK: "Facebook",
+}
 
-_STALE_COOKIE_FAILURE = (
-    "❌ Ваши YouTube cookies устарели — YouTube их сбросил.\n\n"
-    "Экспортируйте <b>свежий</b> cookies.txt из браузера, где вы залогинены, "
-    "и пришлите файл <code>youtube.txt</code> заново.\n"
-    "Подробнее: /cookies"
-)
+
+def _cookie_failure_message(platform: str | None) -> str:
+    name = _PLATFORM_DISPLAY_NAMES.get(platform or "")
+    if not name:
+        return _GENERIC_FAILURE
+    return (
+        f"❌ {name} требует ваши cookies (защита от ботов).\n\n"
+        "Экспортируйте cookies в формате Netscape (cookies.txt) из браузера, где вы вошли "
+        f"в аккаунт, и пришлите файл боту под именем <code>{platform}.txt</code>.\n"
+        "Подробнее: /cookies"
+    )
+
+
+def _stale_cookie_failure_message(platform: str | None) -> str:
+    name = _PLATFORM_DISPLAY_NAMES.get(platform or "")
+    if not name:
+        return _GENERIC_FAILURE
+    return (
+        f"❌ Ваши {name} cookies устарели — {name} их сбросил.\n\n"
+        "Экспортируйте <b>свежий</b> cookies.txt из браузера, где вы залогинены, "
+        f"и пришлите файл <code>{platform}.txt</code> заново.\n"
+        "Подробнее: /cookies"
+    )
 
 _TOO_LARGE_FAILURE = (
     "⚠️ Файл слишком большой для Telegram (лимит 50 МБ).\n\n"
@@ -159,7 +180,56 @@ class _GoogleCookieRepo(Protocol):
     def set_user_cookies(self, user_id: int, platform: str, cookies_text: str) -> None: ...
 
 
-def _materialize_user_cookies(repo: CookieRepository, user_id: int, url: str) -> Path | None:
+# Narrow, per-helper repository protocols instead of typing every helper
+# against the full ~24-method Repository facade it's handed at runtime
+# (ScopedRepository, structurally compatible but not a Repository
+# subclass — these protocols describe exactly what each helper touches,
+# so that's true by construction rather than by convention).
+class _RequestStatusRepo(Protocol):
+    def update_request_status(
+        self, request_id: int, status: DownloadStatus, error: str | None = None, finished: bool = False,
+    ) -> None: ...
+
+
+class _UserCookiesRepo(Protocol):
+    def get_user_cookies(self, user_id: int, platform: str) -> str | None: ...
+
+
+class _TaskFailureRepo(_RequestStatusRepo, Protocol):
+    def mark_video_failed(self, video_id: int, error: str) -> None: ...
+
+
+class _CacheServingRepo(_RequestStatusRepo, Protocol):
+    def get_ready_video(self, url_hash: str, quality: str) -> Video | None: ...
+
+
+class _ProxyPoolRepo(Protocol):
+    def get_enabled_proxy_urls(self) -> list[str]: ...
+
+
+class _ProxyResultRepo(Protocol):
+    def record_proxy_success(self, url: str) -> None: ...
+    def record_proxy_failure(self, url: str) -> None: ...
+
+
+class _DownloadPrepRepo(_RequestStatusRepo, _UserCookiesRepo, Protocol):
+    pass
+
+
+class _MediaUploadRepo(_RequestStatusRepo, Protocol):
+    def mark_video_ready(
+        self,
+        video_id: int,
+        title: str | None,
+        telegram_file_id: str,
+        telegram_file_unique_id: str | None,
+        telegram_file_type: TelegramFileType,
+        local_file_path: str | None,
+        file_size_bytes: int | None,
+    ) -> None: ...
+
+
+def _materialize_user_cookies(repo: _UserCookiesRepo, user_id: int, url: str) -> Path | None:
     """Write the user's stored cookies for the URL's platform to a temp file.
 
     Returns the path (caller must delete it) or None if the user has no cookies
@@ -203,14 +273,41 @@ def _try_refresh_google_cookies(repo: _GoogleCookieRepo, user_id: int) -> bool:
         return False
 
 
+def _maybe_refresh_google_cookies(
+    repo: _GoogleCookieRepo, redis, request_id: int, user_id: int, exc: Exception, cookies_were_used: bool,
+) -> bool:
+    """Attempt exactly one Google-cookie refresh per _GOOGLE_REFRESH_COOLDOWN
+    window when a failed download looks like it was caused by stale
+    cookies/a YouTube challenge. Returns whether a refresh actually
+    happened, so the caller can tell the user to just retry instead of
+    showing a generic failure message.
+    """
+    refresh_key = _google_refresh_key(user_id)
+    try:
+        recently_refreshed = bool(redis.exists(refresh_key))
+        cookie_refreshed = (
+            not recently_refreshed
+            and cookies_were_used
+            and (_is_cookie_error(exc) or _is_youtube_challenge_error(exc))
+            and _try_refresh_google_cookies(repo, user_id)
+        )
+        if cookie_refreshed:
+            redis.setex(refresh_key, _GOOGLE_REFRESH_COOLDOWN, "1")
+        return cookie_refreshed
+    except Exception:
+        logger.exception("Cookie-refresh check failed for request %s", request_id)
+        return False
+
+
 def _handle_task_failure(
     sender: TelegramSender,
-    repo: Repository,
+    repo: _TaskFailureRepo,
     request_id: int,
     chat_id: int,
     status_message_id: int | None,
     video_id: int | None,
     exc: Exception,
+    url: str,
     *,
     cookies_were_used: bool = False,
     cookie_refreshed: bool = False,
@@ -243,7 +340,12 @@ def _handle_task_failure(
     elif isinstance(exc, MediaValidationError):
         message = _CORRUPT_MEDIA_FAILURE
     elif _is_cookie_error(exc) or _is_youtube_challenge_error(exc):
-        message = _STALE_COOKIE_FAILURE if cookies_were_used else _COOKIE_FAILURE
+        platform = detect_platform(url)
+        message = (
+            _stale_cookie_failure_message(platform)
+            if cookies_were_used
+            else _cookie_failure_message(platform)
+        )
     elif is_rezka_resolve_error:
         message = _REZKA_STREAM_FAILURE
     elif is_rezka:
@@ -255,7 +357,7 @@ def _handle_task_failure(
 
 def _try_serve_from_cache(
     sender: TelegramSender,
-    repo: Repository,
+    repo: _CacheServingRepo,
     req: DownloadRequest,
     request_id: int,
     settings: Settings,
@@ -266,7 +368,7 @@ def _try_serve_from_cache(
         return False
     repo.update_request_status(request_id, DownloadStatus.sending)
     sender.edit_status(req.chat_id, req.status_message_id, "⚡ Нашёл готовый Telegram file_id. Отправляю...")
-    caption_title = ready_video.title if is_rezka_url(req.normalized_url) else None
+    caption_title = ready_video.title if site_behavior(req.normalized_url).caption_uses_resolved_title else None
     sender.send_cached(req.chat_id, ready_video.telegram_file_id, ready_video.telegram_file_type, get_caption(settings, caption_title))
     repo.update_request_status(request_id, DownloadStatus.done, finished=True)
     sender.edit_status(req.chat_id, req.status_message_id, "✅ Отправлено из кэша.")
@@ -317,7 +419,7 @@ def _build_transcode_progress_hook(
 
 def _check_user_rate_limit(
     sender: TelegramSender,
-    repo: Repository,
+    repo: _RequestStatusRepo,
     limiter: RateLimiter,
     settings: Settings,
     redis,
@@ -346,7 +448,7 @@ def _check_user_rate_limit(
 
 def _acquire_video_lock_or_reject(
     sender: TelegramSender,
-    repo: Repository,
+    repo: _RequestStatusRepo,
     limiter: RateLimiter,
     request_id: int,
     chat_id: int,
@@ -375,7 +477,7 @@ def _acquire_video_lock_or_reject(
     return False
 
 
-def _resolve_proxies(repo: Repository, settings: Settings, url: str) -> list[str]:
+def _resolve_proxies(repo: _ProxyPoolRepo, settings: Settings, url: str) -> list[str]:
     """Proxies to try, least-failed first. Falls back to YTDLP_PROXY when the
     admin-managed pool (DB) is empty, so an env-only setup keeps working.
 
@@ -390,15 +492,17 @@ def _resolve_proxies(repo: Repository, settings: Settings, url: str) -> list[str
       dedicated route, tried after direct has already failed — instead of
       first burning through the whole unrelated YouTube pool.
     """
-    if is_rezka_url(url):
-        return [settings.rezka_vpn_proxy_url] if settings.rezka_vpn_proxy_url else []
+    dedicated_setting = site_behavior(url).dedicated_proxy_setting
+    if dedicated_setting:
+        proxy_url = getattr(settings, dedicated_setting)
+        return [proxy_url] if proxy_url else []
     if detect_platform(url) != YOUTUBE:
         return []
     db_proxies = repo.get_enabled_proxy_urls()
     return db_proxies if db_proxies else ([settings.ytdlp_proxy] if settings.ytdlp_proxy else [])
 
 
-def _record_proxy_result(repo: Repository, request_id: int) -> Callable[[str | None, bool], None]:
+def _record_proxy_result(repo: _ProxyResultRepo, request_id: int) -> Callable[[str | None, bool], None]:
     def _record(proxy: str | None, success: bool) -> None:
         if not proxy:
             return
@@ -414,7 +518,7 @@ def _record_proxy_result(repo: Repository, request_id: int) -> Callable[[str | N
 
 def _reject_active_livestream(
     sender: TelegramSender,
-    repo: Repository,
+    repo: _RequestStatusRepo,
     request_id: int,
     chat_id: int,
     status_message_id: int | None,
@@ -434,7 +538,9 @@ def _reject_active_livestream(
     ~30-90s cycling the whole proxy pool for a foregone conclusion on every
     single rezka request.
     """
-    if is_rezka_url(normalized_url) or not is_active_livestream(normalized_url, proxies, on_proxy_result):
+    if site_behavior(normalized_url).skip_livestream_check or not is_active_livestream(
+        normalized_url, proxies, on_proxy_result
+    ):
         return True
     repo.update_request_status(
         request_id,
@@ -448,7 +554,7 @@ def _reject_active_livestream(
 
 def _download_and_prepare_media(
     sender: TelegramSender,
-    repo: Repository,
+    repo: _DownloadPrepRepo,
     request_id: int,
     user_id: int,
     chat_id: int,
@@ -496,7 +602,7 @@ def _download_and_prepare_media(
 
 def _enforce_size_limit(
     sender: TelegramSender,
-    repo: Repository,
+    repo: _RequestStatusRepo,
     request_id: int,
     chat_id: int,
     status_message_id: int | None,
@@ -546,7 +652,7 @@ def _enforce_size_limit(
 
 def _upload_and_cache(
     sender: TelegramSender,
-    repo: Repository,
+    repo: _MediaUploadRepo,
     req: DownloadRequest,
     request_id: int,
     file_path: Path,
@@ -560,7 +666,7 @@ def _upload_and_cache(
     sender.edit_status(req.chat_id, req.status_message_id, f"✅ Скачано {size_mb:.1f} MB. Отправляю...")
 
     title = info.get("title") if isinstance(info, dict) else None
-    caption_title = title if is_rezka_url(req.normalized_url) else None
+    caption_title = title if site_behavior(req.normalized_url).caption_uses_resolved_title else None
     width, height, duration = probe_video_dimensions(file_path)
     file_id, file_unique_id, file_type = sender.send_file(
         req.chat_id, file_path, get_caption(settings, caption_title), width=width, height=height, duration=duration
@@ -682,24 +788,12 @@ def process_download_request(self, request_id: int) -> None:
         # notify the user before the retry that fixes itself even runs.
         will_autoretry = isinstance(exc, _AUTORETRY_EXCEPTIONS) and self.request.retries < self.max_retries
         if not will_autoretry:
-            refresh_key = _google_refresh_key(user_id)
-            cookie_refreshed = False
-            try:
-                recently_refreshed = bool(redis.exists(refresh_key))
-                cookie_refreshed = (
-                    not recently_refreshed
-                    and cookies_were_used
-                    and (_is_cookie_error(exc) or _is_youtube_challenge_error(exc))
-                    and _try_refresh_google_cookies(repo, user_id)
-                )
-                if cookie_refreshed:
-                    redis.setex(refresh_key, _GOOGLE_REFRESH_COOLDOWN, "1")
-            except Exception:
-                logger.exception("Cookie-refresh check failed for request %s", request_id)
-
-            is_rezka = is_rezka_url(normalized_url)
+            cookie_refreshed = _maybe_refresh_google_cookies(
+                repo, redis, request_id, user_id, exc, cookies_were_used
+            )
+            is_rezka = site_behavior(normalized_url).has_custom_resolver
             _handle_task_failure(
-                sender, repo, request_id, chat_id, status_message_id, video_id, exc,
+                sender, repo, request_id, chat_id, status_message_id, video_id, exc, normalized_url,
                 cookies_were_used=cookies_were_used,
                 cookie_refreshed=cookie_refreshed,
                 is_rezka=is_rezka,

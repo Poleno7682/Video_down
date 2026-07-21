@@ -9,8 +9,8 @@ import pytest
 from app.db.models import DownloadRequest, DownloadStatus, TelegramFileType
 from app.utils.caption import DEFAULT_CAPTION, get_caption
 from app.worker.tasks import (
-    _COOKIE_FAILURE,
-    _STALE_COOKIE_FAILURE,
+    _cookie_failure_message,
+    _stale_cookie_failure_message,
     _GENERIC_FAILURE,
     _REZKA_STREAM_FAILURE,
     _REZKA_CDN_FAILURE,
@@ -86,7 +86,7 @@ class TestHandleTaskFailure:
         sender = MagicMock()
         exc = ValueError("test error")
 
-        _handle_task_failure(sender, repo, 42, 100, 200, 1, exc)
+        _handle_task_failure(sender, repo, 42, 100, 200, 1, exc, "https://example.com/v")
 
         repo.update_request_status.assert_called_once_with(
             42, DownloadStatus.failed, error="ValueError: test error", finished=True
@@ -97,40 +97,75 @@ class TestHandleTaskFailure:
     def test_no_video_id_skips_mark_failed(self):
         repo = MagicMock()
         sender = MagicMock()
-        _handle_task_failure(sender, repo, 1, 100, 200, None, RuntimeError("oops"))
+        _handle_task_failure(sender, repo, 1, 100, 200, None, RuntimeError("oops"), "https://example.com/v")
         repo.mark_video_failed.assert_not_called()
 
     def test_error_message_format(self):
         repo = MagicMock()
         sender = MagicMock()
-        _handle_task_failure(sender, repo, 5, 100, 200, None, RuntimeError("bad network"))
+        _handle_task_failure(
+            sender, repo, 5, 100, 200, None, RuntimeError("bad network"), "https://example.com/v"
+        )
         assert repo.update_request_status.call_args[1]["error"] == "RuntimeError: bad network"
 
     def test_cookie_error_shows_cookie_message(self):
         repo = MagicMock()
         sender = MagicMock()
         exc = RuntimeError("ERROR: Sign in to confirm you're not a bot. Use --cookies")
-        _handle_task_failure(sender, repo, 1, 100, 200, None, exc)
-        assert sender.edit_status.call_args[0][2] == _COOKIE_FAILURE
+        _handle_task_failure(sender, repo, 1, 100, 200, None, exc, "https://www.youtube.com/watch?v=x")
+        assert sender.edit_status.call_args[0][2] == _cookie_failure_message("youtube")
+
+    def test_cookie_error_for_tiktok_shows_tiktok_message(self):
+        """A TikTok "login required" failure must name TikTok and
+        tiktok.txt, not the hardcoded YouTube wording."""
+        repo = MagicMock()
+        sender = MagicMock()
+        exc = RuntimeError(
+            "ERROR: [TikTok] 123: This post may not be comfortable for some audiences. "
+            "Log in for access. Use --cookies-from-browser or --cookies for the authentication."
+        )
+        _handle_task_failure(sender, repo, 1, 100, 200, None, exc, "https://vt.tiktok.com/ZSXjNjAgH/")
+        message = sender.edit_status.call_args[0][2]
+        assert message == _cookie_failure_message("tiktok")
+        assert "TikTok" in message
+        assert "tiktok.txt" in message
+        assert "YouTube" not in message
 
     def test_stale_cookie_error_when_cookies_were_used(self):
         repo = MagicMock()
         sender = MagicMock()
         exc = RuntimeError("ERROR: Sign in to confirm you're not a bot. Use --cookies")
-        _handle_task_failure(sender, repo, 1, 100, 200, None, exc, cookies_were_used=True)
-        assert sender.edit_status.call_args[0][2] == _STALE_COOKIE_FAILURE
+        _handle_task_failure(
+            sender, repo, 1, 100, 200, None, exc, "https://www.youtube.com/watch?v=x",
+            cookies_were_used=True,
+        )
+        assert sender.edit_status.call_args[0][2] == _stale_cookie_failure_message("youtube")
 
     def test_generic_error_shows_generic_message(self):
         repo = MagicMock()
         sender = MagicMock()
-        _handle_task_failure(sender, repo, 1, 100, 200, None, RuntimeError("disk full"))
+        _handle_task_failure(
+            sender, repo, 1, 100, 200, None, RuntimeError("disk full"), "https://example.com/v"
+        )
+        assert sender.edit_status.call_args[0][2] == _GENERIC_FAILURE
+
+    def test_cookie_error_for_unknown_platform_falls_back_to_generic(self):
+        """A cookie-shaped error on a site outside the four supported cookie
+        platforms shouldn't misname a platform it can't identify."""
+        repo = MagicMock()
+        sender = MagicMock()
+        exc = RuntimeError("ERROR: Sign in to confirm you're not a bot. Use --cookies")
+        _handle_task_failure(sender, repo, 1, 100, 200, None, exc, "https://example.com/v")
         assert sender.edit_status.call_args[0][2] == _GENERIC_FAILURE
 
     def test_rezka_resolve_error_shows_rezka_translator_message(self):
         repo = MagicMock()
         sender = MagicMock()
         exc = RuntimeError("Не удалось получить поток видео: Failed to fetch stream!")
-        _handle_task_failure(sender, repo, 1, 100, 200, None, exc, is_rezka=True, is_rezka_resolve_error=True)
+        _handle_task_failure(
+            sender, repo, 1, 100, 200, None, exc, "https://rezka.ag/films/1.html",
+            is_rezka=True, is_rezka_resolve_error=True,
+        )
         assert sender.edit_status.call_args[0][2] == _REZKA_STREAM_FAILURE
 
     def test_rezka_non_resolve_error_shows_rezka_cdn_message(self):
@@ -140,7 +175,10 @@ class TestHandleTaskFailure:
         repo = MagicMock()
         sender = MagicMock()
         exc = RuntimeError("HTTPSConnectionPool(host='stream.voidboost.cc'): Read timed out.")
-        _handle_task_failure(sender, repo, 1, 100, 200, None, exc, is_rezka=True, is_rezka_resolve_error=False)
+        _handle_task_failure(
+            sender, repo, 1, 100, 200, None, exc, "https://rezka.ag/films/1.html",
+            is_rezka=True, is_rezka_resolve_error=False,
+        )
         assert sender.edit_status.call_args[0][2] == _REZKA_CDN_FAILURE
 
     def test_db_write_failure_still_notifies_user(self):
@@ -149,7 +187,9 @@ class TestHandleTaskFailure:
         repo = MagicMock()
         sender = MagicMock()
         repo.update_request_status.side_effect = RuntimeError("db still down")
-        _handle_task_failure(sender, repo, 1, 100, 200, None, RuntimeError("original error"))
+        _handle_task_failure(
+            sender, repo, 1, 100, 200, None, RuntimeError("original error"), "https://example.com/v"
+        )
         sender.edit_status.assert_called_once_with(100, 200, _GENERIC_FAILURE)
 
 
