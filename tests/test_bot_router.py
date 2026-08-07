@@ -189,6 +189,15 @@ def _make_session(repo):
     return session
 
 
+def _make_run_in_session(session):
+    """Stand-in for app.db.session.run_in_session: calls fn(session)
+    synchronously instead of via asyncio.to_thread, so tests stay
+    deterministic and don't need a real thread/event loop interaction."""
+    async def _run(fn):
+        return fn(session)
+    return _run
+
+
 # ---------------------------------------------------------------------------
 # start handler
 # ---------------------------------------------------------------------------
@@ -199,7 +208,7 @@ async def test_start_handler():
     message = _make_message()
     repo = MagicMock()
     session = _make_session(repo)
-    with patch("app.bot.routers.user.get_session", return_value=session), \
+    with patch("app.bot.routers.user.run_in_session", _make_run_in_session(session)), \
          patch("app.bot.routers.user.UserRepository", return_value=repo):
         await start(message)
     message.answer.assert_awaited_once_with(HELP_TEXT)
@@ -307,7 +316,7 @@ async def test_status_handler():
 
     with patch("app.bot.routers.user.get_settings", return_value=settings), \
          patch("app.bot.routers.user.get_redis", return_value=redis), \
-         patch("app.bot.routers.user.get_session", return_value=session), \
+         patch("app.bot.routers.user.run_in_session", _make_run_in_session(session)), \
          patch("app.bot.routers.user.RequestRepository", return_value=repo):
         await status(message)
 
@@ -1063,7 +1072,7 @@ async def test_upload_cookies_valid_youtube():
     settings = _make_settings()
     redis = _make_redis_mock()
 
-    with patch("app.bot.routers.cookies.get_session", return_value=session), \
+    with patch("app.bot.routers.cookies.run_in_session", _make_run_in_session(session)), \
          patch("app.bot.routers.cookies.CookieRepository", return_value=repo):
         await upload_cookies(message, bot)
 
@@ -1103,7 +1112,7 @@ async def test_upload_cookies_invalid_format_rejected():
     settings = _make_settings()
     redis = _make_redis_mock()
 
-    with patch("app.bot.routers.cookies.get_session", return_value=session), \
+    with patch("app.bot.routers.cookies.run_in_session", _make_run_in_session(session)), \
          patch("app.bot.routers.cookies.CookieRepository", return_value=repo):
         await upload_cookies(message, bot)
 
@@ -1145,7 +1154,7 @@ async def test_broadcast_to_all_text_uses_copy_message():
     repo.get_all_user_ids.return_value = [10, 20]
     session = _make_session(repo)
 
-    with patch("app.bot.routers.broadcast.get_session", return_value=session), \
+    with patch("app.bot.routers.broadcast.run_in_session", _make_run_in_session(session)), \
          patch("app.bot.routers.broadcast.UserRepository", return_value=repo), \
          patch("app.bot.routers.broadcast.asyncio.sleep", new=AsyncMock()):
         ok, failed, total = await _broadcast_to_all(bot, source)
@@ -1168,7 +1177,7 @@ async def test_broadcast_to_all_text_with_buttons_uses_send_message():
     repo.get_all_user_ids.return_value = [10]
     session = _make_session(repo)
 
-    with patch("app.bot.routers.broadcast.get_session", return_value=session), \
+    with patch("app.bot.routers.broadcast.run_in_session", _make_run_in_session(session)), \
          patch("app.bot.routers.broadcast.UserRepository", return_value=repo), \
          patch("app.bot.routers.broadcast.asyncio.sleep", new=AsyncMock()):
         ok, failed, total = await _broadcast_to_all(bot, source)
@@ -1190,7 +1199,7 @@ async def test_broadcast_to_all_counts_failures():
     repo.get_all_user_ids.return_value = [10, 20, 30]
     session = _make_session(repo)
 
-    with patch("app.bot.routers.broadcast.get_session", return_value=session), \
+    with patch("app.bot.routers.broadcast.run_in_session", _make_run_in_session(session)), \
          patch("app.bot.routers.broadcast.UserRepository", return_value=repo), \
          patch("app.bot.routers.broadcast.asyncio.sleep", new=AsyncMock()):
         ok, failed, total = await _broadcast_to_all(bot, source)
@@ -1253,16 +1262,21 @@ async def test_enqueue_season_download_creates_one_request_per_episode_and_chain
     repo.count_global_active_requests.return_value = 0
     video = MagicMock()
     video.id = 42
-    repo.get_or_create_video.return_value = video
+    repo.get_or_create_videos_bulk.side_effect = lambda rows: {
+        (row["url_hash"], row["quality"]): video for row in rows
+    }
     created = []
 
-    def _create_request(**kwargs):
-        req = MagicMock()
-        req.id = 100 + len(created)
-        created.append(kwargs)
-        return req
+    def _create_requests_bulk(rows):
+        reqs = []
+        for i, kwargs in enumerate(rows):
+            req = MagicMock()
+            req.id = 100 + i
+            created.append(kwargs)
+            reqs.append(req)
+        return reqs
 
-    repo.create_request.side_effect = _create_request
+    repo.create_requests_bulk.side_effect = _create_requests_bulk
 
     session = _make_session(repo)
     sig = MagicMock()
@@ -1283,10 +1297,12 @@ async def test_enqueue_season_download_creates_one_request_per_episode_and_chain
             56, 2, [1, 2, 3], "720p",
         )
 
-    assert repo.create_request.call_count == 3
+    assert repo.create_requests_bulk.call_count == 1
+    assert len(created) == 3
     assert mock_task.si.call_count == 3
     mock_chain.assert_called_once_with(sig, sig, sig)
     mock_chain.return_value.apply_async.assert_called_once()
+    repo.set_request_task_ids_bulk.assert_called_once()
     for kwargs in created:
         assert "rezka_tr=56" in kwargs["normalized_url"]
         assert "rezka_s=2" in kwargs["normalized_url"]
@@ -1317,8 +1333,10 @@ async def test_enqueue_season_download_respects_daily_limit():
     repo.count_global_active_requests.return_value = 0
     video = MagicMock()
     video.id = 42
-    repo.get_or_create_video.return_value = video
-    repo.create_request.side_effect = lambda **kwargs: MagicMock(id=200)
+    repo.get_or_create_videos_bulk.side_effect = lambda rows: {
+        (row["url_hash"], row["quality"]): video for row in rows
+    }
+    repo.create_requests_bulk.side_effect = lambda rows: [MagicMock(id=200) for _ in rows]
 
     session = _make_session(repo)
     sig = MagicMock()
@@ -1339,7 +1357,8 @@ async def test_enqueue_season_download_respects_daily_limit():
             56, 2, [1, 2, 3], "720p",
         )
 
-    assert repo.create_request.call_count == 1
+    assert repo.create_requests_bulk.call_count == 1
+    assert len(repo.create_requests_bulk.call_args[0][0]) == 1  # daily limit left only 1 episode
 
 
 @pytest.mark.asyncio
@@ -1366,5 +1385,5 @@ async def test_enqueue_season_download_global_limit_blocks():
             56, 2, [1, 2, 3], "720p",
         )
 
-    repo.create_request.assert_not_called()
+    repo.create_requests_bulk.assert_not_called()
     assert "⚠️" in message.answer.call_args[0][0]

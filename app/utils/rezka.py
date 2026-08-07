@@ -10,6 +10,8 @@ import requests
 from HdRezkaApi import HdRezkaApi
 from HdRezkaApi.types import Movie, TVSeries
 
+from app.utils.http_headers import MODERN_CHROME_HEADERS
+
 logger = logging.getLogger(__name__)
 
 # Query params appended to the base rezka URL (after normalize_url, which
@@ -35,17 +37,12 @@ _QUALITY_FALLBACK_ORDER = ["1080p Ultra", "1080p", "720p", "480p", "360p"]
 
 # HdRezkaApi's own default User-Agent is a Chrome build from 2020 — a
 # plausible bot-detection trigger on its own. Use a current one, matching
-# what app.worker.downloader's browser-retry fallback already uses. The
-# headless browser (when the anti-bot bypass is enabled) is also launched
-# with this same UA, since cookies earned under one UA can get rejected by
-# a server checking they're paired with the UA that requested them.
-_HEADERS = {
-    "User-Agent": (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-        "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
-    ),
-    "Accept-Language": "en-US,en;q=0.9",
-}
+# what app.worker.downloader's browser-retry fallback already uses (shared
+# via app.utils.http_headers). The headless browser (when the anti-bot
+# bypass is enabled) is also launched with this same UA, since cookies
+# earned under one UA can get rejected by a server checking they're paired
+# with the UA that requested them.
+_HEADERS = MODERN_CHROME_HEADERS
 
 # The title rezka.ag's anti-bot interstitial (Anubis — a proof-of-work
 # challenge, not a Cloudflare-style managed challenge) shows while its
@@ -326,16 +323,19 @@ def _sanitize_translators_list(rezka) -> None:
             )
             with_id = hoisted
         else:
-            # Nothing to recover — don't blindly wipe the whole list on a
-            # guess; log a sample of the actual HTML so the real shape can
-            # be special-cased properly instead of destroying data.
+            # Nothing to recover. Log a sample of the actual HTML so the
+            # real shape can be special-cased properly later, but still
+            # strip every child below — leaving them in place makes
+            # HdRezkaApi's own parser crash with an unhandled KeyError on
+            # the first child (seen in production), which is worse than
+            # reporting zero translators for this page.
             sample = "".join(str(c) for c in children[:3])
             logger.info(
                 "rezka translators-list: no children have data-translator_id at all "
-                "(%d children) — leaving as-is. Sample HTML: %s",
+                "(%d children) — stripping all of them. Sample HTML: %s",
                 len(children), sample[:1500],
             )
-            return
+            with_id = []
 
     if len(with_id) == len(children):
         return  # already clean, nothing to do

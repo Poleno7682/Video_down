@@ -88,7 +88,8 @@ def revoke_token(token: str) -> None:
     data = urllib.parse.urlencode({"token": token}).encode()
     req = urllib.request.Request(_REVOKE_URL, data=data)
     try:
-        urllib.request.urlopen(req, timeout=10)
+        with urllib.request.urlopen(req, timeout=10):
+            pass
     except Exception:
         pass
 
@@ -114,10 +115,11 @@ def generate_youtube_cookies(access_token: str) -> str:
         ("Accept-Language", "en-US,en;q=0.5"),
     ]
 
-    opener.open(
+    with opener.open(
         "https://www.youtube.com/signin?action_handle_signin=true&hl=en&service=youtube",
         timeout=30,
-    )
+    ):
+        pass
 
     lines = ["# Netscape HTTP Cookie File\n"]
     for cookie in jar:

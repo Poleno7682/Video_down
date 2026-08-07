@@ -20,8 +20,24 @@ from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 from app.db.utils import utcnow
 
 
+# Этот проект живёт в БД, общей как минимум с одним другим, не связанным
+# проектом (см. docs/db-table-namespacing.md). Любая таблица без этого
+# суффикса рискует однажды столкнуться по имени с таблицей другого проекта.
+TABLE_SUFFIX = "_video_bot"
+
+
 class Base(DeclarativeBase):
-    pass
+    def __init_subclass__(cls, **kwargs) -> None:
+        # Check before SQLAlchemy's own __init_subclass__ maps the class, so
+        # a bad name fails before a Table object is ever registered into
+        # Base.metadata.
+        tablename = cls.__dict__.get("__tablename__")
+        if tablename is not None and not tablename.endswith(TABLE_SUFFIX):
+            raise ValueError(
+                f"{cls.__name__}.__tablename__ = {tablename!r} must end with "
+                f"the {TABLE_SUFFIX!r} suffix (see docs/db-table-namespacing.md)"
+            )
+        super().__init_subclass__(**kwargs)
 
 
 class DownloadStatus(str, enum.Enum):
@@ -41,7 +57,7 @@ class TelegramFileType(str, enum.Enum):
 
 
 class User(Base):
-    __tablename__ = "users"
+    __tablename__ = "users_video_bot"
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
     username: Mapped[str | None] = mapped_column(String(255), nullable=True)
@@ -60,7 +76,7 @@ class UserCookies(Base):
     The worker materializes a temporary cookiefile at download time.
     """
 
-    __tablename__ = "user_cookies"
+    __tablename__ = "user_cookies_video_bot"
     __table_args__ = (
         UniqueConstraint("user_id", "platform", name="uq_user_cookies_user_platform"),
         Index("idx_user_cookies_user", "user_id"),
@@ -76,7 +92,7 @@ class UserCookies(Base):
 
 
 class Video(Base):
-    __tablename__ = "videos"
+    __tablename__ = "videos_video_bot"
     __table_args__ = (
         UniqueConstraint("url_hash", "quality", name="uq_video_url_quality"),
         Index("idx_video_url_hash", "url_hash"),
@@ -106,7 +122,7 @@ class Video(Base):
 class UserGoogleToken(Base):
     """Google OAuth2 refresh token for automatic YouTube cookie renewal."""
 
-    __tablename__ = "user_google_tokens"
+    __tablename__ = "user_google_tokens_video_bot"
     __table_args__ = (
         UniqueConstraint("user_id", name="uq_google_token_user"),
     )
@@ -129,7 +145,7 @@ class Proxy(Base):
     the rotation instead of being tried first on every request.
     """
 
-    __tablename__ = "proxies"
+    __tablename__ = "proxies_video_bot"
     __table_args__ = (
         UniqueConstraint("url", name="uq_proxy_url"),
     )
@@ -143,11 +159,45 @@ class Proxy(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow, nullable=False)
 
 
+class TorrentRequest(Base):
+    """One magnet-link download. Deliberately separate from Video/DownloadRequest:
+    a torrent isn't "a video at a quality" — it's an arbitrary set of files with
+    no caching/reuse concept, since the bot deletes everything right after
+    sending it (see app.worker.tasks.process_torrent_request).
+    """
+
+    __tablename__ = "torrent_requests_video_bot"
+    __table_args__ = (
+        Index("idx_torrent_request_user_status", "user_id", "status"),
+        Index("idx_torrent_request_status", "status"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    chat_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    message_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    status_message_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+
+    magnet_uri: Mapped[str] = mapped_column(Text, nullable=False)
+    info_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    name: Mapped[str | None] = mapped_column(Text, nullable=True)
+    files_sent: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+
+    status: Mapped[DownloadStatus] = mapped_column(Enum(DownloadStatus), default=DownloadStatus.queued, nullable=False)
+    celery_task_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow, nullable=False)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
 class DownloadRequest(Base):
-    __tablename__ = "download_requests"
+    __tablename__ = "download_requests_video_bot"
     __table_args__ = (
         Index("idx_request_user_status", "user_id", "status"),
         Index("idx_request_video_status", "video_id", "status"),
+        Index("idx_request_status", "status"),
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
@@ -158,7 +208,7 @@ class DownloadRequest(Base):
 
     video_id: Mapped[int | None] = mapped_column(
         Integer,
-        ForeignKey("videos.id", ondelete="SET NULL", name="fk_dr_video_id"),
+        ForeignKey("videos_video_bot.id", ondelete="SET NULL", name="fk_dr_video_id"),
         nullable=True,
     )
     original_url: Mapped[str] = mapped_column(Text, nullable=False)

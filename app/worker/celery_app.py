@@ -30,12 +30,21 @@ celery_app.conf.update(
 
     task_routes={
         "app.worker.tasks.process_download_request": {"queue": "downloads"},
+        "app.worker.tasks.process_torrent_request": {"queue": "downloads"},
     },
 
     beat_schedule={
         "cleanup-stale-downloads": {
             "task": "app.worker.tasks.cleanup_stale_downloads",
             "schedule": 3600.0,  # hourly
+        },
+        "reconcile-stuck-download-requests": {
+            "task": "app.worker.tasks.reconcile_stuck_download_requests",
+            "schedule": 600.0,  # every 10 min — a stuck row blocks that user's queue slot until cleared
+        },
+        "reconcile-stuck-torrent-download-requests": {
+            "task": "app.worker.tasks.reconcile_stuck_torrent_download_requests",
+            "schedule": 600.0,  # every 10 min — same reasoning, torrent pipeline's own table
         },
     },
 )

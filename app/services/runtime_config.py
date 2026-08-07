@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from redis import Redis
 
 from app.core.config import Settings
+from app.services.redis_ttl import clear_ttl, get_ttl, set_ttl
 
 _LIMIT_PREFIX = "runtime_limit:"
 _AWAITING_PREFIX = "admin_awaiting_limit:"
@@ -97,15 +98,12 @@ def format_value(field: str, value: int) -> str:
 # ---------------------------------------------------------------------------
 
 def set_awaiting(admin_id: int, field: str, redis: Redis) -> None:
-    redis.setex(f"{_AWAITING_PREFIX}{admin_id}", _AWAITING_TTL, field)
+    set_ttl(redis, f"{_AWAITING_PREFIX}{admin_id}", field, _AWAITING_TTL)
 
 
 def get_awaiting(admin_id: int, redis: Redis) -> str | None:
-    raw = redis.get(f"{_AWAITING_PREFIX}{admin_id}")
-    if raw is None:
-        return None
-    return raw.decode() if isinstance(raw, bytes) else raw
+    return get_ttl(redis, f"{_AWAITING_PREFIX}{admin_id}")
 
 
 def clear_awaiting(admin_id: int, redis: Redis) -> None:
-    redis.delete(f"{_AWAITING_PREFIX}{admin_id}")
+    clear_ttl(redis, f"{_AWAITING_PREFIX}{admin_id}")

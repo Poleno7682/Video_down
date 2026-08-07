@@ -7,7 +7,7 @@ from aiogram.types import CallbackQuery, Message
 from app.bot.access import _check_access
 from app.core.config import get_settings
 from app.db.repository import RequestRepository, UserRepository
-from app.db.session import get_session
+from app.db.session import run_in_session
 from app.keyboards.quality import quality_keyboard
 from app.services.rate_limiter import RateLimiter, check_rate_limit
 from app.services.redis_client import get_redis
@@ -28,12 +28,11 @@ HELP_TEXT = (
 
 @router.message(Command("start", "help"))
 async def start(message: Message) -> None:
-    with get_session() as session:
-        UserRepository(session).upsert_user(
-            user_id=message.from_user.id,
-            username=message.from_user.username,
-            first_name=message.from_user.first_name,
-        )
+    await run_in_session(lambda session: UserRepository(session).upsert_user(
+        user_id=message.from_user.id,
+        username=message.from_user.username,
+        first_name=message.from_user.first_name,
+    ))
     await message.answer(HELP_TEXT)
 
 
@@ -78,11 +77,15 @@ async def status(message: Message) -> None:
         await message.answer(denial_msg)
         return
 
-    with get_session() as session:
+    def _query_counts(session):
         repo = RequestRepository(session)
-        user_active = repo.count_user_active_requests(message.from_user.id)
-        global_active = repo.count_global_active_requests()
-        today = repo.count_user_today_requests(message.from_user.id)
+        return (
+            repo.count_user_active_requests(message.from_user.id),
+            repo.count_global_active_requests(),
+            repo.count_user_today_requests(message.from_user.id),
+        )
+
+    user_active, global_active, today = await run_in_session(_query_counts)
 
     queue_limit = get_limit("user_queue_limit", settings, redis)
     global_limit = get_limit("global_queue_limit", settings, redis)

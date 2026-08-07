@@ -252,6 +252,22 @@ class TestVideoRepository:
         assert result is mock_video
         self.session.commit.assert_called()
 
+    def test_get_or_create_videos_bulk_empty_rows_skips_query(self):
+        result = self.repo.get_or_create_videos_bulk([])
+        assert result == {}
+        self.session.execute.assert_not_called()
+
+    def test_get_or_create_videos_bulk_keys_by_url_hash_and_quality(self):
+        v1 = Video(id=1, url_hash="h1", quality="720p")
+        v2 = Video(id=2, url_hash="h2", quality="720p")
+        self.session.execute.return_value.scalars.return_value.all.return_value = [v1, v2]
+        result = self.repo.get_or_create_videos_bulk([
+            {"original_url": "u1", "normalized_url": "u1", "url_hash": "h1", "quality": "720p"},
+            {"original_url": "u2", "normalized_url": "u2", "url_hash": "h2", "quality": "720p"},
+        ])
+        assert result == {("h1", "720p"): v1, ("h2", "720p"): v2}
+        self.session.commit.assert_called()
+
     def test_mark_video_ready(self):
         mock_video = Video(id=1, is_ready=False)
         self.session.get.return_value = mock_video
@@ -340,6 +356,43 @@ class TestRequestRepository:
             ms.commit.assert_called_once()
             ms.refresh.assert_called_once()
 
+    def test_create_requests_bulk_empty_rows_skips_insert(self):
+        result = self.repo.create_requests_bulk([])
+        assert result == []
+        self.session.add_all.assert_not_called()
+
+    def test_create_requests_bulk_defaults_status_to_queued(self):
+        rows = [
+            {
+                "user_id": 1, "chat_id": 2, "message_id": None, "status_message_id": None,
+                "video_id": 5, "original_url": "u1", "normalized_url": "u1",
+                "url_hash": "h1", "quality": "720p",
+            },
+            {
+                "user_id": 1, "chat_id": 2, "message_id": None, "status_message_id": None,
+                "video_id": 6, "original_url": "u2", "normalized_url": "u2",
+                "url_hash": "h2", "quality": "720p", "status": DownloadStatus.downloading,
+            },
+        ]
+        result = self.repo.create_requests_bulk(rows)
+        assert len(result) == 2
+        assert result[0].status == DownloadStatus.queued  # default applied
+        assert result[1].status == DownloadStatus.downloading  # explicit row value kept
+        self.session.add_all.assert_called_once_with(result)
+        self.session.commit.assert_called_once()
+
+    def test_set_request_task_ids_bulk_empty_mapping_skips_query(self):
+        self.repo.set_request_task_ids_bulk({})
+        self.session.execute.assert_not_called()
+
+    def test_set_request_task_ids_bulk_executes_and_expires(self):
+        self.repo.set_request_task_ids_bulk({1: "task-1", 2: "task-2"})
+        self.session.execute.assert_called_once()
+        params = self.session.execute.call_args[0][1]
+        assert params == [{"id": 1, "celery_task_id": "task-1"}, {"id": 2, "celery_task_id": "task-2"}]
+        self.session.commit.assert_called_once()
+        self.session.expire_all.assert_called_once()
+
     def test_get_request_found(self):
         mock_req = DownloadRequest(id=1)
         self.session.get.return_value = mock_req
@@ -401,6 +454,11 @@ class TestRequestRepository:
         self.session.execute.return_value.scalar_one.return_value = 0
         assert self.repo.has_active_video_job("hash", "720p") is False
 
+    def test_get_stale_active_requests(self):
+        stuck = MagicMock()
+        self.session.execute.return_value.scalars.return_value = [stuck]
+        assert self.repo.get_stale_active_requests(utcnow()) == [stuck]
+
 
 # ---------------------------------------------------------------------------
 # Repository (facade)
@@ -416,6 +474,7 @@ class TestRepositoryFacade:
         assert hasattr(repo, "create_request")
         assert hasattr(repo, "add_proxy")
         assert hasattr(repo, "get_enabled_proxy_urls")
+        assert hasattr(repo, "get_stale_active_requests")
 
     def test_repository_shares_session(self):
         session = _make_session()

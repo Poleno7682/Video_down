@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-from datetime import timedelta
+from datetime import datetime, timedelta
 
-from sqlalchemy import func, select
+from sqlalchemy import bindparam, func, select, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.orm import Session
 
@@ -11,6 +11,7 @@ from app.db.models import (
     DownloadStatus,
     Proxy,
     TelegramFileType,
+    TorrentRequest,
     User,
     UserCookies,
     UserGoogleToken,
@@ -253,6 +254,33 @@ class VideoRepository:
         self.session.commit()
         return video
 
+    def get_or_create_videos_bulk(self, rows: list[dict]) -> dict[tuple[str, str], Video]:
+        """Same upsert as get_or_create_video, batched into one round-trip
+        for a whole list of rows (each a dict with original_url,
+        normalized_url, url_hash, quality) instead of one INSERT per row —
+        e.g. queuing every episode of a season at once.
+
+        Returns a dict keyed by (url_hash, quality) rather than a list: a
+        multi-row INSERT ... ON CONFLICT DO UPDATE ... RETURNING doesn't
+        guarantee output order matches input order, so callers must look
+        their row up by its own unique key instead of by position.
+        """
+        if not rows:
+            return {}
+        now = utcnow()
+        stmt = (
+            insert(Video)
+            .values([{**row, "is_ready": False, "created_at": now, "updated_at": now} for row in rows])
+            .on_conflict_do_update(
+                constraint="uq_video_url_quality",
+                set_={"updated_at": now},
+            )
+            .returning(Video)
+        )
+        videos = self.session.execute(stmt).scalars().all()
+        self.session.commit()
+        return {(v.url_hash, v.quality): v for v in videos}
+
     def mark_video_ready(
         self,
         video_id: int,
@@ -334,6 +362,44 @@ class RequestRepository:
         self.session.refresh(req)
         return req
 
+    def create_requests_bulk(self, rows: list[dict]) -> list[DownloadRequest]:
+        """Same insert as create_request, batched into one round-trip for a
+        whole list of rows instead of one INSERT per row — e.g. queuing
+        every episode of a season at once. Each row dict takes the same
+        keys as create_request's kwargs (status optional, defaults to
+        queued). Returns the ORM objects with .id populated, in the same
+        order as rows (SQLAlchemy's insertmanyvalues batching guarantees
+        this for a plain multi-row INSERT with no ON CONFLICT clause).
+        """
+        if not rows:
+            return []
+        reqs = [DownloadRequest(**{"status": DownloadStatus.queued, **row}) for row in rows]
+        self.session.add_all(reqs)
+        self.session.commit()
+        return reqs
+
+    def set_request_task_ids_bulk(self, task_id_by_request_id: dict[int, str]) -> None:
+        """Bulk-set celery_task_id for several requests in one round-trip
+        (SQLAlchemy's ORM bulk UPDATE-by-primary-key) instead of one
+        UPDATE per id."""
+        if not task_id_by_request_id:
+            return
+        # .values() must name exactly the column(s) being updated — passing
+        # bare update(DownloadRequest) sets every mapped column instead,
+        # binding the ones missing from each params dict to NULL.
+        stmt = update(DownloadRequest).values(celery_task_id=bindparam("celery_task_id"))
+        self.session.execute(
+            stmt,
+            [{"id": rid, "celery_task_id": tid} for rid, tid in task_id_by_request_id.items()],
+        )
+        self.session.commit()
+        # The bulk-by-PK UPDATE above doesn't reliably refresh matching
+        # objects already loaded in this session's identity map (seen in
+        # practice: celery_task_id stayed unset in memory despite the row
+        # being correctly updated in the DB) — expire so any such object is
+        # re-fetched on next access instead of read stale.
+        self.session.expire_all()
+
     def get_request(self, request_id: int) -> DownloadRequest | None:
         return self.session.get(DownloadRequest, request_id)
 
@@ -391,6 +457,126 @@ class RequestRepository:
         )
         return int(self.session.execute(stmt).scalar_one()) > 0
 
+    def get_stale_active_requests(self, cutoff: datetime) -> list[DownloadRequest]:
+        """Requests still in ACTIVE_STATUSES that haven't been touched since
+        before cutoff — i.e. still "in flight" long after Celery's hard time
+        limit would have killed whatever worker process was running them.
+        """
+        stmt = select(DownloadRequest).where(
+            DownloadRequest.status.in_(ACTIVE_STATUSES),
+            DownloadRequest.updated_at < cutoff,
+        )
+        return list(self.session.execute(stmt).scalars())
+
+
+class TorrentRepository:
+    """Manages TorrentRequest lifecycle for magnet-link downloads.
+
+    Deliberately its own set of queue/limit counters rather than sharing
+    RequestRepository's — a torrent download is a different kind of job
+    (arbitrary file set, no quality, no caching) tracked in its own table,
+    so "requests today" / "active requests" are counted per-table just like
+    every other method here already is.
+    """
+
+    def __init__(self, session: Session) -> None:
+        self.session = session
+
+    def create_request(
+        self,
+        user_id: int,
+        chat_id: int,
+        message_id: int | None,
+        status_message_id: int | None,
+        magnet_uri: str,
+        status: DownloadStatus = DownloadStatus.queued,
+    ) -> TorrentRequest:
+        req = TorrentRequest(
+            user_id=user_id,
+            chat_id=chat_id,
+            message_id=message_id,
+            status_message_id=status_message_id,
+            magnet_uri=magnet_uri,
+            status=status,
+        )
+        self.session.add(req)
+        self.session.commit()
+        self.session.refresh(req)
+        return req
+
+    def get_request(self, request_id: int) -> TorrentRequest | None:
+        return self.session.get(TorrentRequest, request_id)
+
+    def set_request_task_id(self, request_id: int, task_id: str) -> None:
+        req = self.session.get(TorrentRequest, request_id)
+        if not req:
+            return
+        req.celery_task_id = task_id
+        self.session.commit()
+
+    def set_request_metadata(
+        self, request_id: int, info_hash: str | None, name: str | None,
+    ) -> None:
+        req = self.session.get(TorrentRequest, request_id)
+        if not req:
+            return
+        req.info_hash = info_hash
+        req.name = name
+        self.session.commit()
+
+    def set_files_sent(self, request_id: int, files_sent: int) -> None:
+        req = self.session.get(TorrentRequest, request_id)
+        if not req:
+            return
+        req.files_sent = files_sent
+        self.session.commit()
+
+    def update_request_status(
+        self,
+        request_id: int,
+        status: DownloadStatus,
+        error: str | None = None,
+        finished: bool = False,
+    ) -> None:
+        req = self.session.get(TorrentRequest, request_id)
+        if not req:
+            return
+        now = utcnow()
+        req.status = status
+        req.error = error
+        req.updated_at = now
+        if finished:
+            req.finished_at = now
+        self.session.commit()
+
+    def count_user_active_requests(self, user_id: int) -> int:
+        stmt = select(func.count()).select_from(TorrentRequest).where(
+            TorrentRequest.user_id == user_id,
+            TorrentRequest.status.in_(ACTIVE_STATUSES),
+        )
+        return int(self.session.execute(stmt).scalar_one())
+
+    def count_global_active_requests(self) -> int:
+        stmt = select(func.count()).select_from(TorrentRequest).where(
+            TorrentRequest.status.in_(ACTIVE_STATUSES),
+        )
+        return int(self.session.execute(stmt).scalar_one())
+
+    def count_user_today_requests(self, user_id: int) -> int:
+        start = utcnow() - timedelta(hours=24)
+        stmt = select(func.count()).select_from(TorrentRequest).where(
+            TorrentRequest.user_id == user_id,
+            TorrentRequest.created_at >= start,
+        )
+        return int(self.session.execute(stmt).scalar_one())
+
+    def get_stale_active_requests(self, cutoff: datetime) -> list[TorrentRequest]:
+        stmt = select(TorrentRequest).where(
+            TorrentRequest.status.in_(ACTIVE_STATUSES),
+            TorrentRequest.updated_at < cutoff,
+        )
+        return list(self.session.execute(stmt).scalars())
+
 
 class Repository:
     """Facade composing the domain repositories for call sites that touch several at once.
@@ -409,6 +595,7 @@ class Repository:
         self._videos = VideoRepository(session)
         self._requests = RequestRepository(session)
         self._proxies = ProxyRepository(session)
+        self._torrents = TorrentRepository(session)
 
     # -- UserRepository ----------------------------------------------------
     def upsert_user(self, user_id: int, username: str | None, first_name: str | None) -> User:
@@ -556,3 +743,55 @@ class Repository:
 
     def has_active_video_job(self, url_hash: str, quality: str) -> bool:
         return self._requests.has_active_video_job(url_hash, quality)
+
+    def get_stale_active_requests(self, cutoff: datetime) -> list[DownloadRequest]:
+        return self._requests.get_stale_active_requests(cutoff)
+
+    # -- TorrentRepository -------------------------------------------------
+    def create_torrent_request(
+        self,
+        user_id: int,
+        chat_id: int,
+        message_id: int | None,
+        status_message_id: int | None,
+        magnet_uri: str,
+        status: DownloadStatus = DownloadStatus.queued,
+    ) -> TorrentRequest:
+        return self._torrents.create_request(
+            user_id, chat_id, message_id, status_message_id, magnet_uri, status
+        )
+
+    def get_torrent_request(self, request_id: int) -> TorrentRequest | None:
+        return self._torrents.get_request(request_id)
+
+    def set_torrent_request_task_id(self, request_id: int, task_id: str) -> None:
+        self._torrents.set_request_task_id(request_id, task_id)
+
+    def set_torrent_request_metadata(
+        self, request_id: int, info_hash: str | None, name: str | None,
+    ) -> None:
+        self._torrents.set_request_metadata(request_id, info_hash, name)
+
+    def set_torrent_files_sent(self, request_id: int, files_sent: int) -> None:
+        self._torrents.set_files_sent(request_id, files_sent)
+
+    def update_torrent_request_status(
+        self,
+        request_id: int,
+        status: DownloadStatus,
+        error: str | None = None,
+        finished: bool = False,
+    ) -> None:
+        self._torrents.update_request_status(request_id, status, error, finished)
+
+    def count_user_active_torrent_requests(self, user_id: int) -> int:
+        return self._torrents.count_user_active_requests(user_id)
+
+    def count_global_active_torrent_requests(self) -> int:
+        return self._torrents.count_global_active_requests()
+
+    def count_user_today_torrent_requests(self, user_id: int) -> int:
+        return self._torrents.count_user_today_requests(user_id)
+
+    def get_stale_active_torrent_requests(self, cutoff: datetime) -> list[TorrentRequest]:
+        return self._torrents.get_stale_active_requests(cutoff)

@@ -3,14 +3,16 @@ from __future__ import annotations
 import logging
 import tempfile
 import time
+from datetime import timedelta
 from pathlib import Path
 from typing import Callable, Protocol
 
 from sqlalchemy.exc import OperationalError
 
 from app.core.config import Settings, get_settings
-from app.db.models import DownloadRequest, DownloadStatus, TelegramFileType, UserGoogleToken, Video
+from app.db.models import DownloadRequest, DownloadStatus, TelegramFileType, TorrentRequest, UserGoogleToken, Video
 from app.db.session import ScopedRepository
+from app.db.utils import utcnow
 from app.services.cleanup import cleanup_stale_downloads as _cleanup_stale_downloads
 from app.services.google_oauth import generate_youtube_cookies, refresh_access_token
 from app.services.rate_limiter import RateLimiter
@@ -35,6 +37,14 @@ from app.worker.downloader import (
 from aiogram.exceptions import TelegramEntityTooLarge
 
 from app.worker.telegram_sender import TelegramSender, get_default_sender
+from app.worker.torrent_downloader import (
+    TorrentError,
+    TorrentProgress,
+    TorrentTooLargeError,
+    TorrentTooManyFilesError,
+    download_torrent,
+    remove_and_delete,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -67,6 +77,14 @@ _CHALLENGE_ERROR_MARKERS = (
 _GENERIC_FAILURE = (
     "❌ Не получилось скачать видео. Возможные причины: приватное видео, "
     "устаревшие cookies, блокировка VPS или изменение защиты сайта."
+)
+
+# Shown by reconcile_stuck_requests, not by process_download_request itself —
+# a wedged task's own except/finally never gets to run (see there for why),
+# so the user never got any status update at all until this sweep catches it.
+_STUCK_REQUEST_FAILURE = (
+    "⏱ Загрузка зависла и была прервана по таймауту без ответа от сайта-источника.\n\n"
+    "Попробуй отправить ссылку ещё раз."
 )
 
 _REZKA_STREAM_FAILURE = (
@@ -139,6 +157,29 @@ _CORRUPT_MEDIA_FAILURE = (
     "Попробуй ещё раз или выбери другое качество — /quality."
 )
 
+_TORRENT_GENERIC_FAILURE = (
+    "❌ Не получилось скачать содержимое торрента. Возможные причины: нет "
+    "доступных пиров/сидов, магнет-ссылка недействительна, либо трекеры не отвечают."
+)
+
+_TORRENT_METADATA_TIMEOUT_FAILURE = (
+    "⏱ Не удалось получить метаданные торрента — нет ответа от пиров/DHT.\n\n"
+    "Попробуй другую ссылку или повтори попытку позже."
+)
+
+_TORRENT_DURATION_EXCEEDED_FAILURE = (
+    "⏱ Скачивание торрента заняло слишком много времени и было прервано."
+)
+
+_TORRENT_FILE_TOO_LARGE_FAILURE = "⚠️ Один из файлов торрента слишком большой для Telegram."
+
+# Shown by reconcile_stuck_torrent_requests, mirroring _STUCK_REQUEST_FAILURE
+# above but for the torrent pipeline's own table/task.
+_STUCK_TORRENT_REQUEST_FAILURE = (
+    "⏱ Скачивание торрента зависло и было прервано по таймауту.\n\n"
+    "Попробуй отправить магнет-ссылку ещё раз."
+)
+
 # Redis key TTL after a Google OAuth cookie refresh to prevent refresh loops.
 _GOOGLE_REFRESH_COOLDOWN = 300  # seconds
 
@@ -149,6 +190,25 @@ _GOOGLE_REFRESH_COOLDOWN = 300  # seconds
 # the video dedup lock could expire mid-processing and let a duplicate concurrent
 # download of the same video/quality start.
 _VIDEO_LOCK_POST_PROCESSING_BUFFER_SECONDS = TRANSCODE_TIMEOUT + COMPRESSION_TIMEOUT
+
+# process_torrent_request needs its own Celery hard/soft time limit rather
+# than the video pipeline's task_time_limit/task_soft_time_limit (celery_app's
+# global default, derived from max_download_duration_seconds) - a torrent's
+# own settings.torrent_max_duration_seconds deadline is checked from inside
+# download_torrent's poll loop, but Celery's hard limit would otherwise
+# SIGKILL the task before that internal check ever gets a chance to fire
+# cleanly (same "wedged task never runs its own except/finally" problem
+# reconcile_stuck_requests exists to clean up afterwards - see there). The
+# buffer covers metadata wait + uploading every file to Telegram after the
+# download itself finishes.
+_TORRENT_TASK_TIME_LIMIT_BUFFER_SECONDS = 300
+_torrent_task_settings = get_settings()
+_TORRENT_TASK_TIME_LIMIT = (
+    _torrent_task_settings.torrent_metadata_timeout_seconds
+    + _torrent_task_settings.torrent_max_duration_seconds
+    + _TORRENT_TASK_TIME_LIMIT_BUFFER_SECONDS
+)
+_TORRENT_TASK_SOFT_TIME_LIMIT = max(60, _TORRENT_TASK_TIME_LIMIT - 60)
 
 
 def _google_refresh_key(user_id: int) -> str:
@@ -197,6 +257,10 @@ class _UserCookiesRepo(Protocol):
 
 class _TaskFailureRepo(_RequestStatusRepo, Protocol):
     def mark_video_failed(self, video_id: int, error: str) -> None: ...
+
+
+class _ReconcileRepo(_TaskFailureRepo, Protocol):
+    def get_stale_active_requests(self, cutoff) -> list[DownloadRequest]: ...
 
 
 class _CacheServingRepo(_RequestStatusRepo, Protocol):
@@ -355,6 +419,108 @@ def _handle_task_failure(
     sender.edit_status(chat_id, status_message_id, message)
 
 
+class _TorrentRequestStatusRepo(Protocol):
+    def update_torrent_request_status(
+        self, request_id: int, status: DownloadStatus, error: str | None = None, finished: bool = False,
+    ) -> None: ...
+
+
+class _TorrentReconcileRepo(_TorrentRequestStatusRepo, Protocol):
+    def get_stale_active_torrent_requests(self, cutoff) -> list[TorrentRequest]: ...
+
+
+def _handle_torrent_task_failure(
+    sender: TelegramSender,
+    repo: _TorrentRequestStatusRepo,
+    request_id: int,
+    chat_id: int,
+    status_message_id: int | None,
+    exc: Exception,
+    settings: Settings,
+) -> None:
+    """Record the failure in the DB and send a Telegram notification.
+
+    Mirrors _handle_task_failure's shape for the video pipeline, but keyed
+    off exception type rather than sniffing yt-dlp error text - the torrent
+    pipeline's failure modes (download_torrent's own exceptions) are already
+    typed, unlike yt-dlp's plain-string DownloadError.
+    """
+    error_msg = f"{type(exc).__name__}: {exc}"
+    try:
+        repo.update_torrent_request_status(request_id, DownloadStatus.failed, error=error_msg, finished=True)
+    except Exception:
+        logger.exception("Could not persist failure status for torrent request %s", request_id)
+
+    if isinstance(exc, TorrentTooLargeError):
+        message = f"⚠️ Содержимое торрента превышает лимит {settings.torrent_max_total_size_mb} MB."
+    elif isinstance(exc, TorrentTooManyFilesError):
+        message = f"⚠️ В торренте слишком много файлов (лимит {settings.torrent_max_file_count})."
+    elif isinstance(exc, TelegramEntityTooLarge):
+        message = _TORRENT_FILE_TOO_LARGE_FAILURE
+    elif isinstance(exc, TorrentError) and "metadata" in str(exc).lower():
+        message = _TORRENT_METADATA_TIMEOUT_FAILURE
+    elif isinstance(exc, TorrentError) and "time limit" in str(exc).lower():
+        message = _TORRENT_DURATION_EXCEEDED_FAILURE
+    else:
+        message = _TORRENT_GENERIC_FAILURE
+    sender.edit_status(chat_id, status_message_id, message)
+
+
+def reconcile_stuck_torrent_requests(repo: _TorrentReconcileRepo, sender: TelegramSender, max_age_seconds: int) -> int:
+    """Torrent-pipeline counterpart to reconcile_stuck_requests below - same
+    reasoning applies (a Celery hard time-limit SIGKILL never lets
+    process_torrent_request's own except/finally run), just against
+    TorrentRequest instead of DownloadRequest.
+    """
+    cutoff = utcnow() - timedelta(seconds=max_age_seconds)
+    stuck = repo.get_stale_active_torrent_requests(cutoff)
+    for req in stuck:
+        logger.warning(
+            "Reconciling stuck torrent request %s (status=%s, updated_at=%s)",
+            req.id, req.status, req.updated_at,
+        )
+        repo.update_torrent_request_status(
+            req.id, DownloadStatus.failed,
+            error="Reconciled: exceeded torrent_max_duration_seconds without reaching a terminal status",
+            finished=True,
+        )
+        if req.status_message_id:
+            sender.edit_status(req.chat_id, req.status_message_id, _STUCK_TORRENT_REQUEST_FAILURE)
+    return len(stuck)
+
+
+def reconcile_stuck_requests(repo: _ReconcileRepo, sender: TelegramSender, max_age_seconds: int) -> int:
+    """Fail out DB requests stuck in queued/downloading/sending long after
+    Celery's hard time limit (task_time_limit) would have killed whatever
+    worker process was running them.
+
+    That hard limit kills a wedged task by sending SIGKILL straight to its
+    child process from the pool supervisor — none of process_download_request's
+    own code, including its `except`/`finally`, ever runs, so the DB row is
+    abandoned at whatever non-terminal status it had. Nothing else updates it
+    afterwards: it stays "active" forever, permanently occupying that user's
+    (and the global) active-request slot. This periodic sweep is what
+    actually clears it.
+    """
+    cutoff = utcnow() - timedelta(seconds=max_age_seconds)
+    stuck = repo.get_stale_active_requests(cutoff)
+    for req in stuck:
+        logger.warning(
+            "Reconciling stuck request %s (status=%s, updated_at=%s)",
+            req.id, req.status, req.updated_at,
+        )
+        repo.update_request_status(
+            req.id, DownloadStatus.failed,
+            error="Reconciled: exceeded max_download_duration_seconds without reaching a terminal status",
+            finished=True,
+        )
+        if req.video_id:
+            repo.mark_video_failed(req.video_id, "stuck request reconciled")
+        if req.status_message_id:
+            sender.edit_status(req.chat_id, req.status_message_id, _STUCK_REQUEST_FAILURE)
+    return len(stuck)
+
+
 def _try_serve_from_cache(
     sender: TelegramSender,
     repo: _CacheServingRepo,
@@ -413,6 +579,51 @@ def _build_transcode_progress_hook(
         sender.edit_status(
             chat_id, status_message_id, f"🔄 Конвертирую видео для совместимости с Telegram: {percent:.0f}%"
         )
+
+    return _hook
+
+
+def _format_bytes_per_sec(rate: float) -> str:
+    if rate < 1024:
+        return f"{rate:.0f} B/s"
+    if rate < 1024 * 1024:
+        return f"{rate / 1024:.0f} KB/s"
+    return f"{rate / (1024 * 1024):.2f} MB/s"
+
+
+def _format_connected_available(connected: int, available: int) -> str:
+    """"connected/available", or just "connected" when the swarm hasn't
+    reported a scrape count yet (libtorrent uses -1 for "unknown")."""
+    if available is not None and available >= 0:
+        return f"{connected}/{available}"
+    return str(connected)
+
+
+def _format_torrent_progress_text(progress: TorrentProgress) -> str:
+    percent = progress.progress * 100
+    return (
+        f"⬇️ Скачиваю торрент: {percent:.1f}%\n"
+        f"⚡ Скорость: {_format_bytes_per_sec(progress.download_rate)}\n"
+        f"🌱 Сиды (подключено/доступно): "
+        f"{_format_connected_available(progress.seeds_connected, progress.seeds_available)}\n"
+        f"👥 Пиры (подключено/доступно): "
+        f"{_format_connected_available(progress.peers_connected, progress.peers_available)}"
+    )
+
+
+def _build_torrent_progress_hook(
+    sender: TelegramSender, chat_id: int, status_message_id: int | None
+) -> Callable[[TorrentProgress], None]:
+    """Return a download_torrent progress hook, throttled to 1 update per 5 s."""
+    last_update = 0.0
+
+    def _hook(progress: TorrentProgress) -> None:
+        nonlocal last_update
+        now = time.time()
+        if now - last_update < 5:
+            return
+        last_update = now
+        sender.edit_status(chat_id, status_message_id, _format_torrent_progress_text(progress))
 
     return _hook
 
@@ -818,7 +1029,141 @@ def process_download_request(self, request_id: int) -> None:
             limiter.release_video_lock(url_hash, quality)
 
 
+@celery_app.task(
+    bind=True,
+    autoretry_for=_AUTORETRY_EXCEPTIONS,
+    retry_backoff=True,
+    retry_kwargs={"max_retries": 3},
+    time_limit=_TORRENT_TASK_TIME_LIMIT,
+    soft_time_limit=_TORRENT_TASK_SOFT_TIME_LIMIT,
+)
+def process_torrent_request(self, request_id: int) -> None:
+    """Download every file of a magnet link, send them all to Telegram, then
+    immediately remove the torrent and wipe the downloaded bytes - the bot
+    only ever leeches, never seeds past the moment the last file is sent
+    (see app.worker.torrent_downloader for how that's enforced).
+
+    Deliberately much simpler than process_download_request: no quality
+    selection, no Telegram file_id caching/reuse (every magnet link is a
+    fresh job with its own, arbitrary set of files), no proxy/cookie
+    handling, no transcoding - just download, send, delete.
+    """
+    settings = get_settings()
+    redis = get_redis()
+    limiter = RateLimiter(redis)
+    sender = get_default_sender()
+    repo = ScopedRepository()
+
+    req = repo.get_torrent_request(request_id)
+    if not req:
+        logger.warning("Torrent request %s not found", request_id)
+        return
+
+    user_id = req.user_id
+    chat_id = req.chat_id
+    status_message_id = req.status_message_id
+    magnet_uri = req.magnet_uri
+
+    # Shares the same Redis slot/key as the video pipeline's download slot:
+    # a user's max_active_downloads_per_user quota covers video and torrent
+    # jobs together, since both compete for the same worker capacity.
+    max_active = get_limit("max_active_downloads_per_user", settings, redis)
+    slot_acquired = max_active <= 0 or limiter.acquire_user_download_slot(
+        user_id, max_active, settings.torrent_max_duration_seconds
+    )
+    if not slot_acquired:
+        repo.update_torrent_request_status(
+            request_id, DownloadStatus.rate_limited,
+            error="Too many active downloads for user", finished=True,
+        )
+        sender.edit_status(chat_id, status_message_id, "⚠️ У тебя уже есть активная загрузка. Попробуй позже.")
+        return
+
+    lt_session = None
+    handle = None
+    work_dir: Path | None = None
+    try:
+        repo.update_torrent_request_status(request_id, DownloadStatus.downloading)
+        sender.edit_status(chat_id, status_message_id, "🧲 Получаю метаданные торрента...")
+
+        def _on_metadata(info_hash: str, name: str, files) -> None:
+            repo.set_torrent_request_metadata(request_id, info_hash, name or None)
+            total_mb = sum(f.size_bytes for f in files) / (1024 * 1024)
+            sender.edit_status(
+                chat_id, status_message_id,
+                f"🧲 {name or info_hash}\n"
+                f"Файлов: {len(files)}, размер: {total_mb:.1f} MB\n"
+                "Начинаю скачивание...",
+            )
+
+        lt_session, handle, work_dir, file_paths = download_torrent(
+            magnet_uri, settings,
+            on_metadata=_on_metadata,
+            on_progress=_build_torrent_progress_hook(sender, chat_id, status_message_id),
+        )
+
+        repo.update_torrent_request_status(request_id, DownloadStatus.sending)
+        sender.edit_status(chat_id, status_message_id, f"✅ Скачано. Отправляю {len(file_paths)} файл(ов)...")
+
+        max_mb = get_limit("max_file_mb", settings, redis)
+        sent = 0
+        skipped_names: list[str] = []
+        for file_path in file_paths:
+            size_mb = file_path.stat().st_size / (1024 * 1024)
+            if max_mb > 0 and size_mb > max_mb:
+                skipped_names.append(file_path.name)
+                continue
+            sender.send_file(chat_id, file_path, get_caption(settings, file_path.name))
+            sent += 1
+            repo.set_torrent_files_sent(request_id, sent)
+
+        repo.update_torrent_request_status(request_id, DownloadStatus.done, finished=True)
+        if skipped_names:
+            sender.edit_status(
+                chat_id, status_message_id,
+                f"✅ Отправлено {sent} файл(ов).\n"
+                f"⚠️ Пропущено (больше лимита {max_mb} MB): " + ", ".join(skipped_names),
+            )
+        else:
+            sender.delete_status(chat_id, status_message_id)
+
+    except Exception as exc:
+        logger.exception("Failed torrent request %s", request_id)
+        will_autoretry = isinstance(exc, _AUTORETRY_EXCEPTIONS) and self.request.retries < self.max_retries
+        if not will_autoretry:
+            _handle_torrent_task_failure(sender, repo, request_id, chat_id, status_message_id, exc, settings)
+        raise
+
+    finally:
+        # Runs on every path - success, failure, or autoretry - so a magnet
+        # download is never left seeding or sitting on disk one moment
+        # longer than it takes to send its files.
+        if lt_session is not None and work_dir is not None:
+            remove_and_delete(lt_session, handle, work_dir)
+        limiter.release_user_download_slot(user_id)
+
+
 @celery_app.task
 def cleanup_stale_downloads() -> int:
     """Periodic safety-net sweep of downloads/active/ — see app.services.cleanup."""
     return _cleanup_stale_downloads(get_settings())
+
+
+@celery_app.task
+def reconcile_stuck_download_requests() -> int:
+    """Periodic safety-net for DB rows a hard-killed worker never got to update — see reconcile_stuck_requests."""
+    settings = get_settings()
+    max_age = settings.max_download_duration_seconds + settings.stuck_request_reconcile_buffer_seconds
+    return reconcile_stuck_requests(ScopedRepository(), get_default_sender(), max_age)
+
+
+@celery_app.task
+def reconcile_stuck_torrent_download_requests() -> int:
+    """Periodic safety-net for TorrentRequest rows a hard-killed worker never got to update — see reconcile_stuck_torrent_requests."""
+    settings = get_settings()
+    max_age = (
+        settings.torrent_metadata_timeout_seconds
+        + settings.torrent_max_duration_seconds
+        + settings.stuck_request_reconcile_buffer_seconds
+    )
+    return reconcile_stuck_torrent_requests(ScopedRepository(), get_default_sender(), max_age)

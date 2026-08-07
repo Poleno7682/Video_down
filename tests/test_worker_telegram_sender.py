@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import asyncio
+import concurrent.futures
+import threading
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
@@ -331,7 +334,9 @@ async def test_edit_status_no_message_id(mocker):
 async def test_edit_status_success(mocker):
     sender, mock_bot = _sender_with_bot(mocker, edit_message_text=AsyncMock())
     await sender._edit_status_async(123, 456, "text")
-    mock_bot.edit_message_text.assert_awaited_once_with(chat_id=123, message_id=456, text="text")
+    mock_bot.edit_message_text.assert_awaited_once_with(
+        chat_id=123, message_id=456, text="text", request_timeout=10
+    )
 
 
 @pytest.mark.asyncio
@@ -402,3 +407,21 @@ def test_run_uses_upload_timeout_by_default():
         return "ok"
 
     assert sender._run(sample_coro()) == "ok"
+
+
+def test_run_cancels_coroutine_on_timeout():
+    """A timed-out call must cancel its coroutine, not leave it running orphaned."""
+    sender = TelegramSender()
+    cancelled = threading.Event()
+
+    async def slow_coro():
+        try:
+            await asyncio.sleep(5)
+        except asyncio.CancelledError:
+            cancelled.set()
+            raise
+
+    with pytest.raises(concurrent.futures.TimeoutError):
+        sender._run(slow_coro(), timeout=0.05)
+
+    assert cancelled.wait(timeout=2), "coroutine was not cancelled after _run() timed out"

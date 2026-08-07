@@ -18,3 +18,7 @@ playwright==1.61.0
 alembic==1.14.0
 pydantic==2.10.4
 pydantic-settings==2.7.0
+# BitTorrent client used for magnet-link downloads (app/worker/torrent_downloader.py).
+# Ships prebuilt manylinux wheels for cp312, matching this image's Python — no extra
+# system packages needed beyond what's already in the base image.
+libtorrent==2.0.13

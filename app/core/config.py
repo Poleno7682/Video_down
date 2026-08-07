@@ -88,6 +88,11 @@ class Settings(BaseSettings):
     # cleanup missed (a worker OOM-killed mid-task, a code path that doesn't
     # clean up on failure, etc.) — see app/services/cleanup.py.
     stale_file_max_age_hours: float = Field(default=24, alias="STALE_FILE_MAX_AGE_HOURS")
+    # Grace period added on top of max_download_duration_seconds before a
+    # request still sitting in queued/downloading/sending is considered
+    # abandoned rather than just running long — see reconcile_stuck_requests
+    # in app/worker/tasks.py for why such rows can otherwise never clear.
+    stuck_request_reconcile_buffer_seconds: int = Field(default=300, alias="STUCK_REQUEST_RECONCILE_BUFFER_SECONDS")
 
     # Admin broadcast mode auto-expires after this many seconds of inactivity.
     # Each broadcast message resets the timer (implemented via Redis key TTL).
@@ -97,6 +102,32 @@ class Settings(BaseSettings):
     # picture when yt-dlp finds them. Off by default: adds an extra ffmpeg
     # re-encode pass to every download.
     embed_subtitles: bool = Field(default=False, alias="EMBED_SUBTITLES")
+
+    # Magnet-link torrent downloads (app/worker/torrent_downloader.py). The
+    # bot only ever leeches: it downloads every file in the torrent, sends
+    # them to the user, then immediately removes the torrent and wipes the
+    # downloaded bytes — see torrent_upload_limit_kbps below for how sharing
+    # is throttled while a download is in progress.
+    torrent_max_duration_seconds: int = Field(default=3600, alias="TORRENT_MAX_DURATION_SECONDS")
+    # Checked against the sum of all file sizes right after metadata arrives
+    # (before any piece is downloaded), so an oversized torrent is rejected
+    # up front instead of filling the disk. 0 disables the check.
+    torrent_max_total_size_mb: int = Field(default=2000, alias="TORRENT_MAX_TOTAL_SIZE_MB")
+    # Caps how many separate files one magnet link can make the bot send —
+    # without this, a torrent with thousands of tiny files would attempt
+    # thousands of individual Telegram uploads. 0 disables the check.
+    torrent_max_file_count: int = Field(default=20, alias="TORRENT_MAX_FILE_COUNT")
+    # How long to wait for the swarm/DHT to hand back the torrent's metadata
+    # (file list, sizes) after adding a magnet link before giving up.
+    torrent_metadata_timeout_seconds: int = Field(default=120, alias="TORRENT_METADATA_TIMEOUT_SECONDS")
+    # Deliberately low: this bot only ever downloads, never seeds. A magnet
+    # download still has to upload pieces to satisfy peers' tit-for-tat
+    # unchoking (found in practice to noticeably speed up otherwise-stalled
+    # swarms), but this keeps that contribution minimal — and the torrent is
+    # removed the instant the download finishes, so there is no seeding
+    # phase afterwards at all.
+    torrent_upload_limit_kbps: int = Field(default=50, alias="TORRENT_UPLOAD_LIMIT_KBPS")
+    torrent_listen_interfaces: str = Field(default="0.0.0.0:6881", alias="TORRENT_LISTEN_INTERFACES")
 
     use_cookies: bool = Field(default=True, alias="USE_COOKIES")
     facebook_cookies_file: Path = Field(default=Path("/app/cookies/facebook.txt"), alias="FACEBOOK_COOKIES_FILE")

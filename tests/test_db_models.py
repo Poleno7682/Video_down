@@ -1,4 +1,15 @@
-from app.db.models import DownloadRequest, DownloadStatus, Proxy, TelegramFileType, User, Video
+import pytest
+
+from app.db.models import (
+    Base,
+    DownloadRequest,
+    DownloadStatus,
+    Proxy,
+    TABLE_SUFFIX,
+    TelegramFileType,
+    User,
+    Video,
+)
 
 
 def test_download_status_values():
@@ -58,3 +69,22 @@ def test_download_request_instantiation():
     )
     assert r.user_id == 1
     assert r.status == DownloadStatus.queued
+
+
+def test_all_tables_have_project_suffix():
+    # Belt-and-suspenders alongside Base.__init_subclass__'s check: this
+    # walks the metadata directly, so it also catches a table defined via
+    # Core Table() rather than the declarative Base (which the
+    # __init_subclass__ hook can't see). See docs/db-table-namespacing.md.
+    tables = list(Base.metadata.tables)
+    assert tables, "expected at least one table in Base.metadata"
+    for name in tables:
+        assert name.endswith(TABLE_SUFFIX), f"table {name!r} is missing the {TABLE_SUFFIX!r} suffix"
+
+
+def test_declarative_class_with_bad_tablename_raises():
+    with pytest.raises(ValueError, match="must end with"):
+
+        class BadTableName(Base):
+            __tablename__ = "no_suffix_here"
+            id: int

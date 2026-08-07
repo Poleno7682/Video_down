@@ -10,16 +10,18 @@ import time
 import urllib.parse
 import uuid
 from pathlib import Path
-from typing import Callable
+from typing import Callable, TypeVar
 
 from yt_dlp import YoutubeDL
 from yt_dlp.utils import DownloadError
 
 from app.core.config import Settings
 from app.utils.codecs import RISKY_TELEGRAM_VIDEO_CODECS
+from app.utils.http_headers import MODERN_CHROME_HEADERS
 from app.utils.platforms import PLATFORM_COOKIE_SETTING, detect_platform
 from app.utils.quality import format_selector, normalize_quality
-from app.utils.rezka import RezkaResolveError, is_rezka_url, resolve_rezka_stream
+from app.utils.rezka import RezkaResolveError, resolve_rezka_stream
+from app.utils.site_behavior import site_behavior
 
 logger = logging.getLogger(__name__)
 
@@ -59,13 +61,7 @@ _TIMEOUT_RETRY_MARKERS = (
 )
 _TIMEOUT_RETRY_SOCKET_TIMEOUT = 90
 
-_BROWSER_RETRY_HEADERS = {
-    "User-Agent": (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-        "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
-    ),
-    "Accept-Language": "en-US,en;q=0.9",
-}
+_BROWSER_RETRY_HEADERS = MODERN_CHROME_HEADERS
 
 # Mini-compression attempts, tried in order until the file fits max_mb.
 # Bitrate for each attempt is derived from the clip duration and target size.
@@ -199,6 +195,46 @@ def _extract_with_retry(url: str, opts: dict) -> dict:
             return ydl.extract_info(url, download=True) or {}
 
 
+_T = TypeVar("_T")
+
+
+def _try_with_proxies(
+    url: str,
+    label: str,
+    proxies: list[str] | None,
+    attempt: Callable[[str | None, int, int], _T],
+    on_proxy_result: Callable[[str | None, bool], None] | None,
+) -> _T:
+    """Run `attempt` once per proxy — direct (no proxy) first, then `proxies`
+    in order — until one succeeds, routing around anti-bot IP blocks the same
+    way for every proxy-backed operation in this module (livestream pre-check,
+    real download). A failed attempt just moves on to the next one; if every
+    attempt fails, re-raises the last exception.
+    """
+    proxy_list: list[str | None] = [None, *proxies] if proxies else [None]
+    last_exc: Exception | None = None
+    for idx, proxy in enumerate(proxy_list):
+        try:
+            result = attempt(proxy, idx, len(proxy_list))
+        except Exception as exc:
+            last_exc = exc
+            if on_proxy_result:
+                on_proxy_result(proxy, False)
+            logger.warning(
+                "%s attempt %d/%d via proxy=%s failed for %s: %s",
+                label, idx + 1, len(proxy_list), proxy or "direct", url, exc,
+            )
+            continue
+        if on_proxy_result:
+            on_proxy_result(proxy, True)
+        logger.info(
+            "%s succeeded via proxy=%s (attempt %d/%d) for %s",
+            label, proxy or "direct", idx + 1, len(proxy_list), url,
+        )
+        return result
+    raise last_exc
+
+
 def is_active_livestream(
     url: str,
     proxies: list[str] | None = None,
@@ -216,8 +252,7 @@ def is_active_livestream(
     rather than failing the whole pre-check. Same order as download_video's
     own proxy_list.
     """
-    proxy_list: list[str | None] = [None, *proxies] if proxies else [None]
-    for proxy in proxy_list:
+    def _attempt(proxy: str | None, _idx: int, _total: int) -> dict | None:
         opts = {
             "quiet": True,
             "no_warnings": True,
@@ -227,21 +262,16 @@ def is_active_livestream(
         }
         if proxy:
             opts["proxy"] = proxy
-        try:
-            with YoutubeDL(opts) as ydl:
-                info = ydl.extract_info(url, download=False)
-        except Exception as exc:
-            logger.warning("Livestream pre-check via proxy=%s failed for %s: %s", proxy or "direct", url, exc)
-            if on_proxy_result:
-                on_proxy_result(proxy, False)
-            continue
-        if on_proxy_result:
-            on_proxy_result(proxy, True)
-        logger.info("Livestream pre-check succeeded via proxy=%s for %s", proxy or "direct", url)
-        if not isinstance(info, dict):
-            return False
-        return info.get("is_live") is True or str(info.get("live_status") or "").lower() == "is_live"
-    return False
+        with YoutubeDL(opts) as ydl:
+            return ydl.extract_info(url, download=False)
+
+    try:
+        info = _try_with_proxies(url, "Livestream pre-check", proxies, _attempt, on_proxy_result)
+    except Exception:
+        return False
+    if not isinstance(info, dict):
+        return False
+    return info.get("is_live") is True or str(info.get("live_status") or "").lower() == "is_live"
 
 
 def _select_output_file(work_dir: Path, before: set[Path]) -> Path:
@@ -287,40 +317,40 @@ def _run_ffmpeg_with_progress(
     matching subprocess.run's contract, so callers don't need to know this
     isn't just a thin subprocess.run wrapper.
     """
-    proc = subprocess.Popen(
+    deadline = time.monotonic() + timeout
+    with subprocess.Popen(
         [command[0], "-progress", "pipe:1", "-nostats", *command[1:]],
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
-    )
-    deadline = time.monotonic() + timeout
-    try:
-        assert proc.stdout is not None
-        while True:
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                raise subprocess.TimeoutExpired(command, timeout)
-            ready, _, _ = select.select([proc.stdout], [], [], remaining)
-            if not ready:
-                continue
-            line = proc.stdout.readline()
-            if line == "":
-                break  # EOF: ffmpeg's progress stream closed, process is exiting
-            match = _FFMPEG_OUT_TIME_MS_RE.match(line.strip())
-            if match:
-                # ffmpeg's "-progress" out_time_ms field is actually
-                # microseconds despite the name — a long-standing, widely
-                # documented naming quirk in ffmpeg itself.
-                out_time_us = int(match.group(1))
-                if out_time_us >= 0 and total_duration > 0:
-                    on_progress(min(100.0, out_time_us / 1_000_000 / total_duration * 100))
-        remaining = max(0.0, deadline - time.monotonic())
-        returncode = proc.wait(timeout=remaining)
-    except subprocess.TimeoutExpired:
-        proc.kill()
-        proc.wait()
-        raise
-    stderr_output = proc.stderr.read() if proc.stderr else ""
+    ) as proc:
+        try:
+            assert proc.stdout is not None
+            while True:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise subprocess.TimeoutExpired(command, timeout)
+                ready, _, _ = select.select([proc.stdout], [], [], remaining)
+                if not ready:
+                    continue
+                line = proc.stdout.readline()
+                if line == "":
+                    break  # EOF: ffmpeg's progress stream closed, process is exiting
+                match = _FFMPEG_OUT_TIME_MS_RE.match(line.strip())
+                if match:
+                    # ffmpeg's "-progress" out_time_ms field is actually
+                    # microseconds despite the name — a long-standing, widely
+                    # documented naming quirk in ffmpeg itself.
+                    out_time_us = int(match.group(1))
+                    if out_time_us >= 0 and total_duration > 0:
+                        on_progress(min(100.0, out_time_us / 1_000_000 / total_duration * 100))
+            remaining = max(0.0, deadline - time.monotonic())
+            returncode = proc.wait(timeout=remaining)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait()
+            raise
+        stderr_output = proc.stderr.read() if proc.stderr else ""
     return subprocess.CompletedProcess(command, returncode, stdout="", stderr=stderr_output)
 
 
@@ -721,12 +751,13 @@ def download_video(
         # stream URL via the HdRezkaApi client first, then download that
         # URL exactly like any other direct link. The CDN checks
         # Referer/Origin against the page's own site, so those get forced
-        # into every attempt below.
+        # into every attempt below. See app.utils.site_behavior for what
+        # else varies for this (or a future non-generic) site.
         extract_url = url
         extra_headers: dict[str, str] | None = None
         rezka_title: str | None = None
-        is_rezka = is_rezka_url(url)
-        if is_rezka:
+        behavior = site_behavior(url)
+        if behavior.needs_origin_headers:
             page_origin = urllib.parse.urlparse(url)
             origin = f"{page_origin.scheme}://{page_origin.hostname}"
             extra_headers = {"Referer": origin + "/", "Origin": origin}
@@ -740,7 +771,6 @@ def download_video(
         # anti-bot check) — a proxy that's blocked/down for this request
         # just falls through to the next one, since which datacenter IP
         # range gets flagged by a given site can vary proxy to proxy.
-        proxy_list: list[str | None] = [None, *proxies] if proxies else [None]
 
         def _resolve_stream_url(proxy: str | None) -> str:
             # rezka's CDN issues signed URLs that appear bound to the IP
@@ -756,45 +786,24 @@ def download_video(
             )
             return resolved_url
 
-        def _attempt_download() -> dict:
-            last_exc: Exception | None = None
-            for idx, proxy in enumerate(proxy_list):
-                if is_rezka:
-                    try:
-                        dl_url = _resolve_stream_url(proxy)
-                    except RezkaResolveError as exc:
-                        last_exc = DownloadError(str(exc))
-                        last_exc.__cause__ = exc
-                        if on_proxy_result:
-                            on_proxy_result(proxy, False)
-                        logger.warning(
-                            "Rezka resolve via proxy=%s failed for %s: %s", proxy or "direct", url, exc,
-                        )
-                        continue
-                else:
-                    dl_url = extract_url
-                opts = _build_ydl_opts(dl_url, quality, work_dir, progress_hook, cookie_file, embed_subtitles, proxy)
-                if extra_headers:
-                    opts["http_headers"] = {**opts.get("http_headers", {}), **extra_headers}
+        def _attempt(proxy: str | None, _idx: int, _total: int) -> dict:
+            if behavior.has_custom_resolver:
                 try:
-                    result = _extract_with_retry(dl_url, opts)
-                except Exception as exc:
-                    last_exc = exc
-                    if on_proxy_result:
-                        on_proxy_result(proxy, False)
-                    logger.warning(
-                        "Download attempt %d/%d via proxy=%s failed for %s: %s",
-                        idx + 1, len(proxy_list), proxy or "direct", url, exc,
-                    )
-                    continue
-                if on_proxy_result:
-                    on_proxy_result(proxy, True)
-                logger.info(
-                    "Download succeeded via proxy=%s (attempt %d/%d) for %s",
-                    proxy or "direct", idx + 1, len(proxy_list), url,
-                )
-                return result or {}
-            raise last_exc
+                    dl_url = _resolve_stream_url(proxy)
+                except RezkaResolveError as exc:
+                    # Wrapped so the outer except below can still recognize a
+                    # resolve-stage failure via exc.__cause__ regardless of
+                    # which attempt (of possibly several proxies) produced it.
+                    raise DownloadError(str(exc)) from exc
+            else:
+                dl_url = extract_url
+            opts = _build_ydl_opts(dl_url, quality, work_dir, progress_hook, cookie_file, embed_subtitles, proxy)
+            if extra_headers:
+                opts["http_headers"] = {**opts.get("http_headers", {}), **extra_headers}
+            return _extract_with_retry(dl_url, opts) or {}
+
+        def _attempt_download() -> dict:
+            return _try_with_proxies(url, "Download", proxies, _attempt, on_proxy_result)
 
         try:
             info = _attempt_download()
@@ -806,7 +815,7 @@ def download_video(
             # problem (wrong content type, translator has no stream, etc.)
             # a second identical pass — including another expensive antibot
             # solve per proxy — won't fix.
-            if not is_rezka or isinstance(exc.__cause__, RezkaResolveError):
+            if not behavior.retry_whole_cycle_on_failure or isinstance(exc.__cause__, RezkaResolveError):
                 raise
             logger.info("Rezka download failed for %s, retrying the full attempt once more: %s", url, exc)
             info = _attempt_download()

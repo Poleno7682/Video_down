@@ -8,7 +8,7 @@ from aiogram.filters import Command
 from aiogram.types import Message
 
 from app.db.repository import CookieRepository, GoogleTokenRepository
-from app.db.session import get_session
+from app.db.session import run_in_session
 from app.services.google_oauth import (
     DeviceFlowExpired,
     DeviceFlowPending,
@@ -18,6 +18,7 @@ from app.services.google_oauth import (
     start_device_flow,
 )
 from app.services.redis_client import get_redis
+from app.services.redis_ttl import clear_ttl, exists_ttl, set_ttl
 
 router = Router()
 
@@ -31,7 +32,7 @@ async def link_google(message: Message) -> None:
     redis = get_redis()
     user_id = message.from_user.id
     link_key = _google_linking_key(user_id)
-    if redis.exists(link_key):
+    if exists_ttl(redis, link_key):
         await message.answer(
             "⏳ Авторизация уже в процессе.\n"
             "Подтверди код в браузере или подожди, пока он не истечёт."
@@ -50,7 +51,7 @@ async def link_google(message: Message) -> None:
     device_code = flow_info["device_code"]
     interval = max(5, int(flow_info.get("interval", 5)))
 
-    redis.setex(link_key, expires_in, "1")
+    set_ttl(redis, link_key, "1", expires_in)
 
     await message.answer(
         "🔗 <b>Привяжи свой Google-аккаунт</b>\n\n"
@@ -108,10 +109,12 @@ async def _poll_google_link(
                 )
                 return
 
-            with get_session() as session:
+            def _save_cookies(session):
                 CookieRepository(session).set_user_cookies(user_id, "youtube", cookie_text)
                 if refresh_tok:
                     GoogleTokenRepository(session).set_google_token(user_id, refresh_tok)
+
+            await run_in_session(_save_cookies)
 
             await message.answer(
                 "✅ <b>Google-аккаунт привязан!</b>\n\n"
@@ -124,26 +127,29 @@ async def _poll_google_link(
 
         await message.answer("❌ Время ожидания истекло. Запусти /link_google заново.")
     finally:
-        redis.delete(link_key)
+        clear_ttl(redis, link_key)
 
 
 @router.message(Command("unlink_google"))
 async def unlink_google(message: Message) -> None:
     redis = get_redis()
     user_id = message.from_user.id
-    redis.delete(_google_linking_key(user_id))
+    clear_ttl(redis, _google_linking_key(user_id))
 
-    refresh_token_str: str | None = None
-    had_token: bool = False
-    with get_session() as session:
+    def _unlink(session):
         google_repo = GoogleTokenRepository(session)
         cookie_repo = CookieRepository(session)
+        refresh_token_str: str | None = None
+        had_token = False
         token_rec = google_repo.get_google_token(user_id)
         if token_rec:
             had_token = True
             refresh_token_str = token_rec.refresh_token
             google_repo.delete_google_token(user_id)
         removed_cookies = cookie_repo.delete_user_cookies(user_id, "youtube")
+        return refresh_token_str, had_token, removed_cookies
+
+    refresh_token_str, had_token, removed_cookies = await run_in_session(_unlink)
 
     if refresh_token_str:
         await asyncio.to_thread(revoke_token, refresh_token_str)

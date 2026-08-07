@@ -7,6 +7,7 @@ from unittest.mock import ANY, MagicMock, patch
 import pytest
 
 from app.db.models import DownloadRequest, DownloadStatus, TelegramFileType
+from app.db.utils import utcnow
 from app.utils.caption import DEFAULT_CAPTION, get_caption
 from app.worker.tasks import (
     _cookie_failure_message,
@@ -14,6 +15,7 @@ from app.worker.tasks import (
     _GENERIC_FAILURE,
     _REZKA_STREAM_FAILURE,
     _REZKA_CDN_FAILURE,
+    _STUCK_REQUEST_FAILURE,
     _build_transcode_progress_hook,
     _is_cookie_error,
     _is_youtube_challenge_error,
@@ -22,6 +24,7 @@ from app.worker.tasks import (
     _record_proxy_result,
     _resolve_proxies,
     process_download_request,
+    reconcile_stuck_requests,
 )
 
 
@@ -214,6 +217,88 @@ class TestIsYoutubeChallengeError:
 
     def test_unrelated_error(self):
         assert _is_youtube_challenge_error(RuntimeError("Network unreachable")) is False
+
+
+class TestReconcileStuckRequests:
+    def _stuck_request(self, **overrides):
+        req = MagicMock()
+        req.id = 42
+        req.status = DownloadStatus.downloading
+        req.updated_at = "2026-01-01T00:00:00Z"
+        req.chat_id = 100
+        req.status_message_id = 200
+        req.video_id = None
+        for key, value in overrides.items():
+            setattr(req, key, value)
+        return req
+
+    def test_no_stuck_requests_is_a_noop(self):
+        repo = MagicMock()
+        sender = MagicMock()
+        repo.get_stale_active_requests.return_value = []
+
+        assert reconcile_stuck_requests(repo, sender, 2100) == 0
+
+        repo.update_request_status.assert_not_called()
+        sender.edit_status.assert_not_called()
+
+    def test_stuck_request_marked_failed_and_user_notified(self):
+        repo = MagicMock()
+        sender = MagicMock()
+        repo.get_stale_active_requests.return_value = [self._stuck_request()]
+
+        assert reconcile_stuck_requests(repo, sender, 2100) == 1
+
+        repo.update_request_status.assert_called_once_with(
+            42, DownloadStatus.failed, error=ANY, finished=True
+        )
+        sender.edit_status.assert_called_once_with(100, 200, _STUCK_REQUEST_FAILURE)
+
+    def test_video_id_present_also_marks_video_failed(self):
+        repo = MagicMock()
+        sender = MagicMock()
+        repo.get_stale_active_requests.return_value = [self._stuck_request(video_id=7)]
+
+        reconcile_stuck_requests(repo, sender, 2100)
+
+        repo.mark_video_failed.assert_called_once_with(7, "stuck request reconciled")
+
+    def test_no_status_message_id_skips_notification(self):
+        repo = MagicMock()
+        sender = MagicMock()
+        repo.get_stale_active_requests.return_value = [self._stuck_request(status_message_id=None)]
+
+        reconcile_stuck_requests(repo, sender, 2100)
+
+        sender.edit_status.assert_not_called()
+
+    def test_cutoff_derived_from_max_age_seconds(self):
+        repo = MagicMock()
+        sender = MagicMock()
+        repo.get_stale_active_requests.return_value = []
+
+        reconcile_stuck_requests(repo, sender, 2100)
+
+        (cutoff,), _ = repo.get_stale_active_requests.call_args
+        assert (utcnow() - cutoff).total_seconds() == pytest.approx(2100, abs=5)
+
+
+class TestReconcileStuckDownloadRequestsTask:
+    def test_delegates_with_buffered_time_limit(self):
+        from app.worker.tasks import reconcile_stuck_download_requests
+
+        settings = MagicMock()
+        settings.max_download_duration_seconds = 1800
+        settings.stuck_request_reconcile_buffer_seconds = 300
+
+        with patch("app.worker.tasks.get_settings", return_value=settings), \
+             patch("app.worker.tasks.ScopedRepository", return_value="repo"), \
+             patch("app.worker.tasks.get_default_sender", return_value="sender"), \
+             patch("app.worker.tasks.reconcile_stuck_requests", return_value=2) as mock_reconcile:
+            result = reconcile_stuck_download_requests.apply().get()
+
+        mock_reconcile.assert_called_once_with("repo", "sender", 2100)
+        assert result == 2
 
 
 class TestCleanupStaleDownloadsTask:

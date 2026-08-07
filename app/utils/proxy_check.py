@@ -7,7 +7,7 @@ from yt_dlp import YoutubeDL
 # can extract its info, the proxy isn't currently IP-blocked by YouTube.
 _PROBE_URL = "https://www.youtube.com/watch?v=jNQXAC9IVRw"
 
-_ANTI_BOT_MARKERS = (
+ANTI_BOT_MARKERS = (
     "sign in to confirm",
     "confirm you're not a bot",
     "confirm you are not a bot",
@@ -70,7 +70,7 @@ def check_proxy(proxy_url: str, timeout: int = 20) -> None:
             ydl.extract_info(_PROBE_URL, download=False)
     except Exception as exc:
         text = str(exc).lower()
-        if any(marker in text for marker in _ANTI_BOT_MARKERS):
+        if any(marker in text for marker in ANTI_BOT_MARKERS):
             raise ProxyCheckError(
                 "YouTube заблокировал этот прокси (Sign in to confirm you're not a bot)."
             ) from exc

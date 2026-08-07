@@ -1,8 +1,13 @@
+import asyncio
+from typing import Callable, TypeVar
+
 from sqlalchemy import create_engine
-from sqlalchemy.orm import sessionmaker
+from sqlalchemy.orm import Session, sessionmaker
 
 from app.core.config import get_settings
 from app.db.repository import Repository
+
+_T = TypeVar("_T")
 
 
 settings = get_settings()
@@ -25,6 +30,23 @@ SessionLocal = sessionmaker(
 
 def get_session():
     return SessionLocal()
+
+
+async def run_in_session(fn: Callable[[Session], _T]) -> _T:
+    """Run fn(session) against a fresh get_session() inside a worker thread.
+
+    aiogram handlers are async and share one event loop for the whole bot
+    process; calling synchronous SQLAlchemy I/O directly from one blocks
+    every other in-flight update until the query returns. Use this from
+    async handlers for straight-line DB-only work (no other awaits
+    in-between) instead of `with get_session() as session:` so the event
+    loop stays free.
+    """
+    def _call() -> _T:
+        with get_session() as session:
+            return fn(session)
+
+    return await asyncio.to_thread(_call)
 
 
 class ScopedRepository:

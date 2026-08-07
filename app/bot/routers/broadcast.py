@@ -12,9 +12,10 @@ from app.bot.filters import AdminFilter
 from app.bot.utils import safe_edit_text
 from app.core.config import get_settings
 from app.db.repository import UserRepository
-from app.db.session import get_session
+from app.db.session import run_in_session
 from app.keyboards.admin import broadcast_cancel_keyboard
 from app.services.redis_client import get_redis
+from app.services.redis_ttl import clear_ttl, exists_ttl, set_ttl
 from app.utils.broadcast import parse_buttons
 
 router = Router()
@@ -32,12 +33,12 @@ class BroadcastModeFilter(BaseFilter):
         settings = get_settings()
         if not _is_admin(message.from_user.id, settings):
             return False
-        return bool(get_redis().exists(_broadcast_key(message.from_user.id)))
+        return exists_ttl(get_redis(), _broadcast_key(message.from_user.id))
 
 
 async def _enter_broadcast_mode(target: Message, admin_id: int) -> None:
     settings = get_settings()
-    get_redis().setex(_broadcast_key(admin_id), settings.broadcast_timeout_seconds, "1")
+    set_ttl(get_redis(), _broadcast_key(admin_id), "1", settings.broadcast_timeout_seconds)
     minutes = settings.broadcast_timeout_seconds // 60
     await target.answer(
         "📢 <b>Режим рассылки включён.</b>\n\n"
@@ -64,15 +65,14 @@ async def broadcast_start_callback(callback: CallbackQuery) -> None:
 
 @router.callback_query(F.data == "broadcast:cancel", AdminFilter(alert_on_deny=True))
 async def broadcast_cancel_callback(callback: CallbackQuery) -> None:
-    get_redis().delete(_broadcast_key(callback.from_user.id))
+    clear_ttl(get_redis(), _broadcast_key(callback.from_user.id))
     await callback.answer("Рассылка отменена")
     await safe_edit_text(callback.message, "❌ Режим рассылки выключен.")
 
 
 async def _broadcast_to_all(bot: Bot, source: Message) -> tuple[int, int, int]:
     """Send a copy of `source` to every user. Returns (ok, failed, total)."""
-    with get_session() as session:
-        user_ids = UserRepository(session).get_all_user_ids()
+    user_ids = await run_in_session(lambda session: UserRepository(session).get_all_user_ids())
 
     from_chat_id = source.chat.id
     message_id = source.message_id
@@ -113,7 +113,7 @@ async def _broadcast_to_all(bot: Bot, source: Message) -> tuple[int, int, int]:
 @router.message(BroadcastModeFilter())
 async def broadcast_message(message: Message, bot: Bot) -> None:
     settings = get_settings()
-    get_redis().setex(_broadcast_key(message.from_user.id), settings.broadcast_timeout_seconds, "1")
+    set_ttl(get_redis(), _broadcast_key(message.from_user.id), "1", settings.broadcast_timeout_seconds)
 
     ok, failed, total = await _broadcast_to_all(bot, message)
     await message.answer(
