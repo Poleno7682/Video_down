@@ -47,6 +47,10 @@ _ACCESS_RETRY_MARKERS = (
     "forbidden",
     "gone",
     "not available in your country",
+    # TikTok's anti-bot challenge started rejecting yt-dlp's default UA
+    # around 2026-08-10 (yt-dlp/yt-dlp#17403); a browser-like UA is the
+    # only known workaround until yt-dlp ships a real fix.
+    "unexpected response from webpage request",
 )
 
 # A slow/throttled CDN (seen on rezka.ag's resolved stream hosts, e.g.
