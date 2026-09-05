@@ -173,6 +173,8 @@ _TORRENT_DURATION_EXCEEDED_FAILURE = (
 
 _TORRENT_FILE_TOO_LARGE_FAILURE = "⚠️ Один из файлов торрента слишком большой для Telegram."
 
+_TORRENT_INVALID_FILE_FAILURE = "❌ Файл .torrent повреждён или недействителен."
+
 # Shown by reconcile_stuck_torrent_requests, mirroring _STUCK_REQUEST_FAILURE
 # above but for the torrent pipeline's own table/task.
 _STUCK_TORRENT_REQUEST_FAILURE = (
@@ -457,6 +459,8 @@ def _handle_torrent_task_failure(
         message = f"⚠️ В торренте слишком много файлов (лимит {settings.torrent_max_file_count})."
     elif isinstance(exc, TelegramEntityTooLarge):
         message = _TORRENT_FILE_TOO_LARGE_FAILURE
+    elif isinstance(exc, TorrentError) and "invalid .torrent file" in str(exc).lower():
+        message = _TORRENT_INVALID_FILE_FAILURE
     elif isinstance(exc, TorrentError) and "metadata" in str(exc).lower():
         message = _TORRENT_METADATA_TIMEOUT_FAILURE
     elif isinstance(exc, TorrentError) and "time limit" in str(exc).lower():
@@ -1038,14 +1042,16 @@ def process_download_request(self, request_id: int) -> None:
     soft_time_limit=_TORRENT_TASK_SOFT_TIME_LIMIT,
 )
 def process_torrent_request(self, request_id: int) -> None:
-    """Download every file of a magnet link, send them all to Telegram, then
-    immediately remove the torrent and wipe the downloaded bytes - the bot
-    only ever leeches, never seeds past the moment the last file is sent
-    (see app.worker.torrent_downloader for how that's enforced).
+    """Download every file of a magnet link or uploaded .torrent file, send
+    them all to Telegram, then immediately remove the torrent and wipe the
+    downloaded bytes - the bot only ever leeches, never seeds past the
+    moment the last file is sent (see app.worker.torrent_downloader for how
+    that's enforced). Exactly one of req.magnet_uri/req.torrent_file is set;
+    download_torrent's torrent_data kwarg takes precedence when present.
 
     Deliberately much simpler than process_download_request: no quality
-    selection, no Telegram file_id caching/reuse (every magnet link is a
-    fresh job with its own, arbitrary set of files), no proxy/cookie
+    selection, no Telegram file_id caching/reuse (every magnet link or
+    torrent file is a fresh job with its own, arbitrary set of files), no proxy/cookie
     handling, no transcoding - just download, send, delete.
     """
     settings = get_settings()
@@ -1063,6 +1069,7 @@ def process_torrent_request(self, request_id: int) -> None:
     chat_id = req.chat_id
     status_message_id = req.status_message_id
     magnet_uri = req.magnet_uri
+    torrent_file = req.torrent_file
 
     # Shares the same Redis slot/key as the video pipeline's download slot:
     # a user's max_active_downloads_per_user quota covers video and torrent
@@ -1098,6 +1105,7 @@ def process_torrent_request(self, request_id: int) -> None:
 
         lt_session, handle, work_dir, file_paths = download_torrent(
             magnet_uri, settings,
+            torrent_data=torrent_file,
             on_metadata=_on_metadata,
             on_progress=_build_torrent_progress_hook(sender, chat_id, status_message_id),
         )

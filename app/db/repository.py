@@ -488,8 +488,9 @@ class TorrentRepository:
         chat_id: int,
         message_id: int | None,
         status_message_id: int | None,
-        magnet_uri: str,
+        magnet_uri: str | None = None,
         status: DownloadStatus = DownloadStatus.queued,
+        torrent_file: bytes | None = None,
     ) -> TorrentRequest:
         req = TorrentRequest(
             user_id=user_id,
@@ -497,6 +498,7 @@ class TorrentRepository:
             message_id=message_id,
             status_message_id=status_message_id,
             magnet_uri=magnet_uri,
+            torrent_file=torrent_file,
             status=status,
         )
         self.session.add(req)
@@ -754,11 +756,12 @@ class Repository:
         chat_id: int,
         message_id: int | None,
         status_message_id: int | None,
-        magnet_uri: str,
+        magnet_uri: str | None = None,
         status: DownloadStatus = DownloadStatus.queued,
+        torrent_file: bytes | None = None,
     ) -> TorrentRequest:
         return self._torrents.create_request(
-            user_id, chat_id, message_id, status_message_id, magnet_uri, status
+            user_id, chat_id, message_id, status_message_id, magnet_uri, status, torrent_file
         )
 
     def get_torrent_request(self, request_id: int) -> TorrentRequest | None:

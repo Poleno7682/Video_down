@@ -129,16 +129,19 @@ async def enqueue_torrent_download(
     user_id: int,
     chat_id: int,
     message_id: int | None,
-    magnet_uri: str,
+    magnet_uri: str | None = None,
+    torrent_file: bytes | None = None,
 ) -> None:
-    """Queue a magnet link for download.
+    """Queue a magnet link or an uploaded .torrent file for download.
 
-    Unlike enqueue_download, there's no cache to check and no quality to
-    pick - a torrent is an arbitrary set of files, sent once and then wiped
-    (see app.worker.tasks.process_torrent_request), so every magnet link is
-    a fresh job. Uses its own queue/limit counters (TorrentRepository)
-    rather than RequestRepository's, since torrent jobs live in their own
-    table.
+    Exactly one of magnet_uri/torrent_file is passed by the two callers (the
+    magnet-link branch of _process_url_message, and torrent_file.py's
+    document handler). Unlike enqueue_download, there's no cache to check
+    and no quality to pick - a torrent is an arbitrary set of files, sent
+    once and then wiped (see app.worker.tasks.process_torrent_request), so
+    every request is a fresh job. Uses its own queue/limit counters
+    (TorrentRepository) rather than RequestRepository's, since torrent jobs
+    live in their own table.
     """
     settings = get_settings()
     redis = get_redis()
@@ -161,7 +164,8 @@ async def enqueue_torrent_download(
             await message.answer("⚠️ Сервер сейчас перегружен. Попробуй позже.")
             return
 
-        status_msg = await message.answer("🧲 Магнет-ссылка добавлена в очередь.")
+        queued_text = "🧲 Магнет-ссылка добавлена в очередь." if magnet_uri else "🧲 Торрент-файл добавлен в очередь."
+        status_msg = await message.answer(queued_text)
 
         req = repo.create_request(
             user_id=user_id,
@@ -169,6 +173,7 @@ async def enqueue_torrent_download(
             message_id=message_id,
             status_message_id=status_msg.message_id,
             magnet_uri=magnet_uri,
+            torrent_file=torrent_file,
             status=DownloadStatus.queued,
         )
 
@@ -307,7 +312,7 @@ async def _process_url_message(message: Message, text: str, reply_on_no_url: boo
             username=message.from_user.username,
             first_name=message.from_user.first_name,
         ))
-        await enqueue_torrent_download(message, user_id, message.chat.id, message.message_id, magnet_uri)
+        await enqueue_torrent_download(message, user_id, message.chat.id, message.message_id, magnet_uri=magnet_uri)
         return
 
     raw_url = extract_url(text)

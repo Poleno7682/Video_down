@@ -17,3 +17,15 @@ def extract_magnet_uri(text: str) -> str | None:
 
 def is_magnet_uri(text: str) -> bool:
     return extract_magnet_uri(text) is not None
+
+
+# A Telegram document upload is treated as a torrent request when either its
+# filename or (client-declared, so not trusted alone) MIME type says so -
+# checking both catches clients that send one without the other.
+_TORRENT_MIME_TYPES = frozenset({"application/x-bittorrent"})
+
+
+def is_torrent_document(file_name: str | None, mime_type: str | None) -> bool:
+    if file_name and file_name.lower().endswith(".torrent"):
+        return True
+    return mime_type in _TORRENT_MIME_TYPES

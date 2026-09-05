@@ -15,6 +15,7 @@ from app.worker.torrent_downloader import (
     _DHT_BOOTSTRAP_NODES,
     _enforce_torrent_limits,
     add_magnet,
+    add_torrent_file,
     build_session,
     download_torrent,
     list_files,
@@ -95,6 +96,38 @@ def test_add_magnet_sets_save_path_and_adds_torrent():
     assert params.save_path == "/tmp/work"
     session.add_torrent.assert_called_once_with(params)
     assert result is handle
+
+
+# ---------------------------------------------------------------------------
+# add_torrent_file
+# ---------------------------------------------------------------------------
+
+def test_add_torrent_file_sets_save_path_and_adds_torrent():
+    session = MagicMock()
+    info = MagicMock()
+    handle = MagicMock()
+    session.add_torrent.return_value = handle
+
+    with patch("app.worker.torrent_downloader.lt.torrent_info", return_value=info) as mock_info, \
+         patch("app.worker.torrent_downloader.lt.add_torrent_params") as mock_params_cls:
+        params = mock_params_cls.return_value
+        result = add_torrent_file(session, b"raw torrent bytes", Path("/tmp/work"))
+
+    mock_info.assert_called_once_with(b"raw torrent bytes")
+    assert params.ti is info
+    assert params.save_path == "/tmp/work"
+    session.add_torrent.assert_called_once_with(params)
+    assert result is handle
+
+
+def test_add_torrent_file_raises_torrent_error_on_invalid_data():
+    session = MagicMock()
+
+    with patch("app.worker.torrent_downloader.lt.torrent_info", side_effect=RuntimeError("bad data")):
+        with pytest.raises(TorrentError, match="Invalid .torrent file"):
+            add_torrent_file(session, b"garbage", Path("/tmp/work"))
+
+    session.add_torrent.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
@@ -279,6 +312,37 @@ def test_download_torrent_success_returns_files_and_invokes_hooks(tmp_path):
     assert result_paths == [work_dir / "movie.mkv"]
     assert metadata_calls == [("abc123", "MyTorrent", files)]
     assert len(progress_calls) == 1
+
+
+def test_download_torrent_with_torrent_data_uses_add_torrent_file_not_add_magnet(tmp_path):
+    """When torrent_data is given, download_torrent must dispatch to
+    add_torrent_file and must not touch add_magnet at all - magnet_uri may
+    even be None in this path (see torrent_file.py's document handler)."""
+    settings = _settings(torrent_max_duration_seconds=60)
+    settings.download_dir = tmp_path
+    mock_uuid = MagicMock(hex="torrentfile")
+    session = MagicMock()
+    handle = MagicMock()
+    handle.status.return_value = MagicMock(info_hash="x", name="n", is_finished=True)
+
+    with patch("app.worker.torrent_downloader.uuid.uuid4", return_value=mock_uuid), \
+         patch("app.worker.torrent_downloader.build_session", return_value=session), \
+         patch("app.worker.torrent_downloader.add_torrent_file", return_value=handle) as mock_add_file, \
+         patch("app.worker.torrent_downloader.add_magnet") as mock_add_magnet, \
+         patch("app.worker.torrent_downloader.wait_for_metadata"), \
+         patch("app.worker.torrent_downloader.list_files", return_value=[]), \
+         patch("app.worker.torrent_downloader._enforce_torrent_limits"):
+        result_session, result_handle, work_dir, file_paths = download_torrent(
+            None, settings, torrent_data=b"raw bytes",
+        )
+
+    work_dir_expected = tmp_path / "torrents" / "torrentfile"
+    mock_add_file.assert_called_once_with(session, b"raw bytes", work_dir_expected)
+    mock_add_magnet.assert_not_called()
+    assert result_session is session
+    assert result_handle is handle
+    assert work_dir == work_dir_expected
+    assert file_paths == []
 
 
 def test_download_torrent_creates_its_own_work_dir(tmp_path):

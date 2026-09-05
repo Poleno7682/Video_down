@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from app.utils.magnet import extract_magnet_uri, is_magnet_uri
+from app.utils.magnet import extract_magnet_uri, is_magnet_uri, is_torrent_document
 
 
 # ---------------------------------------------------------------------------
@@ -90,3 +90,27 @@ def test_is_magnet_uri_false_for_plain_text():
 
 def test_is_magnet_uri_false_for_empty_string():
     assert is_magnet_uri("") is False
+
+
+# ---------------------------------------------------------------------------
+# is_torrent_document
+# ---------------------------------------------------------------------------
+
+def test_is_torrent_document_true_for_torrent_extension():
+    assert is_torrent_document("movie.torrent", "application/octet-stream") is True
+
+
+def test_is_torrent_document_true_for_uppercase_extension():
+    assert is_torrent_document("MOVIE.TORRENT", None) is True
+
+
+def test_is_torrent_document_true_for_bittorrent_mime_type():
+    assert is_torrent_document("random-name", "application/x-bittorrent") is True
+
+
+def test_is_torrent_document_false_for_unrelated_file():
+    assert is_torrent_document("cookies.txt", "text/plain") is False
+
+
+def test_is_torrent_document_false_for_missing_name_and_mime_type():
+    assert is_torrent_document(None, None) is False

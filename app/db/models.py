@@ -10,6 +10,7 @@ from sqlalchemy import (
     Enum,
     ForeignKey,
     Integer,
+    LargeBinary,
     String,
     Text,
     UniqueConstraint,
@@ -178,7 +179,12 @@ class TorrentRequest(Base):
     message_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     status_message_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
 
-    magnet_uri: Mapped[str] = mapped_column(Text, nullable=False)
+    # Exactly one of these is set per row: a magnet link needs the swarm/DHT
+    # to hand back metadata (see torrent_downloader.wait_for_metadata), while
+    # an uploaded .torrent file already carries it, so torrent_file skips
+    # that wait entirely (see torrent_downloader.add_torrent_file).
+    magnet_uri: Mapped[str | None] = mapped_column(Text, nullable=True)
+    torrent_file: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True)
     info_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
     name: Mapped[str | None] = mapped_column(Text, nullable=True)
     files_sent: Mapped[int] = mapped_column(Integer, default=0, nullable=False)

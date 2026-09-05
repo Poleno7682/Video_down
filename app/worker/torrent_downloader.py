@@ -97,6 +97,23 @@ def add_magnet(session: "lt.session", magnet_uri: str, save_path: Path) -> "lt.t
     return session.add_torrent(params)
 
 
+def add_torrent_file(session: "lt.session", torrent_data: bytes, save_path: Path) -> "lt.torrent_handle":
+    """Like add_magnet, but for an uploaded .torrent file's raw bytes.
+
+    Unlike a magnet URI, a .torrent file already contains the full metadata
+    (file list, piece hashes), so wait_for_metadata returns immediately
+    afterwards instead of waiting on the swarm/DHT.
+    """
+    try:
+        info = lt.torrent_info(bytes(torrent_data))
+    except RuntimeError as exc:
+        raise TorrentError(f"Invalid .torrent file: {exc}") from exc
+    params = lt.add_torrent_params()
+    params.ti = info
+    params.save_path = str(save_path)
+    return session.add_torrent(params)
+
+
 def wait_for_metadata(handle: "lt.torrent_handle", timeout_seconds: int) -> None:
     """Block until the swarm/DHT hands back the torrent's file list.
 
@@ -149,17 +166,21 @@ def _enforce_torrent_limits(files: list[TorrentFile], settings: Settings) -> Non
 
 
 def download_torrent(
-    magnet_uri: str,
+    magnet_uri: str | None,
     settings: Settings,
     *,
+    torrent_data: bytes | None = None,
     on_metadata: Callable[[str, str, list[TorrentFile]], None] | None = None,
     on_progress: Callable[[TorrentProgress], None] | None = None,
 ) -> tuple["lt.session", "lt.torrent_handle", Path, list[Path]]:
-    """Download every file of a magnet link into its own temp directory.
+    """Download every file of a magnet link or uploaded .torrent file into its
+    own temp directory.
 
-    On success, returns (session, handle, work_dir, file_paths); the caller
-    owns cleanup via remove_and_delete() once it's done sending those files.
-    On any failure this cleans up after itself (removes the torrent from the
+    Exactly one of magnet_uri/torrent_data should be given; when torrent_data
+    is present it takes precedence (see add_torrent_file). On success,
+    returns (session, handle, work_dir, file_paths); the caller owns cleanup
+    via remove_and_delete() once it's done sending those files. On any
+    failure this cleans up after itself (removes the torrent from the
     session and deletes work_dir) before re-raising, since a caller that
     never got a successful return also never got a handle to clean up with.
 
@@ -174,7 +195,10 @@ def download_torrent(
     session = build_session(settings)
     handle: "lt.torrent_handle | None" = None
     try:
-        handle = add_magnet(session, magnet_uri, work_dir)
+        if torrent_data is not None:
+            handle = add_torrent_file(session, torrent_data, work_dir)
+        else:
+            handle = add_magnet(session, magnet_uri, work_dir)
         wait_for_metadata(handle, settings.torrent_metadata_timeout_seconds)
 
         files = list_files(handle)
