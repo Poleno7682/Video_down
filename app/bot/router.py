@@ -6,6 +6,7 @@ from app.bot.middleware import AccessMiddleware
 from app.bot.routers.admin import router as admin_router
 from app.bot.routers.broadcast import router as broadcast_router
 from app.bot.routers.cookies import router as cookies_router
+from app.bot.routers.group_links import router as group_links_router
 from app.bot.routers.oauth import router as oauth_router
 from app.bot.routers.rezka_flow import router as rezka_flow_router
 from app.bot.routers.torrent_file import router as torrent_file_router
@@ -42,4 +43,5 @@ router = Router()
 router.include_router(user_router)
 router.include_router(admin_router)
 router.include_router(rezka_flow_router)  # callback_query only — order vs. others doesn't matter
+router.include_router(group_links_router)  # групповые чаты: молчаливое автоскачивание
 router.include_router(_protected)

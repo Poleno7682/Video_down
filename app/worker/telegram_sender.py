@@ -15,7 +15,7 @@ from aiogram import Bot
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 from aiogram.exceptions import TelegramBadRequest, TelegramRetryAfter
-from aiogram.types import FSInputFile
+from aiogram.types import FSInputFile, ReplyParameters
 
 from app.core.config import get_settings
 from app.db.models import TelegramFileType
@@ -132,6 +132,17 @@ def _media_hints(
     return hints
 
 
+def _reply_kwargs(reply_to_message_id: int | None) -> dict[str, Any]:
+    """Bot API kwargs to send as a reply (used for chat auto-download).
+
+    allow_sending_without_reply keeps the video going out even if the
+    original link message was deleted while the download was running.
+    """
+    if not reply_to_message_id:
+        return {}
+    return {"reply_parameters": ReplyParameters(message_id=reply_to_message_id, allow_sending_without_reply=True)}
+
+
 class TelegramSender:
     """Facade over aiogram's async Bot for use from synchronous Celery tasks.
 
@@ -201,6 +212,7 @@ class TelegramSender:
         width: int | None = None,
         height: int | None = None,
         duration: int | None = None,
+        reply_to_message_id: int | None = None,
     ) -> tuple[str, str | None, TelegramFileType]:
         bot = self._get_bot()
         input_file = FSInputFile(file_path)
@@ -216,13 +228,19 @@ class TelegramSender:
                 request_timeout=self._upload_timeout,
                 **spec.extra_kwargs,
                 **_media_hints(file_type, width, height, duration),
+                **_reply_kwargs(reply_to_message_id),
             )
         )
         media = getattr(msg, spec.media_param)
         return media.file_id, media.file_unique_id, file_type
 
     async def _send_cached_async(
-        self, chat_id: int, file_id: str, file_type: TelegramFileType, caption: str
+        self,
+        chat_id: int,
+        file_id: str,
+        file_type: TelegramFileType,
+        caption: str,
+        reply_to_message_id: int | None = None,
     ) -> None:
         bot = self._get_bot()
         spec = _TYPE_SPECS[file_type]
@@ -232,6 +250,7 @@ class TelegramSender:
                 chat_id=chat_id,
                 **{spec.media_param: file_id},
                 caption=caption,
+                **_reply_kwargs(reply_to_message_id),
             )
         )
 
@@ -263,11 +282,21 @@ class TelegramSender:
         width: int | None = None,
         height: int | None = None,
         duration: int | None = None,
+        reply_to_message_id: int | None = None,
     ) -> tuple[str, str | None, TelegramFileType]:
-        return self._run(self._send_file_async(chat_id, file_path, caption, width, height, duration))
+        return self._run(
+            self._send_file_async(chat_id, file_path, caption, width, height, duration, reply_to_message_id)
+        )
 
-    def send_cached(self, chat_id: int, file_id: str, file_type: TelegramFileType, caption: str) -> None:
-        self._run(self._send_cached_async(chat_id, file_id, file_type, caption))
+    def send_cached(
+        self,
+        chat_id: int,
+        file_id: str,
+        file_type: TelegramFileType,
+        caption: str,
+        reply_to_message_id: int | None = None,
+    ) -> None:
+        self._run(self._send_cached_async(chat_id, file_id, file_type, caption, reply_to_message_id))
 
     def edit_status(self, chat_id: int, message_id: int | None, text: str) -> None:
         self._run(self._edit_status_async(chat_id, message_id, text), timeout=15)

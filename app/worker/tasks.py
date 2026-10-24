@@ -539,7 +539,10 @@ def _try_serve_from_cache(
     repo.update_request_status(request_id, DownloadStatus.sending)
     sender.edit_status(req.chat_id, req.status_message_id, "⚡ Нашёл готовый Telegram file_id. Отправляю...")
     caption_title = ready_video.title if site_behavior(req.normalized_url).caption_uses_resolved_title else None
-    sender.send_cached(req.chat_id, ready_video.telegram_file_id, ready_video.telegram_file_type, get_caption(settings, caption_title))
+    sender.send_cached(
+        req.chat_id, ready_video.telegram_file_id, ready_video.telegram_file_type,
+        get_caption(settings, caption_title), reply_to_message_id=_reply_target(req),
+    )
     repo.update_request_status(request_id, DownloadStatus.done, finished=True)
     sender.edit_status(req.chat_id, req.status_message_id, "✅ Отправлено из кэша.")
     return True
@@ -561,6 +564,14 @@ def _build_progress_hook(
             return
         total = data.get("total_bytes") or data.get("total_bytes_estimate")
         downloaded = data.get("downloaded_bytes")
+def _reply_target(req: DownloadRequest) -> int | None:
+    """Сообщение, на которое отвечаем видео: только в группах (chat_id < 0).
+
+    В личке видео уходит обычным сообщением, как и раньше.
+    """
+    return req.message_id if req.chat_id < 0 else None
+
+
         if total and downloaded:
             percent = min(100, downloaded / total * 100)
             sender.edit_status(chat_id, status_message_id, f"⬇️ Скачано {percent:.1f}%")
@@ -884,7 +895,8 @@ def _upload_and_cache(
     caption_title = title if site_behavior(req.normalized_url).caption_uses_resolved_title else None
     width, height, duration = probe_video_dimensions(file_path)
     file_id, file_unique_id, file_type = sender.send_file(
-        req.chat_id, file_path, get_caption(settings, caption_title), width=width, height=height, duration=duration
+        req.chat_id, file_path, get_caption(settings, caption_title),
+        width=width, height=height, duration=duration, reply_to_message_id=_reply_target(req),
     )
 
     if req.video_id:

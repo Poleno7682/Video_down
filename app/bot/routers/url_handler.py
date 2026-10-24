@@ -283,12 +283,12 @@ async def enqueue_season_download(
 # Must be the last router included — these are the most generic handlers
 # and will swallow any message that hasn't been matched by earlier routers.
 
-@router.message(F.text)
+@router.message(F.chat.type == "private", F.text)
 async def handle_link(message: Message) -> None:
     await _process_url_message(message, message.text or "", reply_on_no_url=True)
 
 
-@router.message(F.caption)
+@router.message(F.chat.type == "private", F.caption)
 async def handle_caption_link(message: Message) -> None:
     await _process_url_message(message, message.caption or "", reply_on_no_url=False)
 
