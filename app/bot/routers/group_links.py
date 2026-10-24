@@ -5,7 +5,8 @@ from urllib.parse import urlparse
 
 from aiogram import F, Router
 from aiogram.exceptions import TelegramBadRequest
-from aiogram.types import Message
+from aiogram.enums import ChatMemberStatus
+from aiogram.types import ChatMemberUpdated, Message
 
 from app.bot.access import _check_access
 from app.core.config import get_settings
@@ -30,6 +31,24 @@ router = Router()
 # кроме самого видео (ответом на сообщение со ссылкой) — ни статусов
 # очереди/прогресса, ни ошибок, ни отказов по лимитам.
 router.message.filter(F.chat.type.in_({"group", "supergroup"}))
+
+_GREETING = (
+    "Привет. Я могу скачать видео с соцсетей. Отправь ссылку в чат и я пришлю скачанное видео. "
+    "Поддерживаю TikTok, Instagram, Facebook, YouTube Shorts и множество других соцсетей"
+)
+_PRESENT = {ChatMemberStatus.MEMBER, ChatMemberStatus.ADMINISTRATOR}
+
+
+@router.my_chat_member(F.chat.type.in_({"group", "supergroup"}))
+async def greet_on_added(event: ChatMemberUpdated) -> None:
+    """Одно приветствие, когда бота добавили в группу (не при смене прав)."""
+    was_present = event.old_chat_member.status in _PRESENT
+    is_present = event.new_chat_member.status in _PRESENT
+    if is_present and not was_present:
+        try:
+            await event.bot.send_message(event.chat.id, _GREETING)
+        except Exception:
+            logger.warning("Could not greet chat %s", event.chat.id, exc_info=True)
 
 
 def _extract_supported_url(text: str) -> str | None:
