@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import logging
-from functools import lru_cache
 from urllib.parse import urlparse
 
 from aiogram import F, Router
@@ -52,42 +51,19 @@ async def greet_on_added(event: ChatMemberUpdated) -> None:
             logger.warning("Could not greet chat %s", event.chat.id, exc_info=True)
 
 
-@lru_cache(maxsize=1)
-def _ytdlp_extractors() -> tuple:
-    """Все специализированные экстракторы yt-dlp (без универсального generic,
-    который «подходит» вообще к любой ссылке)."""
-    from yt_dlp.extractor import gen_extractor_classes
-
-    return tuple(ie for ie in gen_extractor_classes() if ie.IE_NAME != "generic")
-
-
-def _ytdlp_supports(url: str) -> bool:
-    for ie in _ytdlp_extractors():
-        try:
-            if ie.suitable(url):
-                return True
-        except Exception:
-            continue
-    return False
-
-
 def _extract_supported_url(text: str) -> str | None:
-    """Первая ссылка на сайт, который умеет скачивать yt-dlp.
-
-    Для YouTube — только Shorts; обычные ролики, плейлисты и каналы в чате
-    игнорируются.
-    """
+    """Первая ссылка на Facebook / Instagram / TikTok / YouTube Shorts."""
     for match in URL_RE.finditer(text or ""):
         url = match.group(0).strip().rstrip(").,;]")
         if not is_valid_url(url):
             continue
         platform = detect_platform(url)
-        if platform == YOUTUBE:
-            if "/shorts/" in urlparse(url).path:
-                return url
+        if platform is None:
             continue
-        if platform is not None or _ytdlp_supports(url):
-            return url
+        # Из YouTube берём только Shorts, обычные ролики в чате игнорируем.
+        if platform == YOUTUBE and "/shorts/" not in urlparse(url).path:
+            continue
+        return url
     return None
 
 
