@@ -34,7 +34,7 @@ router.message.filter(F.chat.type.in_({"group", "supergroup"}))
 
 _GREETING = (
     "Привет. Я могу скачать видео с соцсетей. Отправь ссылку в чат и я пришлю скачанное видео. "
-    "Поддерживаю TikTok, Instagram, Facebook, YouTube Shorts и множество других соцсетей"
+    "Поддерживаю TikTok, Instagram, Facebook и YouTube Shorts"
 )
 _PRESENT = {ChatMemberStatus.MEMBER, ChatMemberStatus.ADMINISTRATOR}
 
