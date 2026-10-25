@@ -134,6 +134,9 @@ class Settings(BaseSettings):
     instagram_cookies_file: Path = Field(default=Path("/app/cookies/instagram.txt"), alias="INSTAGRAM_COOKIES_FILE")
     tiktok_cookies_file: Path = Field(default=Path("/app/cookies/tiktok.txt"), alias="TIKTOK_COOKIES_FILE")
     youtube_cookies_file: Path = Field(default=Path("/app/cookies/youtube.txt"), alias="YOUTUBE_COOKIES_FILE")
+    # Telegram user_id, чьи cookies YouTube (обновляются Selenium/Chrome на хосте, см.
+    # scripts/yt_cookies.py) используются как общие для всех, у кого нет своих. 0 — отключено.
+    youtube_shared_cookies_user_id: int = Field(default=0, alias="YT_SHARED_COOKIES_USER_ID")
 
     app_host: str = Field(default="0.0.0.0", alias="APP_HOST")
     app_port: int = Field(default=8080, alias="APP_PORT")

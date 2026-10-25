@@ -15,6 +15,7 @@ from app.db.session import ScopedRepository
 from app.db.utils import utcnow
 from app.services.cleanup import cleanup_stale_downloads as _cleanup_stale_downloads
 from app.services.google_oauth import generate_youtube_cookies, refresh_access_token
+from app.services.host_cookie_refresh import request_host_refresh
 from app.services.rate_limiter import RateLimiter
 from app.services.redis_client import get_redis
 from app.services.runtime_config import get_limit
@@ -295,7 +296,9 @@ class _MediaUploadRepo(_RequestStatusRepo, Protocol):
     ) -> None: ...
 
 
-def _materialize_user_cookies(repo: _UserCookiesRepo, user_id: int, url: str) -> Path | None:
+def _materialize_user_cookies(
+    repo: _UserCookiesRepo, user_id: int, url: str, shared_youtube_user_id: int = 0,
+) -> Path | None:
     """Write the user's stored cookies for the URL's platform to a temp file.
 
     Returns the path (caller must delete it) or None if the user has no cookies
@@ -305,6 +308,9 @@ def _materialize_user_cookies(repo: _UserCookiesRepo, user_id: int, url: str) ->
     if not platform:
         return None
     cookies_text = repo.get_user_cookies(user_id, platform)
+    if not cookies_text and platform == "youtube" and shared_youtube_user_id:
+        # Общие cookies YouTube (обновляются Selenium/Chrome на хосте) — для всех без своих.
+        cookies_text = repo.get_user_cookies(shared_youtube_user_id, platform)
     if not cookies_text:
         return None
     fd, name = tempfile.mkstemp(prefix=f"cookies_{user_id}_{platform}_", suffix=".txt")
@@ -337,6 +343,41 @@ def _try_refresh_google_cookies(repo: _GoogleCookieRepo, user_id: int) -> bool:
     except Exception:
         logger.exception("Google cookie refresh failed for user %s", user_id)
         return False
+
+
+def _is_youtube_sign_in_error(exc: Exception, url: str) -> bool:
+    """YouTube просит войти / подтвердить, что мы не бот: cookies устарели или не приняты."""
+    return detect_platform(url) == YOUTUBE and _text_matches_markers(str(exc).lower(), ANTI_BOT_MARKERS)
+
+
+def _download_with_cookie_recovery(
+    sender: TelegramSender,
+    repo,
+    request_id: int,
+    user_id: int,
+    chat_id: int,
+    status_message_id: int | None,
+    normalized_url: str,
+    *args,
+):
+    """_download_and_prepare_media, но при ошибке «Sign in to confirm you're not a bot»
+    сначала обновляем cookies YouTube через браузер на хосте и повторяем загрузку один раз.
+    Ошибка показывается пользователю, только если и после обновления не получилось."""
+    try:
+        return _download_and_prepare_media(
+            sender, repo, request_id, user_id, chat_id, status_message_id, normalized_url, *args
+        )
+    except Exception as exc:
+        redis = args[-1]
+        if not _is_youtube_sign_in_error(exc, normalized_url):
+            raise
+        logger.warning("request=%s: YouTube просит войти — обновляю cookies и повторяю", request_id)
+        sender.edit_status(chat_id, status_message_id, "🔄 YouTube запросил вход — обновляю cookies и пробую снова...")
+        if not request_host_refresh(redis):
+            raise
+        return _download_and_prepare_media(
+            sender, repo, request_id, user_id, chat_id, status_message_id, normalized_url, *args
+        )
 
 
 def _maybe_refresh_google_cookies(
@@ -525,6 +566,14 @@ def reconcile_stuck_requests(repo: _ReconcileRepo, sender: TelegramSender, max_a
     return len(stuck)
 
 
+def _reply_target(req: DownloadRequest) -> int | None:
+    """Сообщение, на которое отвечаем видео: только в группах (chat_id < 0).
+
+    В личке видео уходит обычным сообщением, как и раньше.
+    """
+    return req.message_id if req.chat_id < 0 else None
+
+
 def _try_serve_from_cache(
     sender: TelegramSender,
     repo: _CacheServingRepo,
@@ -564,14 +613,6 @@ def _build_progress_hook(
             return
         total = data.get("total_bytes") or data.get("total_bytes_estimate")
         downloaded = data.get("downloaded_bytes")
-def _reply_target(req: DownloadRequest) -> int | None:
-    """Сообщение, на которое отвечаем видео: только в группах (chat_id < 0).
-
-    В личке видео уходит обычным сообщением, как и раньше.
-    """
-    return req.message_id if req.chat_id < 0 else None
-
-
         if total and downloaded:
             percent = min(100, downloaded / total * 100)
             sender.edit_status(chat_id, status_message_id, f"⬇️ Скачано {percent:.1f}%")
@@ -800,7 +841,9 @@ def _download_and_prepare_media(
     repo.update_request_status(request_id, DownloadStatus.downloading)
     sender.edit_status(chat_id, status_message_id, "⬇️ Скачиваю видео...")
 
-    user_cookie_path = _materialize_user_cookies(repo, user_id, normalized_url)
+    user_cookie_path = _materialize_user_cookies(
+        repo, user_id, normalized_url, settings.youtube_shared_cookies_user_id
+    )
     cookies_were_used = user_cookie_path is not None or cookie_file_for_url(
         normalized_url, settings
     ) is not None
@@ -987,7 +1030,7 @@ def process_download_request(self, request_id: int) -> None:
         ):
             return
 
-        file_path, info, user_cookie_path, cookies_were_used = _download_and_prepare_media(
+        file_path, info, user_cookie_path, cookies_were_used = _download_with_cookie_recovery(
             sender, repo, request_id, user_id, chat_id, status_message_id, normalized_url, quality, settings,
             proxies, on_proxy_result, redis,
         )

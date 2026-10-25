@@ -18,19 +18,32 @@ RUN curl -fsSL https://deno.land/install.sh | sh -s -- -y \
 
 COPY requirements.txt .
 RUN pip install --no-cache-dir -U pip \
-    && pip install --no-cache-dir -r requirements.txt
+    && pip install --no-cache-dir -r requirements.txt \
+    # Ночная сборка yt-dlp (pre-release с PyPI): быстрее получает правки под YouTube и др.
+    && pip install --no-cache-dir -U --pre "yt-dlp[default,curl-cffi]"
 
 # Chromium + its OS-level deps for app.utils.rezka's Anubis-challenge
 # bypass (REZKA_ANTIBOT_BYPASS=true). Only ever launched for rezka.ag
 # downloads with that flag on; harmless (just unused disk) otherwise.
-RUN playwright install --with-deps chromium
+# Браузеры кладём вне /root, чтобы их мог запускать непривилегированный пользователь.
+ENV PLAYWRIGHT_BROWSERS_PATH=/opt/ms-playwright
+RUN playwright install --with-deps chromium \
+    && chmod -R a+rX /opt/ms-playwright
 
-COPY app ./app
-COPY scripts ./scripts
-COPY alembic ./alembic
-COPY alembic.ini ./alembic.ini
-COPY caption.txt ./caption.txt
+# Непривилегированный пользователь: процессы бота и воркера не должны работать от root.
+RUN useradd --create-home --uid 1001 --shell /usr/sbin/nologin app
+ENV HOME=/home/app \
+    DENO_DIR=/home/app/.cache/deno
 
-RUN mkdir -p /app/downloads /app/cookies /app/logs
+COPY --chown=app:app app ./app
+COPY --chown=app:app scripts ./scripts
+COPY --chown=app:app alembic ./alembic
+COPY --chown=app:app alembic.ini ./alembic.ini
+COPY --chown=app:app caption.txt ./caption.txt
+
+RUN mkdir -p /app/downloads /app/cookies /app/logs /app/run \
+    && chown -R app:app /app /home/app
+
+USER app
 
 CMD ["python", "-m", "app.bot.main"]

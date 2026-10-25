@@ -10,3 +10,4 @@ nginx/certs/*
 nginx/www/*
 vpn/*.ovpn
 docs/
+run/

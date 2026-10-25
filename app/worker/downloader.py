@@ -17,6 +17,7 @@ from yt_dlp.utils import DownloadError
 
 from app.core.config import Settings
 from app.utils.codecs import RISKY_TELEGRAM_VIDEO_CODECS
+from app.utils.hwenc import bitrate_video_args, nvenc_available, quality_video_args
 from app.utils.http_headers import MODERN_CHROME_HEADERS
 from app.utils.platforms import PLATFORM_COOKIE_SETTING, detect_platform
 from app.utils.quality import format_selector, normalize_quality
@@ -301,6 +302,25 @@ def _run_ffmpeg(command: list[str], *, timeout: int, cwd: str | None = None) -> 
     return subprocess.run(command, capture_output=True, text=True, timeout=timeout, cwd=cwd)
 
 
+def _run_encode(
+    build_command: Callable[[bool], list[str]],
+    runner: Callable[[list[str]], subprocess.CompletedProcess],
+    output_path: Path,
+) -> subprocess.CompletedProcess:
+    """Запускает кодирование на GPU (NVENC), при сбое повторяет на CPU (libx264).
+
+    build_command(gpu) строит команду ffmpeg под выбранный кодировщик, runner её исполняет.
+    Таймаут GPU-попытки не повторяется на CPU: CPU заведомо медленнее.
+    """
+    if nvenc_available():
+        result = runner(build_command(True))
+        if result.returncode == 0 and output_path.exists():
+            return result
+        logger.warning("NVENC-кодирование не удалось, повтор на CPU: %s", (result.stderr or "").strip()[-300:])
+        output_path.unlink(missing_ok=True)
+    return runner(build_command(False))
+
+
 _FFMPEG_OUT_TIME_MS_RE = re.compile(r"^out_time_ms=(-?\d+)$")
 
 
@@ -374,15 +394,20 @@ def _burn_subtitles(video_path: Path, subtitle_path: Path) -> Path | None:
             "'FontName=Arial,FontSize=22,PrimaryColour=&H00FFFFFF&,"
             "OutlineColour=&H00000000&,BorderStyle=1,Outline=2,Shadow=1,MarginV=28'"
         )
-        command = [
-            "ffmpeg", "-y", "-nostdin", "-hide_banner", "-loglevel", "warning",
-            "-i", video_path.name, "-vf", subtitle_filter,
-            "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
-            "-c:a", "aac", "-b:a", "160k", "-movflags", "+faststart",
-            output_path.name,
-        ]
+        def build_command(gpu: bool) -> list[str]:
+            return [
+                "ffmpeg", "-y", "-nostdin", "-hide_banner", "-loglevel", "warning",
+                "-i", video_path.name, "-vf", subtitle_filter,
+                *quality_video_args(gpu=gpu, cpu_preset="veryfast"),
+                "-c:a", "aac", "-b:a", "160k", "-movflags", "+faststart",
+                output_path.name,
+            ]
         try:
-            result = _run_ffmpeg(command, timeout=SUBTITLE_TIMEOUT, cwd=str(work_dir))
+            result = _run_encode(
+                build_command,
+                lambda cmd: _run_ffmpeg(cmd, timeout=SUBTITLE_TIMEOUT, cwd=str(work_dir)),
+                output_path,
+            )
         except (OSError, subprocess.TimeoutExpired) as exc:
             logger.warning("Subtitle burn-in failed for %s: %s", video_path, exc)
             return None
@@ -509,33 +534,38 @@ def _transcode_to_h264(
     """
     output_path = file_path.with_name(f"{file_path.stem}.h264{file_path.suffix}")
     output_path.unlink(missing_ok=True)
-    command = [
-        "ffmpeg", "-y", "-nostdin", "-hide_banner", "-loglevel", "warning",
-        "-i", str(file_path),
-        # Without an explicit -map, ffmpeg's automatic stream selection can
-        # pick an embedded cover-art/thumbnail stream (a single-frame
-        # "video" track many social-media MP4s carry) instead of the real
-        # video track, re-encoding *that* — the file plays audio fine but
-        # renders as a static image, the exact symptom this function exists
-        # to fix. -map 0:v:0 forces the first real video stream instead.
-        "-map", "0:v:0", "-map", "0:a?",
-        # ultrafast over veryfast: this is a one-shot Telegram-compatibility
-        # fallback, not the primary quality path, and encode speed matters
-        # more than bitrate efficiency here — a slow encode risks timing out
-        # on long/high-resolution sources.
-        "-c:v", "libx264", "-preset", "ultrafast", "-crf", "20", "-pix_fmt", "yuv420p",
-        "-c:a", "aac", "-b:a", "160k",
-        "-movflags", "+faststart",
-        str(output_path),
-    ]
+    def build_command(gpu: bool) -> list[str]:
+        return [
+            "ffmpeg", "-y", "-nostdin", "-hide_banner", "-loglevel", "warning",
+            "-i", str(file_path),
+            # Without an explicit -map, ffmpeg's automatic stream selection can
+            # pick an embedded cover-art/thumbnail stream (a single-frame
+            # "video" track many social-media MP4s carry) instead of the real
+            # video track, re-encoding *that* — the file plays audio fine but
+            # renders as a static image, the exact symptom this function exists
+            # to fix. -map 0:v:0 forces the first real video stream instead.
+            "-map", "0:v:0", "-map", "0:a?",
+            # ultrafast over veryfast (CPU): this is a one-shot Telegram-compatibility
+            # fallback, not the primary quality path, and encode speed matters
+            # more than bitrate efficiency here — a slow encode risks timing out
+            # on long/high-resolution sources. На GPU используется NVENC.
+            *quality_video_args(gpu=gpu, cpu_preset="ultrafast", pix_fmt="yuv420p"),
+            "-c:a", "aac", "-b:a", "160k",
+            "-movflags", "+faststart",
+            str(output_path),
+        ]
+
     total_duration = _probe_duration_seconds(file_path) if on_progress is not None else None
-    try:
+
+    def runner(cmd: list[str]) -> subprocess.CompletedProcess:
         if on_progress is not None and total_duration:
-            result = _run_ffmpeg_with_progress(
-                command, timeout=timeout, total_duration=total_duration, on_progress=on_progress
+            return _run_ffmpeg_with_progress(
+                cmd, timeout=timeout, total_duration=total_duration, on_progress=on_progress
             )
-        else:
-            result = _run_ffmpeg(command, timeout=timeout)
+        return _run_ffmpeg(cmd, timeout=timeout)
+
+    try:
+        result = _run_encode(build_command, runner, output_path)
     except (OSError, subprocess.TimeoutExpired) as exc:
         logger.warning("H.264 transcode failed for %s: %s", file_path, exc)
         return None
@@ -692,22 +722,22 @@ def compress_to_size_limit(file_path: Path, max_mb: int, timeout: int = COMPRESS
         out_path = file_path.with_name(f"{file_path.stem}.compressed_{attempt['width']}{file_path.suffix}")
         out_path.unlink(missing_ok=True)
 
-        command = [
-            "ffmpeg", "-y", "-nostats", "-i", str(file_path),
-            "-map", "0:v:0", "-map", "0:a?",
-            # setsar=1 forces square pixels on the output: some source clips
-            # carry a non-1:1 sample aspect ratio (anamorphic encodes), which
-            # would otherwise leave stale SAR metadata pointing at the
-            # pre-scale pixel grid and make players stretch/squash the frame.
-            "-vf", f"scale='min({attempt['width']},iw)':-2,setsar=1,fps={attempt['fps']}",
-            "-c:v", "libx264", "-preset", "veryfast",
-            "-b:v", f"{video_kbps}k", "-maxrate", f"{video_kbps}k", "-bufsize", f"{video_kbps * 2}k",
-            "-c:a", "aac", "-b:a", f"{audio_kbps}k",
-            "-movflags", "+faststart",
-            str(out_path),
-        ]
+        def build_command(gpu: bool, *, attempt=attempt, video_kbps=video_kbps, audio_kbps=audio_kbps, out_path=out_path) -> list[str]:
+            return [
+                "ffmpeg", "-y", "-nostats", "-i", str(file_path),
+                "-map", "0:v:0", "-map", "0:a?",
+                # setsar=1 forces square pixels on the output: some source clips
+                # carry a non-1:1 sample aspect ratio (anamorphic encodes), which
+                # would otherwise leave stale SAR metadata pointing at the
+                # pre-scale pixel grid and make players stretch/squash the frame.
+                "-vf", f"scale='min({attempt['width']},iw)':-2,setsar=1,fps={attempt['fps']}",
+                *bitrate_video_args(gpu=gpu, cpu_preset="veryfast", video_kbps=video_kbps),
+                "-c:a", "aac", "-b:a", f"{audio_kbps}k",
+                "-movflags", "+faststart",
+                str(out_path),
+            ]
         try:
-            result = _run_ffmpeg(command, timeout=timeout)
+            result = _run_encode(build_command, lambda cmd: _run_ffmpeg(cmd, timeout=timeout), out_path)
         except (OSError, subprocess.TimeoutExpired) as exc:
             logger.warning("Compression attempt failed for %s: %s", file_path, exc)
             continue

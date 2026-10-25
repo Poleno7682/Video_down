@@ -3,6 +3,9 @@ services:
     image: postgres:16-alpine
     container_name: video_bot_postgres
     restart: unless-stopped
+    # Встроенный Postgres отключён: проект работает с БД на хосте (192.168.68.56).
+    # Для локальной БД: docker compose --profile local-db up -d
+    profiles: ["local-db"]
     environment:
       POSTGRES_DB: ${POSTGRES_DB:-video_bot}
       POSTGRES_USER: ${POSTGRES_USER:-video_bot}
@@ -70,10 +73,14 @@ services:
     container_name: video_bot_webhook
     restart: unless-stopped
     env_file: .env
+    # Файлы локального Bot API принадлежат группе 101 (telegram-bot-api) и читаются по группе.
+    group_add:
+      - "101"
     command: python -m app.bot.main
     depends_on:
       postgres:
         condition: service_healthy
+        required: false
       redis:
         condition: service_healthy
     volumes:
@@ -96,19 +103,30 @@ services:
     container_name: video_bot_worker
     restart: unless-stopped
     env_file: .env
+    # Файлы локального Bot API принадлежат группе 101 (telegram-bot-api) и читаются по группе.
+    group_add:
+      - "101"
     # -B embeds Celery Beat in this same worker process to run the periodic
     # stale-downloads cleanup (app.worker.celery_app's beat_schedule) — no
     # separate scheduler container needed for a single-worker deployment.
     command: celery -A app.worker.celery_app:celery_app worker -B --loglevel=INFO --concurrency=1 --prefetch-multiplier=1 --max-tasks-per-child=20 -Q downloads,celery
+    # GPU NVIDIA для аппаратного кодирования (NVENC). Нужен NVIDIA Container Toolkit.
+    # Без GPU код сам откатывается на libx264; принудительно выключить: FFMPEG_HWACCEL=off в .env.
+    gpus: all
+    environment:
+      NVIDIA_DRIVER_CAPABILITIES: compute,video,utility
     depends_on:
       postgres:
         condition: service_healthy
+        required: false
       redis:
         condition: service_healthy
     volumes:
       - ./downloads:/app/downloads
       - ./cookies:/app/cookies:ro
       - ./logs:/app/logs
+      # Обмен с хостом для обновления cookies YouTube (app/services/host_cookie_refresh.py)
+      - ./run:/app/run
       # Подпись под видео: правьте ./caption.txt и перезапуск не нужен —
       # текст перечитывается при каждой отправке.
       - ./caption.txt:/app/caption.txt:ro
@@ -162,3 +180,7 @@ volumes:
 networks:
   internal:
     driver: bridge
+    # Фиксированная подсеть: на неё открыт доступ к Postgres хоста (ufw и pg_hba).
+    ipam:
+      config:
+        - subnet: 172.28.50.0/24
