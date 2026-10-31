@@ -982,6 +982,14 @@ def test_streams_are_decodable_true():
         assert _streams_are_decodable(Path("/tmp/x.mp4")) is True
 
 
+def test_streams_are_decodable_retries_on_invalid_color_space():
+    failed = _completed(returncode=234, stderr="Invalid color space")
+    with patch("app.worker.downloader._run_ffmpeg", return_value=failed), \
+         patch("app.worker.downloader._decodable_with_reset_colorspace", return_value=True) as retry:
+        assert _streams_are_decodable(Path("/tmp/x.mp4")) is True
+    retry.assert_called_once()
+
+
 def test_streams_are_decodable_false_on_nonzero_exit():
     with patch("app.worker.downloader._run_ffmpeg", return_value=_completed(returncode=1, stderr="corrupt")):
         assert _streams_are_decodable(Path("/tmp/x.mp4")) is False

@@ -625,9 +625,43 @@ def _streams_are_decodable(file_path: Path) -> bool:
         logger.warning("ffmpeg decode check failed for %s: %s", file_path, exc)
         return False
     if result.returncode != 0:
-        logger.warning("ffmpeg decode check error for %s: %s", file_path, (result.stderr or "").strip())
+        stderr = (result.stderr or "").strip()
+        if "Invalid color space" in stderr and _decodable_with_reset_colorspace(file_path):
+            return True
+        logger.warning("ffmpeg decode check error for %s: %s", file_path, stderr)
         return False
     return True
+
+
+def _decodable_with_reset_colorspace(file_path: Path) -> bool:
+    """Повторная проверка для файлов с «reserved» цветовым пространством (напр. TikTok).
+
+    ffmpeg не может построить граф фильтров с таким цветовым пространством, хотя
+    сам поток исправен. Переписываем colour-метаданные h264 на «unspecified»
+    через bsf и декодируем результат из пайпа.
+    """
+    remux = [
+        "ffmpeg", "-v", "error", "-i", str(file_path), "-t", str(_DECODE_CHECK_SECONDS),
+        "-c", "copy", "-bsf:v",
+        "h264_metadata=colour_primaries=2:transfer_characteristics=2:matrix_coefficients=2",
+        "-f", "matroska", "-",
+    ]
+    decode = ["ffmpeg", "-v", "error", "-xerror", "-i", "-", "-f", "null", "-"]
+    try:
+        producer = subprocess.Popen(remux, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+        try:
+            result = subprocess.run(
+                decode, stdin=producer.stdout, capture_output=True, text=True, timeout=_FFPROBE_TIMEOUT
+            )
+        finally:
+            if producer.stdout:
+                producer.stdout.close()
+            producer.kill()
+            producer.wait()
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        logger.warning("ffmpeg colorspace-reset decode check failed for %s: %s", file_path, exc)
+        return False
+    return result.returncode == 0
 
 
 def validate_media_file(file_path: Path, quality: str) -> None:
