@@ -19,15 +19,18 @@ from app.utils.telegram_session import build_bot_session
 
 
 _USER_COMMANDS = [
+    BotCommand(command="quality",      description="Выбрать качество видео"),
+]
+
+# Админам остаются все прежние команды в меню
+_ADMIN_COMMANDS = [
     BotCommand(command="start",        description="Справка по боту"),
     BotCommand(command="quality",      description="Выбрать качество видео"),
     BotCommand(command="status",       description="Статус очереди"),
     BotCommand(command="cookies",      description="Личные cookies для скачивания"),
     BotCommand(command="link_google",  description="Привязать Google-аккаунт (YouTube)"),
     BotCommand(command="unlink_google", description="Отвязать Google-аккаунт"),
-]
-
-_ADMIN_COMMANDS = _USER_COMMANDS + [
+] + [
     BotCommand(command="admin",      description="⚙️ Панель администратора"),
     BotCommand(command="broadcast",  description="📢 Рассылка всем пользователям"),
     BotCommand(command="adduser",    description="Добавить доверенного пользователя"),

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from app.bot.filters import AdminFilter
 from aiogram import F, Router
 from aiogram.filters import Command
 from aiogram.types import CallbackQuery, Message
@@ -26,7 +27,7 @@ HELP_TEXT = (
 )
 
 
-@router.message(Command("start", "help"))
+@router.message(Command("start", "help"), AdminFilter())
 async def start(message: Message) -> None:
     await run_in_session(lambda session: UserRepository(session).upsert_user(
         user_id=message.from_user.id,
@@ -67,7 +68,7 @@ async def set_quality(callback: CallbackQuery) -> None:
     await callback.message.edit_text(f"✅ Качество выбрано: {quality_value}")
 
 
-@router.message(Command("status"))
+@router.message(Command("status"), AdminFilter())
 async def status(message: Message) -> None:
     settings = get_settings()
     redis = get_redis()

@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import time
 
+from app.bot.filters import AdminFilter
 from aiogram import Router
 from aiogram.filters import Command
 from aiogram.types import Message
@@ -27,7 +28,7 @@ def _google_linking_key(user_id: int) -> str:
     return f"google_linking:{user_id}"
 
 
-@router.message(Command("link_google"))
+@router.message(Command("link_google"), AdminFilter())
 async def link_google(message: Message) -> None:
     redis = get_redis()
     user_id = message.from_user.id
@@ -130,7 +131,7 @@ async def _poll_google_link(
         clear_ttl(redis, link_key)
 
 
-@router.message(Command("unlink_google"))
+@router.message(Command("unlink_google"), AdminFilter())
 async def unlink_google(message: Message) -> None:
     redis = get_redis()
     user_id = message.from_user.id

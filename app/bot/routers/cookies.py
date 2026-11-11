@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 
+from app.bot.filters import AdminFilter
 from aiogram import Bot, F, Router
 from aiogram.filters import Command
 from aiogram.types import Message
@@ -38,7 +39,7 @@ def _looks_like_netscape(text: str) -> bool:
     return False
 
 
-@router.message(Command("cookies"))
+@router.message(Command("cookies"), AdminFilter())
 async def cookies_info(message: Message) -> None:
     platforms = await run_in_session(
         lambda session: CookieRepository(session).list_user_platforms(message.from_user.id)
@@ -51,7 +52,7 @@ async def cookies_info(message: Message) -> None:
     await message.answer(f"{_COOKIES_HELP}\n\n<b>Статус:</b> {status}")
 
 
-@router.message(Command("delcookies"))
+@router.message(Command("delcookies"), AdminFilter())
 async def delete_cookies(message: Message) -> None:
     parts = (message.text or "").split(maxsplit=1)
     platform = parts[1].strip().lower() if len(parts) > 1 else ""
@@ -73,7 +74,7 @@ async def delete_cookies(message: Message) -> None:
 
 # Must be registered AFTER the broadcast router so an admin in broadcast mode
 # can broadcast documents (broadcast handler catches them first).
-@router.message(F.document)
+@router.message(F.document, AdminFilter())
 async def upload_cookies(message: Message, bot: Bot) -> None:
     document = message.document
     platform = platform_from_filename(document.file_name)
