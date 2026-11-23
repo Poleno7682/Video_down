@@ -297,7 +297,9 @@ class TestReconcileStuckDownloadRequestsTask:
              patch("app.worker.tasks.reconcile_stuck_requests", return_value=2) as mock_reconcile:
             result = reconcile_stuck_download_requests.apply().get()
 
-        mock_reconcile.assert_called_once_with("repo", "sender", 2100)
+        from app.worker.tasks import _VIDEO_TASK_TIME_LIMIT
+
+        mock_reconcile.assert_called_once_with("repo", "sender", _VIDEO_TASK_TIME_LIMIT + 300)
         assert result == 2
 
 
@@ -412,6 +414,17 @@ class TestMaterializeUserCookies:
             if path is not None:
                 path.unlink(missing_ok=True)
 
+    def test_tiktok_falls_back_to_shared_cookies(self):
+        repo = MagicMock()
+        repo.get_user_cookies.side_effect = lambda uid, platform: "shared" if uid == 99 else None
+        path = _materialize_user_cookies(repo, 1, "https://www.tiktok.com/@a/video/1", 0, 99)
+        try:
+            assert path is not None
+            assert path.read_text(encoding="utf-8") == "shared"
+        finally:
+            if path is not None:
+                path.unlink(missing_ok=True)
+
 
 # ---------------------------------------------------------------------------
 # Fixtures / helpers for task tests
@@ -434,6 +447,7 @@ def _make_settings(**kwargs):
     s = MagicMock()
     s.max_active_downloads_per_user = 1
     s.max_download_duration_seconds = 1800
+    s.max_source_size_factor = 2.0
     s.max_file_mb = 50
     s.delete_local_file_after_telegram_cache = True
     s.ytdlp_proxy = ""
@@ -717,6 +731,41 @@ class TestProcessDownloadRequest:
         mock_download.assert_not_called()
         statuses = {c[0][1] for c in repo.update_request_status.call_args_list}
         assert DownloadStatus.failed in statuses
+
+    def test_oversized_estimate_rejected_before_download(self):
+        def fake_live(url, proxies=None, cb=None, format_selector=None, info_out=None):
+            info_out["requested_formats"] = [{"filesize_approx": 10 * 1024**3}]
+            return False
+
+        with _task_ctx() as (repo, _, sender):
+            with patch("app.worker.tasks.is_active_livestream", side_effect=fake_live), \
+                 patch("app.worker.downloader.download_video") as mock_download:
+                process_download_request.apply(args=[1])
+        mock_download.assert_not_called()
+        statuses = {c[0][1] for c in repo.update_request_status.call_args_list}
+        assert DownloadStatus.too_large in statuses
+
+    def test_estimate_within_limit_proceeds(self):
+        def fake_live(url, proxies=None, cb=None, format_selector=None, info_out=None):
+            info_out["requested_formats"] = [{"filesize": 30 * 1024**2}]
+            return False
+
+        with _task_ctx() as (repo, _, sender):
+            with patch("app.worker.tasks.is_active_livestream", side_effect=fake_live):
+                process_download_request.apply(args=[1])
+        statuses = {c[0][1] for c in repo.update_request_status.call_args_list}
+        assert DownloadStatus.too_large not in statuses
+
+    def test_unknown_estimate_proceeds(self):
+        def fake_live(url, proxies=None, cb=None, format_selector=None, info_out=None):
+            info_out["requested_formats"] = [{"format_id": "sd"}]
+            return False
+
+        with _task_ctx() as (repo, _, sender):
+            with patch("app.worker.tasks.is_active_livestream", side_effect=fake_live):
+                process_download_request.apply(args=[1])
+        statuses = {c[0][1] for c in repo.update_request_status.call_args_list}
+        assert DownloadStatus.too_large not in statuses
 
     def test_rezka_url_skips_livestream_precheck(self):
         """rezka is VOD-only and its page URLs aren't yt-dlp-supported, so
@@ -1059,3 +1108,60 @@ class TestTranscodeProgressHook:
             mock_time.time.return_value = 20.0
             hook(50.0)
         assert sender.edit_status.call_count == 2
+
+
+# ---------------------------------------------------------------------------
+# Прерывание загрузки по размеру (progress hook) и обработка DownloadTooLargeError
+# ---------------------------------------------------------------------------
+
+class TestDownloadSizeGuard:
+    def test_hook_raises_when_total_exceeds_limit(self):
+        from app.worker.downloader import DownloadTooLargeError
+        from app.worker.tasks import _build_progress_hook
+
+        hook = _build_progress_hook(MagicMock(), 1, 2, max_source_mb=100)
+        hook({"status": "downloading", "filename": "v.mp4", "downloaded_bytes": 60 * 1024**2})
+        with pytest.raises(DownloadTooLargeError):
+            # видео и аудио качаются отдельными потоками — лимит считается по сумме
+            hook({"status": "downloading", "filename": "a.m4a", "downloaded_bytes": 50 * 1024**2})
+
+    def test_hook_does_not_raise_within_limit(self):
+        from app.worker.tasks import _build_progress_hook
+
+        hook = _build_progress_hook(MagicMock(), 1, 2, max_source_mb=100)
+        hook({"status": "downloading", "filename": "v.mp4", "downloaded_bytes": 99 * 1024**2})
+
+    def test_hook_without_limit_never_raises(self):
+        from app.worker.tasks import _build_progress_hook
+
+        hook = _build_progress_hook(MagicMock(), 1, 2, max_source_mb=None)
+        hook({"status": "downloading", "filename": "v.mp4", "downloaded_bytes": 10 * 1024**4})
+
+    def test_hook_counts_one_file_once_not_per_call(self):
+        from app.worker.tasks import _build_progress_hook
+
+        hook = _build_progress_hook(MagicMock(), 1, 2, max_source_mb=100)
+        for done in (10, 20, 30, 40, 50, 60, 70, 80):  # один файл, растущий прогресс
+            hook({"status": "downloading", "filename": "v.mp4", "downloaded_bytes": done * 1024**2})
+
+    def test_failure_handler_marks_too_large_and_notifies(self):
+        from app.worker.downloader import DownloadTooLargeError
+
+        sender, repo = MagicMock(), MagicMock()
+        _handle_task_failure(sender, repo, 7, 100, 200, 1, DownloadTooLargeError(4000, 3800), "https://x.test/v")
+        assert repo.update_request_status.call_args[0][1] == DownloadStatus.too_large
+        assert "слишком большое" in sender.edit_status.call_args[0][2]
+
+
+class TestResolveProxiesTikTok:
+    _URL = "https://vt.tiktok.com/ZSs8vYcuM/"
+
+    def test_uses_local_vpn_for_tiktok(self):
+        repo = MagicMock()
+        settings = _make_settings(rezka_vpn_proxy_url="http://vpn:8888", ytdlp_proxy="socks5h://env:1080")
+        assert _resolve_proxies(repo, settings, self._URL) == ["http://vpn:8888"]
+        repo.get_enabled_proxy_urls.assert_not_called()
+
+    def test_empty_when_vpn_not_configured(self):
+        settings = _make_settings(rezka_vpn_proxy_url="")
+        assert _resolve_proxies(MagicMock(), settings, self._URL) == []

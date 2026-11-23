@@ -88,6 +88,10 @@ class Settings(BaseSettings):
     # cleanup missed (a worker OOM-killed mid-task, a code path that doesn't
     # clean up on failure, etc.) — see app/services/cleanup.py.
     stale_file_max_age_hours: float = Field(default=24, alias="STALE_FILE_MAX_AGE_HOURS")
+    # Отклонять загрузку ДО скачивания, если оценочный размер (по данным yt-dlp) больше
+    # max_file_mb * этот коэффициент: файл до такого размера ещё можно сжать под лимит,
+    # а дальше сжатие бессмысленно долго. 0 — не проверять заранее (размер проверится после загрузки).
+    max_source_size_factor: float = Field(default=2.0, alias="MAX_SOURCE_SIZE_FACTOR")
     # Grace period added on top of max_download_duration_seconds before a
     # request still sitting in queued/downloading/sending is considered
     # abandoned rather than just running long — see reconcile_stuck_requests
@@ -137,6 +141,8 @@ class Settings(BaseSettings):
     # Telegram user_id, чьи cookies YouTube (обновляются Selenium/Chrome на хосте, см.
     # scripts/yt_cookies.py) используются как общие для всех, у кого нет своих. 0 — отключено.
     youtube_shared_cookies_user_id: int = Field(default=0, alias="YT_SHARED_COOKIES_USER_ID")
+    # То же для TikTok (scripts/yt_cookies.py --platform tiktok). 0 — отключено.
+    tiktok_shared_cookies_user_id: int = Field(default=0, alias="TT_SHARED_COOKIES_USER_ID")
 
     app_host: str = Field(default="0.0.0.0", alias="APP_HOST")
     app_port: int = Field(default=8080, alias="APP_PORT")

@@ -1,0 +1,9 @@
+[Unit]
+Description=Запрос воркера на обновление cookies TikTok
+
+[Path]
+PathExists=/srv/projects/Video_down/run/refresh-cookies-tiktok.request
+Unit=tt-cookies-refresh.service
+
+[Install]
+WantedBy=multi-user.target

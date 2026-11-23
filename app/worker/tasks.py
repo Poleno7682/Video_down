@@ -22,15 +22,18 @@ from app.services.runtime_config import get_limit
 from app.utils.caption import get_caption
 from app.utils.platforms import FACEBOOK, INSTAGRAM, TIKTOK, YOUTUBE, detect_platform
 from app.utils.proxy_check import ANTI_BOT_MARKERS
+from app.utils.quality import format_selector
 from app.utils.rezka import RezkaResolveError
 from app.utils.site_behavior import site_behavior
 from app.worker.celery_app import celery_app
 from app.worker.downloader import (
     COMPRESSION_TIMEOUT,
     TRANSCODE_TIMEOUT,
+    DownloadTooLargeError,
     MediaValidationError,
     compress_to_size_limit,
     cookie_file_for_url,
+    estimate_download_size_bytes,
     is_active_livestream,
     prepare_media_for_telegram,
     probe_video_dimensions,
@@ -298,6 +301,7 @@ class _MediaUploadRepo(_RequestStatusRepo, Protocol):
 
 def _materialize_user_cookies(
     repo: _UserCookiesRepo, user_id: int, url: str, shared_youtube_user_id: int = 0,
+    shared_tiktok_user_id: int = 0,
 ) -> Path | None:
     """Write the user's stored cookies for the URL's platform to a temp file.
 
@@ -308,9 +312,10 @@ def _materialize_user_cookies(
     if not platform:
         return None
     cookies_text = repo.get_user_cookies(user_id, platform)
-    if not cookies_text and platform == "youtube" and shared_youtube_user_id:
-        # Общие cookies YouTube (обновляются Selenium/Chrome на хосте) — для всех без своих.
-        cookies_text = repo.get_user_cookies(shared_youtube_user_id, platform)
+    shared_id = {"youtube": shared_youtube_user_id, "tiktok": shared_tiktok_user_id}.get(platform, 0)
+    if not cookies_text and shared_id:
+        # Общие cookies (обновляются Chrome на хосте) — для всех без своих.
+        cookies_text = repo.get_user_cookies(shared_id, platform)
     if not cookies_text:
         return None
     fd, name = tempfile.mkstemp(prefix=f"cookies_{user_id}_{platform}_", suffix=".txt")
@@ -350,6 +355,11 @@ def _is_youtube_sign_in_error(exc: Exception, url: str) -> bool:
     return detect_platform(url) == YOUTUBE and _text_matches_markers(str(exc).lower(), ANTI_BOT_MARKERS)
 
 
+def _is_tiktok_cookie_error(exc: Exception, url: str) -> bool:
+    """TikTok требует cookies (защита от ботов) — стоит обновить общие cookies через браузер хоста."""
+    return detect_platform(url) == TIKTOK and _is_cookie_error(exc)
+
+
 def _download_with_cookie_recovery(
     sender: TelegramSender,
     repo,
@@ -369,11 +379,15 @@ def _download_with_cookie_recovery(
         )
     except Exception as exc:
         redis = args[-1]
-        if not _is_youtube_sign_in_error(exc, normalized_url):
+        if _is_youtube_sign_in_error(exc, normalized_url):
+            platform, label = YOUTUBE, "YouTube"
+        elif _is_tiktok_cookie_error(exc, normalized_url):
+            platform, label = TIKTOK, "TikTok"
+        else:
             raise
-        logger.warning("request=%s: YouTube просит войти — обновляю cookies и повторяю", request_id)
-        sender.edit_status(chat_id, status_message_id, "🔄 YouTube запросил вход — обновляю cookies и пробую снова...")
-        if not request_host_refresh(redis):
+        logger.warning("request=%s: %s просит cookies — обновляю и повторяю", request_id, label)
+        sender.edit_status(chat_id, status_message_id, f"🔄 {label} запросил вход — обновляю cookies и пробую снова...")
+        if not request_host_refresh(redis, platform):
             raise
         return _download_and_prepare_media(
             sender, repo, request_id, user_id, chat_id, status_message_id, normalized_url, *args
@@ -432,7 +446,12 @@ def _handle_task_failure(
     """
     error_msg = f"{type(exc).__name__}: {exc}"
     try:
-        repo.update_request_status(request_id, DownloadStatus.failed, error=error_msg, finished=True)
+        repo.update_request_status(
+            request_id,
+            DownloadStatus.too_large if isinstance(exc, DownloadTooLargeError) else DownloadStatus.failed,
+            error=error_msg,
+            finished=True,
+        )
         if video_id:
             repo.mark_video_failed(video_id, error_msg)
     except Exception:
@@ -442,6 +461,11 @@ def _handle_task_failure(
 
     if cookie_refreshed:
         message = "🔄 YouTube cookies автоматически обновлены. Отправь ссылку ещё раз."
+    elif isinstance(exc, DownloadTooLargeError):
+        message = (
+            f"⚠️ Видео слишком большое: загрузка прервана после {exc.downloaded_mb:.0f} МБ "
+            f"(максимум ~{exc.limit_mb:.0f} МБ).\n\nПопробуй выбрать качество пониже — /quality."
+        )
     elif isinstance(exc, TelegramEntityTooLarge):
         message = _TOO_LARGE_FAILURE
     elif isinstance(exc, MediaValidationError):
@@ -597,14 +621,38 @@ def _try_serve_from_cache(
     return True
 
 
+def _max_source_mb(settings: Settings, redis) -> float | None:
+    """Максимальный размер источника в МБ (max_file_mb * max_source_size_factor); None — без лимита."""
+    factor = settings.max_source_size_factor
+    max_mb = get_limit("max_file_mb", settings, redis)
+    if factor <= 0 or max_mb <= 0:
+        return None
+    return max_mb * factor
+
+
 def _build_progress_hook(
-    sender: TelegramSender, chat_id: int, status_message_id: int | None
+    sender: TelegramSender,
+    chat_id: int,
+    status_message_id: int | None,
+    max_source_mb: float | None = None,
 ) -> Callable[[dict], None]:
-    """Return a yt-dlp progress hook that throttles Telegram status updates to 1 per 5 s."""
+    """Return a yt-dlp progress hook that throttles Telegram status updates to 1 per 5 s.
+
+    Если задан max_source_mb, прерывает загрузку (DownloadTooLargeError), когда суммарно
+    скачанный объём всех потоков (видео+аудио) превысил лимит — оценка размера до загрузки
+    есть не у всех сайтов, а время загрузки ограничено только таймаутом.
+    """
     last_update = 0.0
+    downloaded_by_file: dict[str, int] = {}
 
     def _hook(data: dict) -> None:
         nonlocal last_update
+        if max_source_mb and data.get("status") == "downloading":
+            key = str(data.get("filename") or data.get("tmpfilename") or "")
+            downloaded_by_file[key] = int(data.get("downloaded_bytes") or 0)
+            total_mb = sum(downloaded_by_file.values()) / (1024 * 1024)
+            if total_mb > max_source_mb:
+                raise DownloadTooLargeError(total_mb, max_source_mb)
         now = time.time()
         if now - last_update < 5:
             return
@@ -763,6 +811,10 @@ def _resolve_proxies(repo: _ProxyPoolRepo, settings: Settings, url: str) -> list
     if dedicated_setting:
         proxy_url = getattr(settings, dedicated_setting)
         return [proxy_url] if proxy_url else []
+    if detect_platform(url) == TIKTOK:
+        # TikTok периодически блокирует IP сервера («Your IP address is blocked»):
+        # после неудачной прямой попытки пробуем локальный VPN-контейнер.
+        return [settings.rezka_vpn_proxy_url] if settings.rezka_vpn_proxy_url else []
     if detect_platform(url) != YOUTUBE:
         return []
     db_proxies = repo.get_enabled_proxy_urls()
@@ -793,8 +845,11 @@ def _reject_active_livestream(
     settings: Settings,
     proxies: list[str],
     on_proxy_result: Callable[[str | None, bool], None],
+    quality: str | None = None,
+    redis=None,
 ) -> bool:
-    """Reject the request if the URL points at an ongoing livestream.
+    """Reject the request if the URL points at an ongoing livestream, or (when
+    quality is given) if the estimated download size is far beyond max_file_mb.
 
     Returns True when the request may proceed.
 
@@ -805,17 +860,61 @@ def _reject_active_livestream(
     ~30-90s cycling the whole proxy pool for a foregone conclusion on every
     single rezka request.
     """
-    if site_behavior(normalized_url).skip_livestream_check or not is_active_livestream(
-        normalized_url, proxies, on_proxy_result
+    if site_behavior(normalized_url).skip_livestream_check:
+        return True
+    info: dict = {}
+    selector = format_selector(quality, normalized_url) if quality else None
+    if is_active_livestream(
+        normalized_url, proxies, on_proxy_result, format_selector=selector, info_out=info
     ):
+        repo.update_request_status(
+            request_id,
+            DownloadStatus.failed,
+            error="Active livestream, not a finished recording",
+            finished=True,
+        )
+        sender.edit_status(chat_id, status_message_id, _LIVESTREAM_FAILURE)
+        return False
+    return _check_estimated_size(sender, repo, request_id, chat_id, status_message_id, info, settings, redis)
+
+
+def _check_estimated_size(
+    sender: TelegramSender,
+    repo: _RequestStatusRepo,
+    request_id: int,
+    chat_id: int,
+    status_message_id: int | None,
+    info: dict,
+    settings: Settings,
+    redis,
+) -> bool:
+    """Reject before downloading when yt-dlp's size estimate exceeds max_file_mb * factor.
+
+    Returns True when the request may proceed (including when the size is unknown —
+    it is then enforced after the download by _enforce_size_limit).
+    """
+    max_source_mb = _max_source_mb(settings, redis)
+    max_mb = get_limit("max_file_mb", settings, redis)
+    if not info or max_source_mb is None:
+        return True
+    estimated = estimate_download_size_bytes(info)
+    if estimated is None:
+        return True
+    estimated_mb = estimated / (1024 * 1024)
+    if estimated_mb <= max_source_mb:
         return True
     repo.update_request_status(
         request_id,
-        DownloadStatus.failed,
-        error="Active livestream, not a finished recording",
+        DownloadStatus.too_large,
+        error=f"Estimated size too large before download: {estimated_mb:.0f} MB",
         finished=True,
     )
-    sender.edit_status(chat_id, status_message_id, _LIVESTREAM_FAILURE)
+    sender.edit_status(
+        chat_id,
+        status_message_id,
+        f"⚠️ Видео слишком большое (~{estimated_mb:.0f} МБ при лимите {max_mb} МБ) — не скачиваю.\n\n"
+        "Попробуй выбрать качество пониже — /quality.",
+    )
     return False
 
 
@@ -842,7 +941,8 @@ def _download_and_prepare_media(
     sender.edit_status(chat_id, status_message_id, "⬇️ Скачиваю видео...")
 
     user_cookie_path = _materialize_user_cookies(
-        repo, user_id, normalized_url, settings.youtube_shared_cookies_user_id
+        repo, user_id, normalized_url,
+        settings.youtube_shared_cookies_user_id, settings.tiktok_shared_cookies_user_id,
     )
     cookies_were_used = user_cookie_path is not None or cookie_file_for_url(
         normalized_url, settings
@@ -851,7 +951,7 @@ def _download_and_prepare_media(
         normalized_url,
         quality,
         settings,
-        progress_hook=_build_progress_hook(sender, chat_id, status_message_id),
+        progress_hook=_build_progress_hook(sender, chat_id, status_message_id, _max_source_mb(settings, redis)),
         cookie_file=user_cookie_path,
         embed_subtitles=settings.embed_subtitles,
         debug_context=f"request={request_id} url={normalized_url} quality={quality}",
@@ -962,8 +1062,26 @@ def _upload_and_cache(
 
 _AUTORETRY_EXCEPTIONS = (ConnectionError, OperationalError)
 
+# Жёсткий лимит задачи должен покрывать не только загрузку (max_download_duration_seconds),
+# но и последующее перекодирование в H.264, сжатие под лимит размера и выгрузку в Telegram.
+# Иначе Celery убивает задачу посреди штатной постобработки.
+_VIDEO_UPLOAD_BUFFER_SECONDS = 300
+_VIDEO_TASK_TIME_LIMIT = (
+    get_settings().max_download_duration_seconds
+    + _VIDEO_LOCK_POST_PROCESSING_BUFFER_SECONDS
+    + _VIDEO_UPLOAD_BUFFER_SECONDS
+)
+_VIDEO_TASK_SOFT_TIME_LIMIT = max(60, _VIDEO_TASK_TIME_LIMIT - 60)
 
-@celery_app.task(bind=True, autoretry_for=_AUTORETRY_EXCEPTIONS, retry_backoff=True, retry_kwargs={"max_retries": 3})
+
+@celery_app.task(
+    bind=True,
+    autoretry_for=_AUTORETRY_EXCEPTIONS,
+    retry_backoff=True,
+    retry_kwargs={"max_retries": 3},
+    time_limit=_VIDEO_TASK_TIME_LIMIT,
+    soft_time_limit=_VIDEO_TASK_SOFT_TIME_LIMIT,
+)
 def process_download_request(self, request_id: int) -> None:
     settings = get_settings()
     redis = get_redis()
@@ -1026,7 +1144,7 @@ def process_download_request(self, request_id: int) -> None:
 
         if not _reject_active_livestream(
             sender, repo, request_id, chat_id, status_message_id, normalized_url, settings,
-            proxies, on_proxy_result,
+            proxies, on_proxy_result, quality=quality, redis=redis,
         ):
             return
 
@@ -1216,7 +1334,7 @@ def cleanup_stale_downloads() -> int:
 def reconcile_stuck_download_requests() -> int:
     """Periodic safety-net for DB rows a hard-killed worker never got to update — see reconcile_stuck_requests."""
     settings = get_settings()
-    max_age = settings.max_download_duration_seconds + settings.stuck_request_reconcile_buffer_seconds
+    max_age = _VIDEO_TASK_TIME_LIMIT + settings.stuck_request_reconcile_buffer_seconds
     return reconcile_stuck_requests(ScopedRepository(), get_default_sender(), max_age)
 
 

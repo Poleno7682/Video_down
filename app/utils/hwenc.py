@@ -37,12 +37,20 @@ def nvenc_available() -> bool:
     return True
 
 
-def quality_video_args(*, gpu: bool, cpu_preset: str, crf: int = 20, pix_fmt: str | None = None) -> list[str]:
-    """Кодирование с постоянным качеством (аналог -crf)."""
+def quality_video_args(
+    *, gpu: bool, cpu_preset: str, crf: int = 20, pix_fmt: str | None = None, max_kbps: int | None = None
+) -> list[str]:
+    """Кодирование с постоянным качеством (аналог -crf).
+
+    max_kbps ограничивает пиковый битрейт (-maxrate/-bufsize): без него режим постоянного
+    качества на низкобитрейтном источнике раздувает файл в разы больше исходного.
+    """
     if gpu:
         args = ["-c:v", "h264_nvenc", "-preset", "p4", "-rc", "vbr", "-cq", str(crf + 4), "-b:v", "0"]
     else:
         args = ["-c:v", "libx264", "-preset", cpu_preset, "-crf", str(crf)]
+    if max_kbps:
+        args += ["-maxrate", f"{max_kbps}k", "-bufsize", f"{max_kbps * 2}k"]
     return args + (["-pix_fmt", pix_fmt] if pix_fmt else [])
 
 

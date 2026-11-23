@@ -1277,6 +1277,7 @@ def test_transcode_to_h264_uses_progress_runner_when_on_progress_given():
 
         hook = MagicMock()
         with patch("app.worker.downloader._probe_duration_seconds", return_value=12.0), \
+             patch("app.worker.downloader._probe_bitrate_kbps", return_value=None), \
              patch("app.worker.downloader._run_ffmpeg_with_progress", side_effect=fake_run_with_progress) as mock_run, \
              patch("app.worker.downloader._run_ffmpeg") as mock_run_plain:
             result = _transcode_to_h264(src, on_progress=hook)
@@ -1300,6 +1301,7 @@ def test_transcode_to_h264_falls_back_to_plain_runner_without_duration():
             return _completed(returncode=0)
 
         with patch("app.worker.downloader._probe_duration_seconds", return_value=None), \
+             patch("app.worker.downloader._probe_bitrate_kbps", return_value=None), \
              patch("app.worker.downloader._run_ffmpeg", side_effect=fake_run) as mock_run_plain, \
              patch("app.worker.downloader._run_ffmpeg_with_progress") as mock_run_progress:
             result = _transcode_to_h264(src, on_progress=MagicMock())
@@ -1650,3 +1652,163 @@ class TestPrepareMediaForTelegram:
             prepare_media_for_telegram("https://youtube.com/watch?v=x", "720p", settings)
 
         fake_file.unlink.assert_not_called()
+
+
+def test_ensure_compatible_skips_transcode_for_very_long_source():
+    from app.worker.downloader import MAX_TRANSCODE_SOURCE_SECONDS, ensure_telegram_compatible_video
+
+    src = Path("/tmp/long.mp4")
+    with patch("app.worker.downloader._probe_duration_seconds", return_value=MAX_TRANSCODE_SOURCE_SECONDS + 1), \
+         patch("app.worker.downloader._transcode_to_h264") as mock_transcode:
+        result = ensure_telegram_compatible_video(src, {"video": "vp9"})
+    assert result == src
+    mock_transcode.assert_not_called()
+
+
+def test_transcode_caps_bitrate_relative_to_source():
+    with tempfile.TemporaryDirectory() as tmp:
+        src = Path(tmp) / "video.mp4"
+        src.write_bytes(b"x")
+        seen = {}
+
+        def fake_run(command, *, timeout, cwd=None):
+            if command[0] == "ffprobe":
+                return _completed(stdout='{"format": {"bit_rate": "310000"}}')
+            seen["cmd"] = command
+            Path(command[-1]).write_bytes(b"transcoded")
+            return _completed(returncode=0)
+
+        with patch("app.worker.downloader._run_ffmpeg", side_effect=fake_run):
+            _transcode_to_h264(src)
+        cmd = seen["cmd"]
+        assert cmd[cmd.index("-maxrate") + 1] == "800k"
+        assert cmd[cmd.index("-bufsize") + 1] == "1600k"
+
+
+def test_estimate_download_size_sums_requested_formats():
+    from app.worker.downloader import estimate_download_size_bytes
+
+    info = {"requested_formats": [{"filesize": 100}, {"filesize_approx": 50}, {"format_id": "x"}]}
+    assert estimate_download_size_bytes(info) == 150
+
+
+def test_estimate_download_size_unknown_returns_none():
+    from app.worker.downloader import estimate_download_size_bytes
+
+    assert estimate_download_size_bytes({"requested_formats": [{"format_id": "sd"}]}) is None
+    assert estimate_download_size_bytes({}) is None
+
+
+def test_estimate_download_size_falls_back_to_info_itself():
+    from app.worker.downloader import estimate_download_size_bytes
+
+    assert estimate_download_size_bytes({"filesize_approx": 77}) == 77
+
+
+def test_try_with_proxies_does_not_fall_through_on_download_too_large():
+    from app.worker.downloader import DownloadTooLargeError, _try_with_proxies
+
+    attempt = MagicMock(side_effect=DownloadTooLargeError(5000, 3800))
+    on_result = MagicMock()
+    with pytest.raises(DownloadTooLargeError):
+        _try_with_proxies("https://x.test/v", "Download", ["socks5h://p1:1", "socks5h://p2:1"], attempt, on_result)
+    attempt.assert_called_once()  # без перебора прокси
+    on_result.assert_not_called()  # и без пометки прокси как сломанного
+
+
+def test_ytdlp_propagates_hook_exception_and_stops_download():
+    """Интеграция с настоящим yt-dlp: исключение из progress-хука должно останавливать
+    загрузку и доходить до вызывающего кода неизменным (а не теряться/оборачиваться)."""
+    import http.server
+    import threading
+
+    from yt_dlp import YoutubeDL
+
+    from app.worker.downloader import DownloadTooLargeError
+
+    payload = b"\0" * (8 * 1024 * 1024)
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):  # noqa: N802
+            self.send_response(200)
+            self.send_header("Content-Type", "video/mp4")
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            try:
+                for i in range(0, len(payload), 65536):
+                    self.wfile.write(payload[i:i + 65536])
+            except OSError:
+                pass
+
+        def log_message(self, *a):
+            pass
+
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+
+    def hook(data):
+        if data.get("status") == "downloading" and (data.get("downloaded_bytes") or 0) > 1024 * 1024:
+            raise DownloadTooLargeError(2, 1)
+
+    with tempfile.TemporaryDirectory() as tmp:
+        opts = {"quiet": True, "no_warnings": True, "outtmpl": f"{tmp}/v.%(ext)s", "progress_hooks": [hook]}
+        try:
+            with pytest.raises(DownloadTooLargeError):
+                with YoutubeDL(opts) as ydl:
+                    ydl.extract_info(f"http://127.0.0.1:{server.server_port}/video.mp4", download=True)
+        finally:
+            server.shutdown()
+
+
+def _fake_ydl(calls, fail_without_cookies, fail_with_cookies):
+    from yt_dlp.utils import DownloadError
+
+    class FakeYDL:
+        def __init__(self, opts):
+            self.opts = opts
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def extract_info(self, url, download=True):
+            calls.append("cookies" if "cookiefile" in self.opts else "anon")
+            bad = fail_with_cookies if "cookiefile" in self.opts else fail_without_cookies
+            if bad:
+                raise DownloadError("ERROR: [TikTok] 1: boom")
+            return {"id": "1"}
+
+    return FakeYDL
+
+
+def test_tiktok_tries_without_cookies_first(monkeypatch):
+    from app.worker import downloader
+
+    calls = []
+    monkeypatch.setattr(downloader, "YoutubeDL", _fake_ydl(calls, False, True))
+    assert downloader._extract_with_retry("https://vt.tiktok.com/x/", {"cookiefile": "/c.txt"}) == {"id": "1"}
+    assert calls == ["anon"]
+
+
+def test_tiktok_falls_back_to_cookies(monkeypatch):
+    from app.worker import downloader
+
+    calls = []
+    monkeypatch.setattr(downloader, "YoutubeDL", _fake_ydl(calls, True, False))
+    assert downloader._extract_with_retry("https://vt.tiktok.com/x/", {"cookiefile": "/c.txt"}) == {"id": "1"}
+    assert calls == ["anon", "cookies"]
+
+
+def test_tiktok_raises_when_both_fail(monkeypatch):
+    import pytest
+    from yt_dlp.utils import DownloadError
+
+    from app.worker import downloader
+
+    calls = []
+    monkeypatch.setattr(downloader, "YoutubeDL", _fake_ydl(calls, True, True))
+    with pytest.raises(DownloadError):
+        downloader._extract_with_retry("https://vt.tiktok.com/x/", {"cookiefile": "/c.txt"})
+    assert calls == ["anon", "cookies"]

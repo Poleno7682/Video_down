@@ -19,10 +19,11 @@ from app.core.config import Settings
 from app.utils.codecs import RISKY_TELEGRAM_VIDEO_CODECS
 from app.utils.hwenc import bitrate_video_args, nvenc_available, quality_video_args
 from app.utils.http_headers import MODERN_CHROME_HEADERS
-from app.utils.platforms import PLATFORM_COOKIE_SETTING, detect_platform
+from app.utils.platforms import PLATFORM_COOKIE_SETTING, TIKTOK, detect_platform
 from app.utils.quality import format_selector, normalize_quality
 from app.utils.rezka import RezkaResolveError, resolve_rezka_stream
 from app.utils.site_behavior import site_behavior
+from app.utils.tiktok_photo import download_photo_post, find_photo_url
 
 logger = logging.getLogger(__name__)
 
@@ -36,6 +37,12 @@ COMPRESSION_TIMEOUT = 600
 # a longer wait is no longer indistinguishable from a hang.
 TRANSCODE_TIMEOUT = 1800
 SUBTITLE_TIMEOUT = 600
+# Источники длиннее не перекодируются в H.264 (часы кодирования занимают воркер и диск ради
+# совместимости с плеером) — отдаются как есть. Основной барьер — проверка длительности до загрузки.
+MAX_TRANSCODE_SOURCE_SECONDS = 3600
+# Потолок битрейта перекодирования относительно битрейта источника и абсолютный минимум.
+_TRANSCODE_MAXRATE_FACTOR = 1.5
+_TRANSCODE_MIN_MAXRATE_KBPS = 800
 _SUBTITLE_LANGS = ["ru", "en"]
 _SUBTITLE_EXTENSIONS = {".srt", ".vtt", ".ass"}
 
@@ -75,6 +82,18 @@ _COMPRESSION_ATTEMPTS = [
     {"width": 640, "fps": 20, "audio_kbps": 64, "safety": 0.85},
     {"width": 426, "fps": 15, "audio_kbps": 32, "safety": 0.78},
 ]
+
+
+class DownloadTooLargeError(RuntimeError):
+    """Загрузка прервана: скачанный объём превысил допустимый размер источника.
+
+    Бросается из progress-хука yt-dlp. Не повторяется на других прокси (_try_with_proxies).
+    """
+
+    def __init__(self, downloaded_mb: float, limit_mb: float) -> None:
+        super().__init__(f"Download exceeded {limit_mb:.0f} MB (already {downloaded_mb:.0f} MB)")
+        self.downloaded_mb = downloaded_mb
+        self.limit_mb = limit_mb
 
 
 class MediaValidationError(RuntimeError):
@@ -176,6 +195,20 @@ def _is_timeout_retry_error(exc: Exception) -> bool:
 
 
 def _extract_with_retry(url: str, opts: dict) -> dict:
+    """Для TikTok сначала пробуем без cookies (устаревшие cookies дают ложный
+    «IP address is blocked»), и только при неудаче — с cookies. Если не вышло и
+    так, наружу уходит ошибка второй попытки."""
+    if opts.get("cookiefile") and detect_platform(url) == TIKTOK:
+        try:
+            return _extract_once_with_retry(url, {k: v for k, v in opts.items() if k != "cookiefile"})
+        except DownloadTooLargeError:
+            raise
+        except DownloadError as exc:
+            logger.info("TikTok download without cookies failed for %s (%s), retrying with cookies", url, exc)
+    return _extract_once_with_retry(url, opts)
+
+
+def _extract_once_with_retry(url: str, opts: dict) -> dict:
     """Download via yt-dlp, retrying once with browser-like headers on 403/410/429/geo
     errors, or once with a longer socket timeout on a read/connection timeout."""
     try:
@@ -221,6 +254,8 @@ def _try_with_proxies(
     for idx, proxy in enumerate(proxy_list):
         try:
             result = attempt(proxy, idx, len(proxy_list))
+        except DownloadTooLargeError:
+            raise  # не проблема прокси: другой прокси скачает тот же объём
         except Exception as exc:
             last_exc = exc
             if on_proxy_result:
@@ -240,12 +275,30 @@ def _try_with_proxies(
     raise last_exc
 
 
+def estimate_download_size_bytes(info: dict) -> int | None:
+    """Оценка размера загрузки по выбранным форматам (filesize или filesize_approx).
+
+    None — если ни у одного формата размер не известен (тогда размер проверится после загрузки).
+    """
+    formats = info.get("requested_formats") or [info]
+    sizes = [f.get("filesize") or f.get("filesize_approx") for f in formats]
+    known = [size for size in sizes if isinstance(size, (int, float)) and size > 0]
+    return int(sum(known)) if known else None
+
+
 def is_active_livestream(
     url: str,
     proxies: list[str] | None = None,
     on_proxy_result: Callable[[str | None, bool], None] | None = None,
+    format_selector: str | None = None,
+    info_out: dict | None = None,
 ) -> bool:
     """Pre-check whether the URL points to an unfinished live stream.
+
+    format_selector — тот же селектор формата, что будет у реальной загрузки: тогда в
+    info_out попадают requested_formats именно того видео, что будет скачано, и по ним
+    можно оценить размер (estimate_download_size_bytes) до загрузки. info_out, если
+    передан, дополняется ответом extract_info.
 
     Downloading an active stream either runs forever or produces a partial
     file, so we reject it before starting the real download.
@@ -265,6 +318,10 @@ def is_active_livestream(
             "noplaylist": True,
             "logger": _YtdlpLogger(),
         }
+        if format_selector:
+            opts["format"] = format_selector
+            # Несовпадение селектора не должно ломать пред-проверку: размер просто останется неизвестным.
+            opts["ignore_no_formats_error"] = True
         if proxy:
             opts["proxy"] = proxy
         with YoutubeDL(opts) as ydl:
@@ -276,6 +333,8 @@ def is_active_livestream(
         return False
     if not isinstance(info, dict):
         return False
+    if info_out is not None:
+        info_out.update(info)
     return info.get("is_live") is True or str(info.get("live_status") or "").lower() == "is_live"
 
 
@@ -517,6 +576,16 @@ def log_media_debug_info(file_path: Path, *, context: str = "") -> dict[str, str
     return codecs
 
 
+def _probe_bitrate_kbps(file_path: Path) -> int | None:
+    """Общий битрейт файла в кбит/с (None, если определить не удалось)."""
+    data = _ffprobe_json(file_path, ["-show_entries", "format=bit_rate"], log_label="bitrate")
+    try:
+        bps = int(((data or {}).get("format") or {}).get("bit_rate"))
+    except (TypeError, ValueError):
+        return None
+    return bps // 1000 if bps > 0 else None
+
+
 def _transcode_to_h264(
     file_path: Path,
     timeout: int = TRANSCODE_TIMEOUT,
@@ -534,6 +603,10 @@ def _transcode_to_h264(
     """
     output_path = file_path.with_name(f"{file_path.stem}.h264{file_path.suffix}")
     output_path.unlink(missing_ok=True)
+    source_kbps = _probe_bitrate_kbps(file_path)
+    max_kbps = (
+        max(_TRANSCODE_MIN_MAXRATE_KBPS, int(source_kbps * _TRANSCODE_MAXRATE_FACTOR)) if source_kbps else None
+    )
     def build_command(gpu: bool) -> list[str]:
         return [
             "ffmpeg", "-y", "-nostdin", "-hide_banner", "-loglevel", "warning",
@@ -549,7 +622,7 @@ def _transcode_to_h264(
             # fallback, not the primary quality path, and encode speed matters
             # more than bitrate efficiency here — a slow encode risks timing out
             # on long/high-resolution sources. На GPU используется NVENC.
-            *quality_video_args(gpu=gpu, cpu_preset="ultrafast", pix_fmt="yuv420p"),
+            *quality_video_args(gpu=gpu, cpu_preset="ultrafast", pix_fmt="yuv420p", max_kbps=max_kbps),
             "-c:a", "aac", "-b:a", "160k",
             "-movflags", "+faststart",
             str(output_path),
@@ -599,6 +672,13 @@ def ensure_telegram_compatible_video(
     """
     vcodec = codecs.get("video")
     if vcodec not in _RISKY_TELEGRAM_VIDEO_CODECS:
+        return file_path
+    duration = _probe_duration_seconds(file_path)
+    if duration is not None and duration > MAX_TRANSCODE_SOURCE_SECONDS:
+        logger.warning(
+            "%s: длительность %.0f с больше лимита перекодирования (%d с) — отправляем vcodec=%s как есть.",
+            file_path.name, duration, MAX_TRANSCODE_SOURCE_SECONDS, vcodec,
+        )
         return file_path
     if on_transcode_start is not None:
         on_transcode_start()
@@ -873,23 +953,35 @@ def download_video(
         def _attempt_download() -> dict:
             return _try_with_proxies(url, "Download", proxies, _attempt, on_proxy_result)
 
+        photo_file: Path | None = None
         try:
             info = _attempt_download()
         except Exception as exc:
-            # Only retry the whole cycle again for a genuine download-stage
-            # failure (a CDN mirror transiently slow/unhealthy) — not when
-            # every proxy's *resolve* itself failed the same way (a
-            # RezkaResolveError cause set above), since that's a structural
-            # problem (wrong content type, translator has no stream, etc.)
-            # a second identical pass — including another expensive antibot
-            # solve per proxy — won't fix.
-            if not behavior.retry_whole_cycle_on_failure or isinstance(exc.__cause__, RezkaResolveError):
-                raise
-            logger.info("Rezka download failed for %s, retrying the full attempt once more: %s", url, exc)
-            info = _attempt_download()
+            # TikTok-пост с фото (/photo/): yt-dlp отвечает «Unsupported URL» —
+            # собираем слайдшоу сами (картинки + музыка).
+            photo_url = find_photo_url(str(exc))
+            if photo_url is None:
+                # Only retry the whole cycle again for a genuine download-stage
+                # failure (a CDN mirror transiently slow/unhealthy) — not when
+                # every proxy's *resolve* itself failed the same way (a
+                # RezkaResolveError cause set above), since that's a structural
+                # problem (wrong content type, translator has no stream, etc.)
+                # a second identical pass — including another expensive antibot
+                # solve per proxy — won't fix.
+                if not behavior.retry_whole_cycle_on_failure or isinstance(exc.__cause__, RezkaResolveError):
+                    raise
+                logger.info("Rezka download failed for %s, retrying the full attempt once more: %s", url, exc)
+                info = _attempt_download()
+            else:
+                logger.info("TikTok photo post detected for %s, building slideshow", url)
+                photo_file, info = _try_with_proxies(
+                    url, "TikTok photo", proxies,
+                    lambda proxy, _i, _n: download_photo_post(photo_url, work_dir, proxy=proxy),
+                    on_proxy_result,
+                )
 
-        file_path = _select_output_file(work_dir, set())
-        if embed_subtitles and quality != "audio":
+        file_path = photo_file or _select_output_file(work_dir, set())
+        if photo_file is None and embed_subtitles and quality != "audio":
             file_path = _embed_subtitles_if_present(file_path, work_dir)
         # Move the finished file one level up so callers can clean it up without
         # knowing about the per-download subdirectory.

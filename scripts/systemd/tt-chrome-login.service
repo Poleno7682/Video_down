@@ -1,0 +1,8 @@
+[Unit]
+Description=Chrome с профилем TikTok на виртуальном экране (вход через noVNC)
+Requires=yt-xvfb.service
+After=yt-xvfb.service
+[Service]
+Environment=DISPLAY=:99
+ExecStart=/usr/bin/google-chrome --user-data-dir=/srv/chrome-tiktok --no-sandbox --no-first-run --no-default-browser-check --window-position=0,0 --window-size=1280,900 "https://www.tiktok.com/login"
+Restart=on-failure

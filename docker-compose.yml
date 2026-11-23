@@ -109,7 +109,9 @@ services:
     # -B embeds Celery Beat in this same worker process to run the periodic
     # stale-downloads cleanup (app.worker.celery_app's beat_schedule) — no
     # separate scheduler container needed for a single-worker deployment.
-    command: celery -A app.worker.celery_app:celery_app worker -B --loglevel=INFO --concurrency=1 --prefetch-multiplier=1 --max-tasks-per-child=20 -Q downloads,celery
+    # concurrency=3: три параллельные задачи, чтобы одна тяжёлая загрузка/перекодирование не
+    # блокировала остальных пользователей (лимит на пользователя — MAX_ACTIVE_DOWNLOADS_PER_USER).
+    command: celery -A app.worker.celery_app:celery_app worker -B --loglevel=INFO --concurrency=3 --prefetch-multiplier=1 --max-tasks-per-child=20 -Q downloads,celery
     # GPU NVIDIA для аппаратного кодирования (NVENC). Нужен NVIDIA Container Toolkit.
     # Без GPU код сам откатывается на libx264; принудительно выключить: FFMPEG_HWACCEL=off в .env.
     gpus: all

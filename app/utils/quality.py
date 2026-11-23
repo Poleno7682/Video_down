@@ -100,5 +100,13 @@ def format_selector(quality: str, url: str | None = None) -> str:
         # through the filter-based selectors above). As a literal format-id
         # fallback this is harmless everywhere else: yt-dlp simply skips it
         # when the id doesn't exist and falls through to the normal chain.
-        return f"hd/{base}"
+        #
+        # "sd" is the same kind of legacy progressive muxed H.264+AAC file at
+        # lower resolution. It is tried right after "hd" and before the
+        # codec-filtered chain because yt-dlp reports no vcodec for it, so the
+        # H.264 filters never match it — and when a video has no "hd", the
+        # chain used to fall through to the DASH VP9 stream instead, which then
+        # needs a slow transcode to H.264 (a 7.5 h video once blocked the
+        # worker for that reason).
+        return f"hd/sd/{base}"
     return base

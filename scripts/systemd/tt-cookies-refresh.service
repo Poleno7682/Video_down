@@ -1,0 +1,11 @@
+[Unit]
+Description=Обновление cookies TikTok из профиля Chrome в БД video_down
+After=postgresql.service network-online.target
+
+[Service]
+Type=oneshot
+EnvironmentFile=/etc/yt-cookies.env
+ExecStart=/srv/yt-cookies-venv/bin/python /srv/projects/Video_down/scripts/yt_cookies.py --platform tiktok refresh
+TimeoutStartSec=180
+Nice=10
+StateDirectory=yt-cookies

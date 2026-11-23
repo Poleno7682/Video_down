@@ -177,9 +177,9 @@ class TestFormatSelectorAgainstRealFormatList:
 class TestFacebookHdFallback:
     def test_prepends_hd_for_facebook_url(self):
         fmt = format_selector("720p", "https://www.facebook.com/share/r/abc123/")
-        assert fmt.startswith("hd/")
-        # Everything after "hd/" must be the normal chain, unmodified.
-        assert fmt[len("hd/"):] == format_selector("720p")
+        assert fmt.startswith("hd/sd/")
+        # Everything after "hd/sd/" must be the normal chain, unmodified.
+        assert fmt[len("hd/sd/"):] == format_selector("720p")
 
     def test_prepends_hd_for_fb_watch_url(self):
         fmt = format_selector("720p", "https://fb.watch/abc123/")
@@ -197,3 +197,23 @@ class TestFacebookHdFallback:
         audio-only request."""
         fmt = format_selector("audio", "https://www.facebook.com/share/r/abc123/")
         assert not fmt.startswith("hd/")
+
+
+def test_facebook_selector_prefers_sd_over_dash_vp9_when_no_hd():
+    """Regression: with no "hd" format, "sd" (muxed H.264, no vcodec metadata)
+    must come before the codec-filtered chain, which would otherwise fall
+    through to a DASH VP9 stream needing a slow transcode."""
+    from yt_dlp import YoutubeDL
+
+    fmt = format_selector("720p", "https://www.facebook.com/share/v/abc/")
+    formats = [
+        {"format_id": "a", "ext": "m4a", "vcodec": "none", "acodec": "mp4a.40.5", "abr": 48},
+        {"format_id": "sd", "ext": "mp4", "vcodec": None, "acodec": None, "height": None},
+        {"format_id": "v", "ext": "mp4", "vcodec": "vp09.00.21.08", "acodec": "none", "height": 360, "width": 640},
+    ]
+    ydl = YoutubeDL({"quiet": True})
+    selector = ydl.build_format_selector(fmt)
+    selected = list(selector({"formats": formats, "has_merged_format": False, "incomplete_formats": False}))
+    assert len(selected) == 1
+    chosen = [f["format_id"] for f in (selected[0].get("requested_formats") or [selected[0]])]
+    assert chosen == ["sd"]
